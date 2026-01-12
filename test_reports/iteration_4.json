@@ -1,0 +1,86 @@
+{
+  "summary": "Completed comprehensive testing of Manufacturing ERP Phase 1 - Production Scheduling Focus. All 10 backend API tests passed (100%). All frontend pages load successfully with correct functionality. Verified: Unified Production Schedule with 600 drums/day constraint, Transport Window with 4 tabs, Import Window with document checklist, Incoterm-based PO routing, Material shortage indicators, and Quotation weight calculations. Found 1 critical bug in quotation total calculation logic.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/quotations",
+        "issue": "Quotation total calculation uses quantity * unit_price instead of weight_mt * unit_price for packaged items. According to Phase 1 spec, for non-Bulk packaging: total should be (net_weight_kg * qty / 1000) * unit_price. Currently calculating: qty * unit_price",
+        "priority": "HIGH",
+        "example": "50 drums x 180kg = 9 MT * $1000 = $9000, but system calculates 50 * $1000 = $50000",
+        "location": "/app/backend/server.py line 577",
+        "fix_needed": "Change line 577 from 'item.quantity * item.unit_price' to use weight_mt calculation"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Quotations modal",
+        "issues": [
+          "Net weight field is conditionally shown (only for non-Bulk packaging) which is correct, but could be more discoverable. Consider showing a placeholder or hint when Bulk is selected."
+        ]
+      }
+    ]
+  },
+  "passed_tests": [
+    "GET /api/production/unified-schedule - Returns schedule with 600 drums/day capacity constraint",
+    "Unified schedule shows material shortage indicators for jobs",
+    "GET /api/procurement/shortages - Returns material shortages for quotations",
+    "PUT /api/purchase-orders/{po_id}/route-by-incoterm - Incoterm routing endpoint exists and works",
+    "GET /api/transport/inward - Transport Inward endpoint (Table 1) working",
+    "GET /api/transport/outward - Transport Outward endpoint (Tables 2 & 3) working",
+    "Transport outward filters by LOCAL and CONTAINER types correctly",
+    "GET /api/imports - Import Window endpoint working with document checklist",
+    "Import records have proper document checklist structure (8 document types)",
+    "Quotation weight_mt calculation correct: (net_weight_kg * qty) / 1000",
+    "Unified Production Schedule page loads with 600 drums/day capacity displayed",
+    "Production Schedule shows summary cards and schedule grid",
+    "Transport Window page loads with all 4 tabs: Inward, Outward-Local, Outward-Container, Dispatch",
+    "All 4 transport tabs are clickable and functional",
+    "Import Window page loads with 5 status tabs: pending, transit, port, cleared, completed",
+    "Quotations page loads with create button and net_weight_kg field (conditional on packaging)",
+    "No JavaScript console errors detected"
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_phase1_features.py",
+    "/app/test_reports/pytest_phase1.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Fix quotation total calculation in /app/backend/server.py line 577 to use weight_mt * unit_price instead of quantity * unit_price for packaged items",
+    "Update quotation creation logic to calculate: total = (net_weight_kg * quantity / 1000) * unit_price when packaging != 'Bulk'",
+    "Consider adding a visual hint in quotation form about net weight field appearing for non-Bulk packaging"
+  ],
+  "critical_code_review_comments": [
+    "✓ Unified Production Schedule correctly implements 600 drums/day capacity constraint with spillover to next day",
+    "✓ Production Schedule shows material shortage indicators (material_ready, shortage_items) for each job",
+    "✓ Transport Window has 4 separate tables: Inward (EXW/Import), Outward-Local, Outward-Container, Dispatch Summary",
+    "✓ Transport filtering by type (LOCAL/CONTAINER) working correctly",
+    "✓ Import Window has document checklist with 8 document types (5 required, 3 optional)",
+    "✓ Import status flow: PENDING_DOCS → IN_TRANSIT → AT_PORT → CLEARED → COMPLETED",
+    "✓ Incoterm-based PO routing implemented: EXW→Transport, DDP→Security/QC, FOB→Shipping, CFR→Import",
+    "✓ Material availability check on quotation approval working (check_material_availability_for_quotation)",
+    "✓ Quotation weight_mt calculation correct: (net_weight_kg * qty) / 1000",
+    "✗ BUG: Quotation total calculation incorrect - uses qty * unit_price instead of weight_mt * unit_price",
+    "✓ Frontend net_weight_kg field conditionally shown for non-Bulk packaging (correct implementation)",
+    "✓ All Phase 1 pages load without errors and have proper data-testid attributes",
+    "✓ No critical JavaScript console errors detected"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase1_features.py - Created comprehensive Phase 1 backend tests"
+  ],
+  "success_rate": {
+    "backend": "100% (10/10 tests passed)",
+    "frontend": "100% (all pages load successfully, all features functional)"
+  },
+  "test_credentials": {
+    "admin": "admin@erp.com / admin123",
+    "finance": "finance@erp.com / finance123"
+  },
+  "seed_data_creation": "No new seed data created. Tests used existing data.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 1 Production Scheduling features tested and working:\n\n1. Unified Production Schedule: Correctly shows 600 drums/day capacity with jobs scheduled across days. Material shortage indicators working. Schedule shows spillover when capacity exceeded.\n\n2. Transport Window: All 4 tabs implemented and functional - Inward (EXW/Import), Outward-Local, Outward-Container, Dispatch Summary. Filtering by transport type working.\n\n3. Import Window: Document checklist flow working with 8 document types. Status progression: PENDING_DOCS → IN_TRANSIT → AT_PORT → CLEARED → COMPLETED.\n\n4. Incoterm Routing: PO routing by incoterm implemented (EXW→Transport, DDP→Security/QC, FOB→Shipping, CFR→Import).\n\n5. Material Availability: Quotation approval triggers material availability check. Shortages detected from product BOMs and packaging BOMs.\n\n6. Quotation Calculation: weight_mt calculation correct, but CRITICAL BUG in total calculation - uses quantity * unit_price instead of weight_mt * unit_price for packaged items.\n\nCRITICAL BUG TO FIX:\n- /app/backend/server.py line 577: Change 'item.quantity * item.unit_price' to calculate based on weight_mt\n- For packaged items: total = (net_weight_kg * quantity / 1000) * unit_price\n- For Bulk items: total = quantity * unit_price (quantity assumed to be in MT)\n\nAll backend tests passing. All frontend pages functional. No JavaScript errors. Ready for main agent to fix the quotation calculation bug."
+}

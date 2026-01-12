@@ -1,0 +1,143 @@
+/* ERP Specific Styles */
+
+.sidebar {
+  background: linear-gradient(180deg, hsl(240 10% 5%) 0%, hsl(240 10% 3.9%) 100%);
+}
+
+.sidebar-item {
+  @apply flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground rounded-sm transition-colors duration-150;
+}
+
+.sidebar-item:hover {
+  @apply bg-muted/50 text-foreground;
+}
+
+.sidebar-item.active {
+  @apply bg-primary/10 text-primary border-l-2 border-primary;
+}
+
+.stat-card {
+  @apply relative overflow-hidden;
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, hsl(var(--primary)), transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.stat-card:hover::before {
+  opacity: 1;
+}
+
+.data-grid {
+  @apply bg-card border border-border rounded-sm overflow-hidden;
+}
+
+.data-grid-header {
+  @apply bg-muted/30 border-b border-border px-4 py-3 flex items-center justify-between;
+}
+
+.module-header {
+  @apply flex items-center justify-between mb-6;
+}
+
+.module-title {
+  @apply text-2xl font-bold tracking-tight;
+}
+
+.module-actions {
+  @apply flex items-center gap-3;
+}
+
+.form-section {
+  @apply bg-card border border-border rounded-sm p-6 mb-6;
+}
+
+.form-section-title {
+  @apply text-lg font-semibold mb-4 pb-2 border-b border-border;
+}
+
+.form-grid {
+  @apply grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4;
+}
+
+.form-field {
+  @apply flex flex-col gap-1.5;
+}
+
+.form-label {
+  @apply text-sm font-medium text-muted-foreground;
+}
+
+.page-container {
+  @apply p-6 lg:p-8 max-w-[1600px] mx-auto;
+}
+
+.kpi-value {
+  @apply text-3xl font-bold font-mono tracking-tight;
+}
+
+.kpi-label {
+  @apply text-xs uppercase tracking-wider text-muted-foreground mt-1;
+}
+
+.empty-state {
+  @apply flex flex-col items-center justify-center py-16 text-center;
+}
+
+.empty-state-icon {
+  @apply w-16 h-16 text-muted-foreground/30 mb-4;
+}
+
+.empty-state-title {
+  @apply text-lg font-medium text-muted-foreground mb-2;
+}
+
+.empty-state-description {
+  @apply text-sm text-muted-foreground/70 max-w-sm;
+}
+
+/* Priority indicators */
+.priority-low {
+  @apply text-zinc-400;
+}
+
+.priority-normal {
+  @apply text-sky-400;
+}
+
+.priority-high {
+  @apply text-amber-400;
+}
+
+.priority-urgent {
+  @apply text-red-400;
+}
+
+/* Module specific colors */
+.module-sales {
+  --module-color: 199 89% 48%;
+}
+
+.module-production {
+  --module-color: 160 84% 39%;
+}
+
+.module-inventory {
+  --module-color: 38 92% 50%;
+}
+
+.module-shipping {
+  --module-color: 271 91% 65%;
+}
+
+.module-finance {
+  --module-color: 142 71% 45%;
+}
