@@ -4643,6 +4643,9 @@ class ProductionScheduleItem(BaseModel):
     available_materials: List[Dict[str, Any]]
     recommended_action: str
     estimated_start: Optional[str] = None
+    schedule_date: Optional[str] = None  # Scheduled production date
+    delivery_date: Optional[str] = None  # Delivery date
+    created_at: Optional[str] = None  # Job order creation date
 
 @api_router.get("/production/schedule")
 async def get_production_schedule(current_user: dict = Depends(get_current_user)):
@@ -4743,7 +4746,10 @@ async def get_production_schedule(current_user: dict = Depends(get_current_user)
             missing_materials=missing_materials,
             missing_raw_materials=missing_raw_materials,  # Add this field
             available_materials=available_materials,
-            recommended_action=recommended_action
+            recommended_action=recommended_action,
+            schedule_date=job.get("schedule_date"),  # Scheduled production date
+            delivery_date=job.get("delivery_date"),  # Delivery date
+            created_at=job.get("created_at")  # Job order creation/booking date
         )
         
         if material_status == "ready":

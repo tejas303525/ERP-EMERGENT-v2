@@ -690,6 +690,7 @@ export default function JobOrdersPage() {
                 <th>Customer</th>
                 <th>Product</th>
                 <th>Quantity</th>
+                <th>MT</th>
                 <th>Priority</th>
                 <th>Status</th>
                 <th>Procurement</th>
@@ -710,6 +711,9 @@ export default function JobOrdersPage() {
                       <span className="text-xs text-muted-foreground">{job.product_sku}</span>
                     </td>
                     <td className="font-mono">{job.quantity} {job.packaging !== 'Bulk' ? job.packaging : ''}</td>
+                    <td className="font-mono text-muted-foreground">
+                      {job.total_weight_mt ? job.total_weight_mt.toFixed(3) : '-'}
+                    </td>
                     <td>
                       <Badge className={getPriorityColor(job.priority)}>
                         {job.priority?.toUpperCase()}

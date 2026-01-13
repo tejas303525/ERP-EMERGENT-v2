@@ -6,7 +6,7 @@ import { Badge } from '../components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { toast } from 'sonner';
-import { getPriorityColor } from '../lib/utils';
+import { getPriorityColor, formatDate } from '../lib/utils';
 import { 
   Factory, 
   CheckCircle, 
@@ -15,8 +15,10 @@ import {
   Play,
   Package,
   ShoppingCart,
-  X
+  X,
+  Search
 } from 'lucide-react';
+import { Input } from '../components/ui/input';
 
 export default function ProductionSchedulePage() {
   const { user } = useAuth();
@@ -24,6 +26,7 @@ export default function ProductionSchedulePage() {
   const [procurementList, setProcurementList] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('ready');
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     loadData();
@@ -56,6 +59,24 @@ export default function ProductionSchedulePage() {
 
   const canManage = ['admin', 'production'].includes(user?.role);
 
+  // Filter jobs based on search query
+  const filterJobs = (jobs) => {
+    if (!searchQuery.trim()) return jobs || [];
+    
+    const query = searchQuery.toLowerCase().trim();
+    return (jobs || []).filter(job => {
+      const jobNumber = job.job_number?.toLowerCase() || '';
+      const productName = job.product_name?.toLowerCase() || '';
+      const spaNumber = job.spa_number?.toLowerCase() || '';
+      const customerName = job.customer_name?.toLowerCase() || '';
+      
+      return jobNumber.includes(query) ||
+             productName.includes(query) ||
+             spaNumber.includes(query) ||
+             customerName.includes(query);
+    });
+  };
+
   const JobCard = ({ job, showAction = true }) => (
     <Card className="card-hover" data-testid={`job-card-${job.job_number}`}>
       <CardContent className="p-4">
@@ -68,6 +89,11 @@ export default function ProductionSchedulePage() {
               </span>
             </div>
             <p className="text-sm text-muted-foreground">{job.spa_number}</p>
+            {(job.schedule_date || job.created_at) && (
+              <p className="text-xs text-muted-foreground mt-1">
+                {job.schedule_date ? `Scheduled: ${formatDate(job.schedule_date)}` : `Booked: ${formatDate(job.created_at)}`}
+              </p>
+            )}
           </div>
           <Badge className={
             job.material_status === 'ready' ? 'status-approved' :
@@ -249,6 +275,20 @@ export default function ProductionSchedulePage() {
         </Card>
       </div>
 
+      {/* Search Filter */}
+      <div className="mb-4">
+        <div className="relative max-w-md">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Input
+            type="text"
+            placeholder="Search by job number, product, SPA, or customer..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="pl-10"
+          />
+        </div>
+      </div>
+
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="ready" data-testid="tab-ready">
@@ -274,65 +314,89 @@ export default function ProductionSchedulePage() {
         </TabsList>
 
         <TabsContent value="ready">
-          {schedule?.ready_jobs?.length === 0 ? (
-            <div className="empty-state">
-              <CheckCircle className="empty-state-icon" />
-              <p className="empty-state-title">No jobs ready for production</p>
-              <p className="empty-state-description">Jobs will appear here when all materials are available</p>
-            </div>
-          ) : (
-            <div className="grid md:grid-cols-2 gap-4">
-              {schedule?.ready_jobs?.map(job => (
-                <JobCard key={job.job_id} job={job} />
-              ))}
-            </div>
-          )}
+          {(() => {
+            const filteredJobs = filterJobs(schedule?.ready_jobs);
+            return filteredJobs.length === 0 ? (
+              <div className="empty-state">
+                <CheckCircle className="empty-state-icon" />
+                <p className="empty-state-title">
+                  {searchQuery ? 'No jobs found matching your search' : 'No jobs ready for production'}
+                </p>
+                <p className="empty-state-description">
+                  {searchQuery ? 'Try adjusting your search query' : 'Jobs will appear here when all materials are available'}
+                </p>
+              </div>
+            ) : (
+              <div className="grid md:grid-cols-2 gap-4">
+                {filteredJobs.map(job => (
+                  <JobCard key={job.job_id} job={job} />
+                ))}
+              </div>
+            );
+          })()}
         </TabsContent>
 
         <TabsContent value="partial">
-          {schedule?.partial_jobs?.length === 0 ? (
-            <div className="empty-state">
-              <AlertTriangle className="empty-state-icon" />
-              <p className="empty-state-title">No jobs with partial materials</p>
-            </div>
-          ) : (
-            <div className="grid md:grid-cols-2 gap-4">
-              {schedule?.partial_jobs?.map(job => (
-                <JobCard key={job.job_id} job={job} showAction={false} />
-              ))}
-            </div>
-          )}
+          {(() => {
+            const filteredJobs = filterJobs(schedule?.partial_jobs);
+            return filteredJobs.length === 0 ? (
+              <div className="empty-state">
+                <AlertTriangle className="empty-state-icon" />
+                <p className="empty-state-title">
+                  {searchQuery ? 'No jobs found matching your search' : 'No jobs with partial materials'}
+                </p>
+              </div>
+            ) : (
+              <div className="grid md:grid-cols-2 gap-4">
+                {filteredJobs.map(job => (
+                  <JobCard key={job.job_id} job={job} showAction={false} />
+                ))}
+              </div>
+            );
+          })()}
         </TabsContent>
 
         <TabsContent value="raw_materials_unavailable">
-          {schedule?.raw_materials_unavailable?.length === 0 ? (
-            <div className="empty-state">
-              <X className="empty-state-icon" />
-              <p className="empty-state-title">No jobs waiting for raw materials</p>
-              <p className="empty-state-description">All raw materials are available</p>
-            </div>
-          ) : (
-            <div className="grid md:grid-cols-2 gap-4">
-              {schedule?.raw_materials_unavailable?.map(job => (
-                <JobCard key={job.job_id} job={job} showAction={false} />
-              ))}
-            </div>
-          )}
+          {(() => {
+            const filteredJobs = filterJobs(schedule?.raw_materials_unavailable);
+            return filteredJobs.length === 0 ? (
+              <div className="empty-state">
+                <X className="empty-state-icon" />
+                <p className="empty-state-title">
+                  {searchQuery ? 'No jobs found matching your search' : 'No jobs waiting for raw materials'}
+                </p>
+                <p className="empty-state-description">
+                  {searchQuery ? 'Try adjusting your search query' : 'All raw materials are available'}
+                </p>
+              </div>
+            ) : (
+              <div className="grid md:grid-cols-2 gap-4">
+                {filteredJobs.map(job => (
+                  <JobCard key={job.job_id} job={job} showAction={false} />
+                ))}
+              </div>
+            );
+          })()}
         </TabsContent>
 
         <TabsContent value="not_ready">
-          {schedule?.not_ready_jobs?.length === 0 ? (
-            <div className="empty-state">
-              <Clock className="empty-state-icon" />
-              <p className="empty-state-title">No jobs waiting for materials</p>
-            </div>
-          ) : (
-            <div className="grid md:grid-cols-2 gap-4">
-              {schedule?.not_ready_jobs?.map(job => (
-                <JobCard key={job.job_id} job={job} showAction={false} />
-              ))}
-            </div>
-          )}
+          {(() => {
+            const filteredJobs = filterJobs(schedule?.not_ready_jobs);
+            return filteredJobs.length === 0 ? (
+              <div className="empty-state">
+                <Clock className="empty-state-icon" />
+                <p className="empty-state-title">
+                  {searchQuery ? 'No jobs found matching your search' : 'No jobs waiting for materials'}
+                </p>
+              </div>
+            ) : (
+              <div className="grid md:grid-cols-2 gap-4">
+                {filteredJobs.map(job => (
+                  <JobCard key={job.job_id} job={job} showAction={false} />
+                ))}
+              </div>
+            );
+          })()}
         </TabsContent>
 
         <TabsContent value="procurement">

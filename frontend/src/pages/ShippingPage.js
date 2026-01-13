@@ -72,7 +72,44 @@ export default function ShippingPage() {
         jobOrderAPI.getAll('ready_for_dispatch', 1, 100),
       ]);
       // Ensure data is always an array to prevent .map() and .filter() errors
-      setBookings(Array.isArray(bookingsRes?.data) ? bookingsRes.data : []);
+      const bookingsData = Array.isArray(bookingsRes?.data) ? bookingsRes.data : [];
+      
+      // Enrich bookings with job order details (customer name and job numbers)
+      const enrichedBookings = await Promise.all(
+        bookingsData.map(async (booking) => {
+          const jobOrderIds = booking.job_order_ids || [];
+          const jobOrders = [];
+          const customerNames = new Set();
+          const jobNumbers = [];
+          
+          for (const jobId of jobOrderIds) {
+            try {
+              const jobRes = await jobOrderAPI.getOne(jobId);
+              if (jobRes?.data) {
+                jobOrders.push(jobRes.data);
+                if (jobRes.data.customer_name) {
+                  customerNames.add(jobRes.data.customer_name);
+                }
+                if (jobRes.data.job_number) {
+                  jobNumbers.push(jobRes.data.job_number);
+                }
+              }
+            } catch (error) {
+              console.error(`Failed to fetch job order ${jobId}:`, error);
+            }
+          }
+          
+          return {
+            ...booking,
+            job_orders: jobOrders,
+            customer_name: Array.from(customerNames).join(', '),
+            job_numbers: jobNumbers.join(', ')
+          };
+        })
+      );
+      
+      setBookings(enrichedBookings);
+      
       // Filter job orders by export incoterms (FOB, CFR, CIF, CIP) for shipping page
       // The API returns paginated response: {data: [...], pagination: {...}}
       const exportIncoterms = ['FOB', 'CFR', 'CIF', 'CIP'];
@@ -218,7 +255,10 @@ export default function ShippingPage() {
                           />
                           <div className="flex-1">
                             <p className="font-mono text-sm">{job.job_number}</p>
-                            <p className="text-xs text-muted-foreground">{job.product_name} - Qty: {job.quantity}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {job.customer_name && <span className="font-medium">{job.customer_name} - </span>}
+                              {job.product_name} - Qty: {job.quantity}
+                            </p>
                           </div>
                         </div>
                       )) : (
@@ -372,6 +412,8 @@ export default function ShippingPage() {
             <thead>
               <tr>
                 <th>Booking #</th>
+                <th>Customer</th>
+                <th>Job Order(s)</th>
                 <th>Shipping Line</th>
                 <th>Container</th>
                 <th>Route</th>
@@ -387,6 +429,8 @@ export default function ShippingPage() {
               {filteredBookings.map((booking) => (
                 <tr key={booking.id} data-testid={`booking-row-${booking.booking_number}`}>
                   <td className="font-medium">{booking.booking_number}</td>
+                  <td className="text-sm">{booking.customer_name || '-'}</td>
+                  <td className="text-xs font-mono text-muted-foreground">{booking.job_numbers || '-'}</td>
                   <td>{booking.shipping_line}</td>
                   <td>{booking.container_count}x {booking.container_type?.toUpperCase()}</td>
                   <td className="text-xs">{booking.port_of_loading} → {booking.port_of_discharge}</td>

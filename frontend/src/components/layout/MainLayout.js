@@ -31,6 +31,7 @@ import {
   Shield,
   Microscope,
   ArrowUpFromLine,
+  PackageCheck,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { cn } from '../../lib/utils';
@@ -41,6 +42,7 @@ const menuItems = [
   { icon: ShoppingCart, label: 'Sales Orders', path: '/sales-orders', roles: ['admin', 'sales', 'finance'] },
   { icon: Factory, label: 'Job Orders', path: '/job-orders', roles: ['admin', 'production', 'procurement'] },
   { icon: Calendar, label: 'Production Schedule', path: '/production-schedule', roles: ['admin', 'production', 'procurement'] },
+  { icon: PackageCheck, label: 'Material Availability', path: '/material-availability', roles: ['admin', 'production', 'procurement'] },
   { icon: FileStack, label: 'BOM Management', path: '/bom-management', roles: ['admin', 'production', 'inventory'] },
   { icon: Boxes, label: 'Inventory', path: '/inventory', roles: ['admin', 'inventory', 'production', 'procurement'] },
   { icon: Package, label: 'Stock Management', path: '/stock-management', roles: ['admin', 'inventory'] },
