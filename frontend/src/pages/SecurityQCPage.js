@@ -5,10 +5,11 @@ import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Checkbox } from '../components/ui/checkbox';
+import { Card, CardContent } from '../components/ui/card';
 import { 
   Shield, ArrowDownToLine, ArrowUpFromLine, Scale, Check, X, 
   AlertTriangle, ClipboardCheck, FileCheck, Truck, Package,
-  RefreshCw, Eye, FileText, Download
+  RefreshCw, Eye, FileText, Download, Bell
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
@@ -23,10 +24,43 @@ const SecurityQCPage = () => {
   const [showViewModal, setShowViewModal] = useState(false);
   const [selectedTransport, setSelectedTransport] = useState(null);
   const [checklistType, setChecklistType] = useState('INWARD');
+  const [dismissedNotifications, setDismissedNotifications] = useState(new Set());
+  const [vehicleBookingNotifications, setVehicleBookingNotifications] = useState([]);
 
   useEffect(() => {
     loadData();
+    loadVehicleBookingNotifications();
   }, []);
+
+  const loadVehicleBookingNotifications = () => {
+    // Check localStorage for vehicle booking notifications
+    const notifications = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('security-vehicle-booked-')) {
+        try {
+          const data = JSON.parse(localStorage.getItem(key));
+          notifications.push({
+            key,
+            ...data
+          });
+        } catch (e) {
+          // Invalid JSON, remove it
+          localStorage.removeItem(key);
+        }
+      }
+    }
+    setVehicleBookingNotifications(notifications);
+  };
+
+  const dismissVehicleNotification = (key) => {
+    // Remove from localStorage
+    localStorage.removeItem(key);
+    // Remove from state
+    setVehicleBookingNotifications(prev => prev.filter(n => n.key !== key));
+    // Also mark as dismissed to prevent re-showing
+    setDismissedNotifications(prev => new Set([...prev, key]));
+  };
 
   const loadData = async () => {
     setLoading(true);
@@ -39,6 +73,8 @@ const SecurityQCPage = () => {
       setInwardTransports(inwardRes.data || []);
       setOutwardTransports(outwardRes.data || []);
       setPendingChecklists(dashboardRes.data?.checklists || []);
+      // Reload vehicle booking notifications when data refreshes
+      loadVehicleBookingNotifications();
     } catch (error) {
       console.error('Failed to load data:', error);
       toast.error('Failed to load data');
@@ -57,8 +93,80 @@ const SecurityQCPage = () => {
   const inwardPending = inwardTransports.filter(t => !t.security_checklist || t.security_checklist?.status !== 'COMPLETED').length;
   const outwardPending = outwardTransports.filter(t => !t.security_checklist || t.security_checklist?.status !== 'COMPLETED').length;
 
+  // Filter notifications by dismissed status
+  const activeNotifications = vehicleBookingNotifications.filter(
+    n => !dismissedNotifications.has(n.key)
+  );
+
   return (
     <div className="p-6 max-w-[1800px] mx-auto" data-testid="security-qc-page">
+      {/* Vehicle Booking Notifications */}
+      {activeNotifications.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {activeNotifications.map((notification) => (
+            <Card key={notification.key} className="bg-emerald-500/10 border-emerald-500/30">
+              <CardContent className="p-4">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-start gap-3 flex-1">
+                    <Bell className="w-5 h-5 text-emerald-400 mt-0.5" />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <p className="font-semibold text-emerald-400">Vehicle Booked</p>
+                        <Badge className="bg-emerald-500/20 text-emerald-400">
+                          {notification.transport_number}
+                        </Badge>
+                        {notification.vehicle_number && (
+                          <Badge variant="outline" className="text-xs">
+                            Vehicle: {notification.vehicle_number}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="text-sm text-muted-foreground space-y-1">
+                        {notification.transporter_name && (
+                          <p>Transporter: {notification.transporter_name}</p>
+                        )}
+                        {notification.driver_name && (
+                          <p>Driver: {notification.driver_name}</p>
+                        )}
+                        {notification.driver_contact && (
+                          <p>Contact: {notification.driver_contact}</p>
+                        )}
+                        {notification.po_number && (
+                          <p>PO: {notification.po_number}</p>
+                        )}
+                        {notification.import_number && (
+                          <p>Import: {notification.import_number}</p>
+                        )}
+                        {notification.job_number && (
+                          <p>Job Order: {notification.job_number}</p>
+                        )}
+                        {notification.supplier_name && (
+                          <p>Supplier: {notification.supplier_name}</p>
+                        )}
+                        {notification.customer_name && (
+                          <p>Customer: {notification.customer_name}</p>
+                        )}
+                        <p className="text-emerald-400 font-medium">
+                          Transport is booked and vehicle is assigned - Ready for security check
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => dismissVehicleNotification(notification.key)}
+                    className="ml-2"
+                  >
+                    <X className="w-4 h-4" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* Header */}
       <div className="mb-6">
         <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">

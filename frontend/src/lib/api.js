@@ -116,7 +116,7 @@ export const paymentAPI = {
 
 // Job Orders
 export const jobOrderAPI = {
-  getAll: (status) => api.get('/job-orders', { params: { status } }),
+  getAll: (status, page = 1, pageSize = 50) => api.get('/job-orders', { params: { status, page, page_size: pageSize } }),
   getOne: (id) => api.get(`/job-orders/${id}`),
   create: (data) => api.post('/job-orders', data),
   updateStatus: (id, status) => api.put(`/job-orders/${id}/status`, null, { params: { status } }),

@@ -67,17 +67,27 @@ export default function ShippingPage() {
     try {
       const [bookingsRes, jobsRes] = await Promise.all([
         shippingAPI.getAll(),
-        jobOrderAPI.getAll('ready_for_dispatch'),
+        // Request ready_for_dispatch jobs - using max page_size of 100 (backend limit)
+        // If more than 100 jobs exist, we'll need to make multiple requests
+        jobOrderAPI.getAll('ready_for_dispatch', 1, 100),
       ]);
-      setBookings(bookingsRes.data);
+      // Ensure data is always an array to prevent .map() and .filter() errors
+      setBookings(Array.isArray(bookingsRes?.data) ? bookingsRes.data : []);
       // Filter job orders by export incoterms (FOB, CFR, CIF, CIP) for shipping page
+      // The API returns paginated response: {data: [...], pagination: {...}}
       const exportIncoterms = ['FOB', 'CFR', 'CIF', 'CIP'];
-      const filteredJobs = jobsRes.data.filter(job => 
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      const jobsData = Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []);
+      const filteredJobs = jobsData.filter(job => 
         job.incoterm && exportIncoterms.includes(job.incoterm.toUpperCase())
       );
       setJobs(filteredJobs);
     } catch (error) {
       toast.error('Failed to load data');
+      // Set empty arrays on error to prevent rendering issues
+      setBookings([]);
+      setJobs([]);
     } finally {
       setLoading(false);
     }

@@ -22,6 +22,7 @@ export default function DeliveryOrdersPage() {
   const [form, setForm] = useState({
     job_order_id: '',
     shipping_booking_id: '',
+    vehicle_type: '',
     vehicle_number: '',
     driver_name: '',
     notes: '',
@@ -39,7 +40,9 @@ export default function DeliveryOrdersPage() {
         shippingAPI.getAll(),
       ]);
       setDeliveryOrders(dosRes.data);
-      setJobs(jobsRes.data);
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      setJobs(Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []));
       setBookings(bookingsRes.data);
     } catch (error) {
       toast.error('Failed to load data');
@@ -57,7 +60,7 @@ export default function DeliveryOrdersPage() {
       await deliveryOrderAPI.create(form);
       toast.success('Delivery order created. Inventory updated.');
       setCreateOpen(false);
-      setForm({ job_order_id: '', shipping_booking_id: '', vehicle_number: '', driver_name: '', notes: '' });
+      setForm({ job_order_id: '', shipping_booking_id: '', vehicle_type: '', vehicle_number: '', driver_name: '', notes: '' });
       loadData();
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Failed to create delivery order');
@@ -117,9 +120,24 @@ export default function DeliveryOrdersPage() {
                       </SelectContent>
                     </Select>
                   </div>
+                  <div className="form-field">
+                    <Label>Vehicle Type *</Label>
+                    <Select value={form.vehicle_type} onValueChange={(v) => setForm({...form, vehicle_type: v})}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select vehicle type" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="tanker">Tanker</SelectItem>
+                        <SelectItem value="container">Container</SelectItem>
+                        <SelectItem value="trailer">Trailer</SelectItem>
+                        <SelectItem value="truck">Truck</SelectItem>
+                        <SelectItem value="other">Other</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   <div className="form-grid">
                     <div className="form-field">
-                      <Label>Vehicle Number</Label>
+                      <Label>Vehicle Number *</Label>
                       <Input
                         value={form.vehicle_number}
                         onChange={(e) => setForm({...form, vehicle_number: e.target.value})}
@@ -127,7 +145,7 @@ export default function DeliveryOrdersPage() {
                       />
                     </div>
                     <div className="form-field">
-                      <Label>Driver Name</Label>
+                      <Label>Driver Name *</Label>
                       <Input
                         value={form.driver_name}
                         onChange={(e) => setForm({...form, driver_name: e.target.value})}
@@ -175,6 +193,7 @@ export default function DeliveryOrdersPage() {
                 <th>Job Number</th>
                 <th>Product</th>
                 <th>Quantity</th>
+                <th>Vehicle Type</th>
                 <th>Vehicle</th>
                 <th>Driver</th>
                 <th>Issued Date</th>
@@ -187,6 +206,7 @@ export default function DeliveryOrdersPage() {
                   <td>{dorder.job_number}</td>
                   <td>{dorder.product_name}</td>
                   <td className="font-mono">{dorder.quantity}</td>
+                  <td>{dorder.vehicle_type || '-'}</td>
                   <td>{dorder.vehicle_number || '-'}</td>
                   <td>{dorder.driver_name || '-'}</td>
                   <td>{formatDate(dorder.issued_at)}</td>

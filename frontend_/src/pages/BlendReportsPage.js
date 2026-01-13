@@ -59,7 +59,9 @@ export default function BlendReportsPage() {
         productAPI.getAll('raw_material'),
       ]);
       setReports(reportsRes.data);
-      setJobs(jobsRes.data);
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      setJobs(Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []));
       setProducts(productsRes.data);
     } catch (error) {
       toast.error('Failed to load data');

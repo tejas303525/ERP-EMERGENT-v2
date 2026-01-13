@@ -10,8 +10,17 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
 import { formatDate, getStatusColor, getPriorityColor } from '../lib/utils';
-import { Plus, Factory, Eye, Play, CheckCircle, Trash2, AlertTriangle, Check, Loader2, Printer, Download, Search } from 'lucide-react';
+import { Plus, Factory, Eye, Play, CheckCircle, Trash2, AlertTriangle, Check, Loader2, Printer, Download, Search, RefreshCw } from 'lucide-react';
 import api from '../lib/api';
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+  PaginationEllipsis,
+} from '../components/ui/pagination';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'];
 const STATUSES = ['pending', 'approved', 'in_production', 'procurement', 'ready_for_dispatch'];
@@ -30,7 +39,18 @@ export default function JobOrdersPage() {
   const [loadingBom, setLoadingBom] = useState(false);
   const [materialAvailability, setMaterialAvailability] = useState([]);
   const [selectedProducts, setSelectedProducts] = useState([]);
+  const [refreshing, setRefreshing] = useState(false);
   const [showCreateButton, setShowCreateButton] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [pagination, setPagination] = useState({
+    total: 0,
+    page: 1,
+    page_size: 50,
+    total_pages: 0,
+    has_next: false,
+    has_previous: false
+  });
 
   const [form, setForm] = useState({
     sales_order_id: '',
@@ -52,16 +72,47 @@ export default function JobOrdersPage() {
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [currentPage, pageSize, statusFilter]);
+
+  // Reset to page 1 when status filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [statusFilter]);
 
   const loadData = async () => {
     try {
+      setLoading(true);
+      const status = statusFilter === 'all' ? null : statusFilter;
       const [jobsRes, ordersRes, productsRes] = await Promise.all([
-        jobOrderAPI.getAll(),
+        jobOrderAPI.getAll(status, currentPage, pageSize),
         salesOrderAPI.getAll('active'),
         productAPI.getAll(),
       ]);
-      setJobs(jobsRes.data);
+      
+      // Handle paginated response
+      if (jobsRes.data && jobsRes.data.data) {
+        setJobs(jobsRes.data.data);
+        setPagination(jobsRes.data.pagination || {
+          total: 0,
+          page: currentPage,
+          page_size: pageSize,
+          total_pages: 0,
+          has_next: false,
+          has_previous: false
+        });
+      } else {
+        // Fallback for non-paginated response (backward compatibility)
+        setJobs(jobsRes.data || []);
+        setPagination({
+          total: jobsRes.data?.length || 0,
+          page: currentPage,
+          page_size: pageSize,
+          total_pages: 1,
+          has_next: false,
+          has_previous: false
+        });
+      }
+      
       setSalesOrders(ordersRes.data);
       setProducts(productsRes.data);
     } catch (error) {
@@ -486,13 +537,11 @@ export default function JobOrdersPage() {
     }
   };
 
+  // Client-side search filter (applied to current page results)
   const filteredJobs = jobs.filter(job => {
-    // Status filter
-    const statusMatch = statusFilter === 'all' || job.status === statusFilter;
-    
     // Search filter
     if (!searchTerm.trim()) {
-      return statusMatch;
+      return true;
     }
     
     const searchLower = searchTerm.toLowerCase();
@@ -503,10 +552,65 @@ export default function JobOrdersPage() {
       job.product_sku?.toLowerCase().includes(searchLower) ||
       job.spa_number?.toLowerCase().includes(searchLower);
     
-    return statusMatch && matchesSearch;
+    return matchesSearch;
   });
 
+  // Reset to page 1 when search term changes
+  useEffect(() => {
+    if (searchTerm) {
+      setCurrentPage(1);
+    }
+  }, [searchTerm]);
+
   const canManageJobs = ['admin', 'production', 'procurement', 'sales'].includes(user?.role);
+
+  // Check availability for all jobs that need procurement
+  const checkAvailabilityForAll = async () => {
+    setRefreshing(true);
+    try {
+      const jobsNeedingCheck = jobs.filter(j => 
+        j.procurement_required || 
+        (j.material_shortages && j.material_shortages.length > 0) ||
+        j.status === 'procurement'
+      );
+      
+      if (jobsNeedingCheck.length === 0) {
+        toast.info('No jobs need availability check');
+        setRefreshing(false);
+        return;
+      }
+
+      // Check availability for each job
+      const checkPromises = jobsNeedingCheck.map(job => 
+        api.post(`/job-orders/${job.id}/check-availability`)
+          .then(response => {
+            console.log(`Successfully checked availability for ${job.job_number}:`, response.data);
+            return response.data;
+          })
+          .catch(err => {
+            console.error(`Failed to check availability for ${job.job_number}:`, err);
+            toast.error(`Failed to check availability for ${job.job_number}: ${err.response?.data?.detail || err.message}`);
+            return null;
+          })
+      );
+
+      const results = await Promise.all(checkPromises);
+      const successCount = results.filter(r => r !== null).length;
+      
+      if (successCount > 0) {
+        toast.success(`Availability checked for ${successCount} job(s)`);
+        // Reload data to get updated statuses
+        await loadData();
+      } else if (successCount === 0 && jobsNeedingCheck.length > 0) {
+        toast.error('Failed to check availability for all jobs');
+      }
+    } catch (error) {
+      console.error('Failed to check availability:', error);
+      toast.error('Failed to check availability');
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   // Calculate procurement status
   const getProcurementStatus = (job) => {
@@ -543,11 +647,29 @@ export default function JobOrdersPage() {
           <p className="text-muted-foreground text-sm">Manage production and manufacturing jobs</p>
         </div>
         <div className="module-actions">
+          <Button 
+            variant="outline" 
+            onClick={checkAvailabilityForAll}
+            disabled={refreshing}
+            className="rounded-sm"
+            data-testid="refresh-availability-btn"
+          >
+            <RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+            {refreshing ? 'Checking...' : 'Check Availability'}
+          </Button>
+          <Button 
+            variant="outline" 
+            onClick={loadData}
+            className="rounded-sm"
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Refresh
+          </Button>
           <div className="relative w-64">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
               type="text"
-              placeholder="Search job orders..."
+              placeholder="Search by customer, job number, product..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="pl-9"
@@ -563,6 +685,16 @@ export default function JobOrdersPage() {
               {STATUSES.map(s => (
                 <SelectItem key={s} value={s}>{s.replace(/_/g, ' ').toUpperCase()}</SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+          <Select value={pageSize.toString()} onValueChange={(v) => { setPageSize(parseInt(v)); setCurrentPage(1); }}>
+            <SelectTrigger className="w-32" data-testid="page-size-select">
+              <SelectValue placeholder="Per page" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="25">25 per page</SelectItem>
+              <SelectItem value="50">50 per page</SelectItem>
+              <SelectItem value="100">100 per page</SelectItem>
             </SelectContent>
           </Select>
           {canManageJobs && (
@@ -887,8 +1019,16 @@ export default function JobOrdersPage() {
 
       {/* Jobs List */}
       <div className="data-grid">
-        <div className="data-grid-header">
-          <h3 className="font-medium">Job Orders ({filteredJobs.length})</h3>
+        <div className="data-grid-header flex justify-between items-center">
+          <h3 className="font-medium">
+            Job Orders ({searchTerm ? filteredJobs.length : pagination.total})
+            {searchTerm && <span className="text-muted-foreground text-sm ml-2">(filtered from {pagination.total})</span>}
+          </h3>
+          {!searchTerm && pagination.total_pages > 1 && (
+            <div className="text-sm text-muted-foreground">
+              Page {currentPage} of {pagination.total_pages}
+            </div>
+          )}
         </div>
         {loading ? (
           <div className="p-8 text-center text-muted-foreground">Loading...</div>
@@ -1030,6 +1170,80 @@ export default function JobOrdersPage() {
               })}
             </tbody>
           </table>
+        )}
+        
+        {/* Pagination Controls */}
+        {!loading && pagination.total_pages > 1 && (
+          <div className="flex items-center justify-between px-4 py-4 border-t">
+            <div className="text-sm text-muted-foreground">
+              Showing {((currentPage - 1) * pageSize) + 1} to {Math.min(currentPage * pageSize, pagination.total)} of {pagination.total} job orders
+            </div>
+            <Pagination>
+              <PaginationContent>
+                <PaginationItem>
+                  <PaginationPrevious 
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      if (pagination.has_previous) {
+                        setCurrentPage(currentPage - 1);
+                      }
+                    }}
+                    className={!pagination.has_previous ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                  />
+                </PaginationItem>
+                
+                {/* Page Numbers */}
+                {Array.from({ length: Math.min(5, pagination.total_pages) }, (_, i) => {
+                  let pageNum;
+                  if (pagination.total_pages <= 5) {
+                    pageNum = i + 1;
+                  } else if (currentPage <= 3) {
+                    pageNum = i + 1;
+                  } else if (currentPage >= pagination.total_pages - 2) {
+                    pageNum = pagination.total_pages - 4 + i;
+                  } else {
+                    pageNum = currentPage - 2 + i;
+                  }
+                  
+                  return (
+                    <PaginationItem key={pageNum}>
+                      <PaginationLink
+                        href="#"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setCurrentPage(pageNum);
+                        }}
+                        isActive={currentPage === pageNum}
+                        className="cursor-pointer"
+                      >
+                        {pageNum}
+                      </PaginationLink>
+                    </PaginationItem>
+                  );
+                })}
+                
+                {pagination.total_pages > 5 && currentPage < pagination.total_pages - 2 && (
+                  <PaginationItem>
+                    <PaginationEllipsis />
+                  </PaginationItem>
+                )}
+                
+                <PaginationItem>
+                  <PaginationNext 
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      if (pagination.has_next) {
+                        setCurrentPage(currentPage + 1);
+                      }
+                    }}
+                    className={!pagination.has_next ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                  />
+                </PaginationItem>
+              </PaginationContent>
+            </Pagination>
+          </div>
         )}
       </div>
 

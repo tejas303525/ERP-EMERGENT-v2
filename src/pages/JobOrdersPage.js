@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
 import { formatDate, getStatusColor, getPriorityColor } from '../lib/utils';
-import { Plus, Factory, Eye, Play, CheckCircle, Trash2, AlertTriangle, Check, Loader2 } from 'lucide-react';
+import { Plus, Factory, Eye, Play, CheckCircle, Trash2, AlertTriangle, Check, Loader2, RefreshCw } from 'lucide-react';
 import api from '../lib/api';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'];
@@ -27,8 +27,10 @@ export default function JobOrdersPage() {
   const [viewOpen, setViewOpen] = useState(false);
   const [selectedJob, setSelectedJob] = useState(null);
   const [statusFilter, setStatusFilter] = useState('all');
+  const [searchTerm, setSearchTerm] = useState('');
   const [loadingBom, setLoadingBom] = useState(false);
   const [materialAvailability, setMaterialAvailability] = useState([]);
+  const [refreshing, setRefreshing] = useState(false);
 
   const [form, setForm] = useState({
     sales_order_id: '',
@@ -57,7 +59,9 @@ export default function JobOrdersPage() {
         salesOrderAPI.getAll('active'),
         productAPI.getAll(),
       ]);
-      setJobs(jobsRes.data);
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      setJobs(Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []));
       setSalesOrders(ordersRes.data);
       setProducts(productsRes.data);
     } catch (error) {
@@ -277,9 +281,82 @@ export default function JobOrdersPage() {
     }
   };
 
-  const filteredJobs = statusFilter === 'all' ? jobs : jobs.filter(j => j.status === statusFilter);
+  const filteredJobs = jobs.filter(job => {
+    // Filter by status
+    const matchesStatus = statusFilter === 'all' || job.status === statusFilter;
+    
+    // Filter by search term (customer name, job number, product name, product SKU)
+    if (!searchTerm) {
+      return matchesStatus;
+    }
+    
+    const search = searchTerm.toLowerCase();
+    const matchesSearch = 
+      (job.customer_name?.toLowerCase().includes(search)) ||
+      (job.job_number?.toLowerCase().includes(search)) ||
+      (job.product_name?.toLowerCase().includes(search)) ||
+      (job.product_sku?.toLowerCase().includes(search));
+    
+    return matchesStatus && matchesSearch;
+  });
 
   const canManageJobs = ['admin', 'production', 'procurement', 'sales'].includes(user?.role);
+
+  // Check availability for all jobs that need procurement
+  const checkAvailabilityForAll = async () => {
+    setRefreshing(true);
+    try {
+      const jobsNeedingCheck = jobs.filter(j => 
+        j.procurement_required || 
+        (j.material_shortages && j.material_shortages.length > 0) ||
+        j.status === 'procurement'
+      );
+      
+      if (jobsNeedingCheck.length === 0) {
+        toast.info('No jobs need availability check');
+        setRefreshing(false);
+        return;
+      }
+
+      // Check availability for each job with better error handling
+      const checkPromises = jobsNeedingCheck.map(async (job) => {
+        try {
+          const response = await api.post(`/job-orders/${job.id}/check-availability`);
+          return { success: true, jobNumber: job.job_number };
+        } catch (err) {
+          // Silently handle ALL errors - don't log to console at all
+          // Network/CORS errors are expected if backend is down
+          // Server errors are also handled silently to avoid console spam
+          return { success: false, jobNumber: job.job_number };
+        }
+      });
+
+      const results = await Promise.all(checkPromises);
+      const successCount = results.filter(r => r.success).length;
+      const failureCount = results.filter(r => !r.success).length;
+      
+      if (successCount > 0) {
+        toast.success(`Availability checked for ${successCount} job(s)`);
+        // Reload data to get updated statuses
+        await loadData();
+      } else if (failureCount > 0) {
+        // Only show error if all failed and backend might be down
+        toast.error('Failed to check availability. Please ensure backend is running.');
+      } else {
+        toast.info('No jobs needed availability check');
+      }
+    } catch (error) {
+      // Only show user-facing error for unexpected errors
+      if (error.response && error.response.status !== 0) {
+        toast.error('Failed to check availability');
+      } else {
+        // Network/CORS errors - backend might be down
+        toast.error('Unable to connect to backend. Please check if server is running.');
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   // Calculate procurement status
   const getProcurementStatus = (job) => {
@@ -301,6 +378,31 @@ export default function JobOrdersPage() {
           <p className="text-muted-foreground text-sm">Manage production and manufacturing jobs</p>
         </div>
         <div className="module-actions">
+          <Button 
+            variant="outline" 
+            onClick={checkAvailabilityForAll}
+            disabled={refreshing}
+            className="rounded-sm"
+            data-testid="refresh-availability-btn"
+          >
+            <RefreshCw className={`w-4 h-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+            {refreshing ? 'Checking...' : 'Check Availability'}
+          </Button>
+          <Button 
+            variant="outline" 
+            onClick={loadData}
+            className="rounded-sm"
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Refresh
+          </Button>
+          <Input
+            placeholder="Search by customer, job number, product..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-64"
+            data-testid="search-input"
+          />
           <Select value={statusFilter} onValueChange={setStatusFilter}>
             <SelectTrigger className="w-40" data-testid="status-filter">
               <SelectValue placeholder="Filter by status" />

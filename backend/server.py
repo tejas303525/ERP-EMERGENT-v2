@@ -456,6 +456,7 @@ class GRN(GRNCreate):
 class DeliveryOrderCreate(BaseModel):
     job_order_id: str
     shipping_booking_id: Optional[str] = None
+    vehicle_type: Optional[str] = None
     vehicle_number: Optional[str] = None
     driver_name: Optional[str] = None
     notes: Optional[str] = None
@@ -1812,16 +1813,18 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                 # Manufacturing products: check finished product and BOM
                 # REQUIREMENT 5: Check if finished product is available in stock
                 # If available, set status to ready_for_dispatch automatically
+                # BUT still check raw materials for procurement needs
                 if finished_product_stock >= item.quantity:
                     item_status = "ready_for_dispatch"
-                    item_needs_procurement = False
+                    # Don't set item_needs_procurement = False here - let raw material check determine it
+                    # Finished product is available, but we still need to check raw materials
                 else:
                     # Check finished product stock
                     if finished_product_stock < item.quantity:
                         item_procurement_reasons.append(f"Stock ({finished_product_stock}) < required ({item.quantity})")
                         item_needs_procurement = True
                 
-                # Check BOM for raw materials
+                # Check BOM for raw materials (ALWAYS check, even if finished product is available)
                 product_bom = await db.product_boms.find_one({
                     "product_id": item.product_id,
                     "is_active": True
@@ -1896,7 +1899,15 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                     else:
                         bom_with_stock.append(dict(bom_item) if hasattr(bom_item, '__dict__') else bom_item)
             
-            if item_needs_procurement:
+            # Always check for material shortages, even if finished product is available
+            # This ensures raw material shortages are tracked for procurement
+            if item_material_shortages:
+                any_needs_procurement = True
+                all_material_shortages_combined.extend(item_material_shortages)
+                # Ensure item_needs_procurement is set if there are shortages
+                if not item_needs_procurement:
+                    item_needs_procurement = True
+            elif item_needs_procurement:
                 any_needs_procurement = True
                 all_material_shortages_combined.extend(item_material_shortages)
             
@@ -2100,16 +2111,15 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                     item_dict["available_qty"] = 0
                     bom_with_stock.append(item_dict)
         
-        # Determine if procurement is needed (only if finished product not available)
-        # If finished product stock is insufficient OR raw materials are insufficient, need procurement
-        if job_status != "ready_for_dispatch":
-            if finished_product_stock < required_quantity:
-                procurement_reason.insert(0, f"Finished product stock ({finished_product_stock}) < required ({required_quantity})")
-                needs_procurement = True
-            elif raw_materials_insufficient:
-                # Finished product is available, but raw materials are not - need procurement for raw materials
-                procurement_reason.insert(0, f"Finished product available ({finished_product_stock} >= {required_quantity}), but raw materials insufficient")
-                needs_procurement = True
+        # Determine if procurement is needed
+        # Check both finished product AND raw materials, even if finished product is available
+        if finished_product_stock < required_quantity:
+            procurement_reason.insert(0, f"Finished product stock ({finished_product_stock}) < required ({required_quantity})")
+            needs_procurement = True
+        elif raw_materials_insufficient:
+            # Finished product is available, but raw materials are not - need procurement for raw materials
+            procurement_reason.insert(0, f"Finished product available ({finished_product_stock} >= {required_quantity}), but raw materials insufficient")
+            needs_procurement = True
     
     # Get customer_name from sales order (which comes from quotation)
     customer_name = order.get("customer_name", "")
@@ -2141,15 +2151,22 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
         country_of_destination=country_of_destination  # Store country of destination from quotation
     )
     
-    # Store procurement reason and material shortages if needed
-    if needs_procurement:
-        job_order_dict = job_order.model_dump()
-        job_order_dict["procurement_reason"] = "; ".join(procurement_reason)
+    # Store procurement reason and material shortages - ALWAYS save material_shortages if they exist
+    # This ensures raw material shortages are tracked even when finished product is available
+    job_order_dict = job_order.model_dump()
+    job_order_dict["country_of_destination"] = country_of_destination  # Store country of destination (from port of discharge or explicit field)
+    job_order_dict["total_weight_mt"] = total_weight_mt_single  # Ensure total_weight_mt is included
+    
+    # Always save material_shortages and procurement_reason if they exist, even if needs_procurement is False
+    if material_shortages_list:
         job_order_dict["material_shortages"] = material_shortages_list
-        job_order_dict["country_of_destination"] = country_of_destination  # Store country of destination (from port of discharge or explicit field)
-        await db.job_orders.insert_one(job_order_dict)
-        
-        # Create notification for procurement team
+    if procurement_reason:
+        job_order_dict["procurement_reason"] = "; ".join(procurement_reason)
+    
+    await db.job_orders.insert_one(job_order_dict)
+    
+    # Create notification for procurement team if procurement is needed
+    if needs_procurement:
         await create_notification(
             event_type="PRODUCTION_BLOCKED",
             title=f"Procurement Required: {job_number}",
@@ -2160,11 +2177,6 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
             target_roles=["admin", "procurement"],
             notification_type="warning"
         )
-    else:
-        job_order_dict = job_order.model_dump()
-        job_order_dict["country_of_destination"] = country_of_destination  # Store country of destination (from port of discharge or explicit field)
-        job_order_dict["total_weight_mt"] = total_weight_mt_single  # Ensure total_weight_mt is included
-        await db.job_orders.insert_one(job_order_dict)
         
         # Notify when job is ready for production scheduling (pending status without procurement needs)
         if job_status == "pending" and not needs_procurement:
@@ -2185,12 +2197,29 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
     
     return job_order
 
-@api_router.get("/job-orders", response_model=List[JobOrder])
-async def get_job_orders(status: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+@api_router.get("/job-orders")
+async def get_job_orders(
+    status: Optional[str] = None, 
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    current_user: dict = Depends(get_current_user)
+):
     query = {}
     if status:
         query["status"] = status
-    jobs = await db.job_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    
+    # Calculate skip and limit
+    skip = (page - 1) * page_size
+    
+    # Get total count for pagination metadata
+    total_count = await db.job_orders.count_documents(query)
+    
+    # Fetch paginated jobs
+    jobs = await db.job_orders.find(query, {"_id": 0})\
+        .sort("created_at", -1)\
+        .skip(skip)\
+        .limit(page_size)\
+        .to_list(page_size)
     
     # Enrich with customer_name and country_of_destination from sales order/quotation
     enriched_jobs = []
@@ -2227,7 +2256,20 @@ async def get_job_orders(status: Optional[str] = None, current_user: dict = Depe
                             job["country_of_destination"] = country_of_destination
         enriched_jobs.append(job)
     
-    return enriched_jobs
+    # Calculate total pages
+    total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 0
+    
+    return {
+        "data": enriched_jobs,
+        "pagination": {
+            "total": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_previous": page > 1
+        }
+    }
 
 @api_router.get("/job-orders/{job_id}", response_model=JobOrder)
 async def get_job_order(job_id: str, current_user: dict = Depends(get_current_user)):
@@ -2259,6 +2301,202 @@ async def get_job_order(job_id: str, current_user: dict = Depends(get_current_us
                 job["country_of_destination"] = country_of_destination
     
     return job
+
+@api_router.post("/job-orders/{job_id}/check-availability", response_model=dict)
+async def check_job_order_availability(job_id: str, current_user: dict = Depends(get_current_user)):
+    """Re-check material availability for a job order and update status if materials are now available"""
+    from inventory_service import InventoryService
+    
+    job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job order not found")
+    
+    inventory_service = InventoryService(db)
+    
+    # Check if all materials are now available
+    all_materials_available = True
+    all_raw_materials_available = True
+    material_shortages = job.get("material_shortages", [])
+    updated_shortages = []
+    
+    # If no shortages listed, check BOM requirements
+    if not material_shortages:
+        product_id = job.get("product_id")
+        quantity = job.get("quantity", 0)
+        packaging = job.get("packaging", "Bulk")
+        net_weight_kg = job.get("net_weight_kg")
+        if net_weight_kg is None and packaging != "Bulk":
+            net_weight_kg = 200  # Default only when needed
+        
+        if product_id and quantity > 0:
+            # Get product BOM
+            product_bom = await db.product_boms.find_one({
+                "product_id": product_id,
+                "is_active": True
+            }, {"_id": 0})
+            
+            if product_bom:
+                bom_items = await db.product_bom_items.find({
+                    "bom_id": product_bom["id"]
+                }, {"_id": 0}).to_list(100)
+                
+                # Calculate total KG needed
+                if packaging != "Bulk":
+                    total_kg = quantity * (net_weight_kg or 200)
+                else:
+                    total_kg = quantity * 1000
+                
+                # Check each material
+                for bom_item in bom_items:
+                    material_id = bom_item.get("material_item_id")
+                    qty_per_kg = bom_item.get("qty_kg_per_kg_finished", 0)
+                    required_qty = total_kg * qty_per_kg
+                    item_type = bom_item.get("item_type", "RAW")
+                    
+                    # Check inventory balance
+                    avail_result = await inventory_service.get_available_quantity(material_id)
+                    available = avail_result.get("available", 0)
+                    
+                    if available < required_qty:
+                        all_materials_available = False
+                        if item_type == "RAW":
+                            all_raw_materials_available = False
+                        
+                        shortage = required_qty - available
+                        updated_shortages.append({
+                            "item_id": material_id,
+                            "item_name": bom_item.get("material_name", "Unknown"),
+                            "item_sku": bom_item.get("material_sku", "-"),
+                            "required_qty": required_qty,
+                            "available": available,
+                            "shortage": shortage,
+                            "item_type": item_type
+                        })
+    else:
+        # Check each existing shortage
+        for shortage in material_shortages:
+            item_id = shortage.get("item_id")
+            required_qty = shortage.get("required_qty", shortage.get("shortage", 0))
+            item_type = shortage.get("item_type", "RAW")
+            
+            # Check inventory balance
+            avail_result = await inventory_service.get_available_quantity(item_id)
+            available = avail_result.get("available", 0)
+            
+            if available < required_qty:
+                all_materials_available = False
+                if item_type == "RAW":
+                    all_raw_materials_available = False
+                
+                shortage_qty = required_qty - available
+                updated_shortages.append({
+                    "item_id": item_id,
+                    "item_name": shortage.get("item_name", "Unknown"),
+                    "item_sku": shortage.get("item_sku", "-"),
+                    "required_qty": required_qty,
+                    "available": available,
+                    "shortage": shortage_qty,
+                    "item_type": item_type
+                })
+            # If available, don't add to updated_shortages (material is now available)
+    
+    # Check if job needs procurement update
+    needs_procurement_update = (
+        (material_shortages and len(material_shortages) > 0)
+        or job.get("procurement_required", False)
+        or job.get("procurement_status") in ["pending", "in_progress"]
+    )
+    
+    # Check if this is a trading product job
+    is_trading_product = False
+    if material_shortages:
+        all_traded_shortages = all(s.get("item_type") == "TRADED" for s in material_shortages)
+        if all_traded_shortages and len(material_shortages) > 0:
+            is_trading_product = True
+    else:
+        product_id = job.get("product_id")
+        if product_id:
+            product = await db.products.find_one({"id": product_id}, {"_id": 0})
+            if product and product.get("type") == "TRADED":
+                is_trading_product = True
+    
+    # Update job if all materials are now available
+    if all_materials_available and needs_procurement_update:
+        # For trading products: set to ready_for_dispatch (no production needed)
+        # For manufacturing products: set to pending (needs production scheduling)
+        if is_trading_product:
+            new_status = "ready_for_dispatch"
+        else:
+            new_status = "pending"
+        
+        # Update job status
+        await db.job_orders.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": new_status,
+                "procurement_status": "complete",
+                "material_shortages": [],
+                "procurement_required": False
+            }}
+        )
+        
+        # Auto-route to transport if ready_for_dispatch
+        if new_status == "ready_for_dispatch":
+            await ensure_dispatch_routing(job_id, job)
+        
+        # Create notification
+        if is_trading_product:
+            notification_message = f"Trading product procured. Job {job.get('job_number')} ({job.get('product_name')}) is ready for dispatch."
+            notification_link = "/transport-planner"
+            target_roles = ["admin", "transport"]
+        else:
+            notification_message = f"Materials procured. Job {job.get('job_number')} ({job.get('product_name')}) is ready for production scheduling."
+            notification_link = "/production-schedule"
+            target_roles = ["admin", "production"]
+        
+        await create_notification(
+            event_type="JOB_READY",
+            title=f"Job Ready: {job.get('job_number')}",
+            message=notification_message,
+            link=notification_link,
+            ref_type="JOB",
+            ref_id=job_id,
+            target_roles=target_roles,
+            notification_type="success"
+        )
+        
+        return {
+            "job_id": job_id,
+            "job_number": job.get("job_number"),
+            "status": "materials_available",
+            "new_status": new_status,
+            "message": f"All materials are now available. Job status updated to {new_status}."
+        }
+    elif len(updated_shortages) < len(material_shortages):
+        # Some materials became available but not all
+        await db.job_orders.update_one(
+            {"id": job_id},
+            {"$set": {
+                "material_shortages": updated_shortages,
+                "procurement_required": len(updated_shortages) > 0
+            }}
+        )
+        return {
+            "job_id": job_id,
+            "job_number": job.get("job_number"),
+            "status": "partial_availability",
+            "shortages_remaining": len(updated_shortages),
+            "message": f"Some materials are now available. {len(updated_shortages)} shortage(s) remaining."
+        }
+    else:
+        # No change in availability
+        return {
+            "job_id": job_id,
+            "job_number": job.get("job_number"),
+            "status": "still_shortage",
+            "shortages_remaining": len(updated_shortages),
+            "message": f"Materials still not available. {len(updated_shortages)} shortage(s) remaining."
+        }
 
 @api_router.delete("/job-orders/{job_id}")
 async def delete_job_order(job_id: str, current_user: dict = Depends(get_current_user)):
@@ -3249,6 +3487,21 @@ async def create_delivery_order(data: DeliveryOrderCreate, current_user: dict = 
     if current_user["role"] not in ["admin", "security"]:
         raise HTTPException(status_code=403, detail="Only security can create delivery orders")
     
+    # Validate that all vehicle-related fields are filled
+    missing_fields = []
+    if not data.vehicle_type or not data.vehicle_type.strip():
+        missing_fields.append("vehicle_type")
+    if not data.vehicle_number or not data.vehicle_number.strip():
+        missing_fields.append("vehicle_number")
+    if not data.driver_name or not data.driver_name.strip():
+        missing_fields.append("driver_name")
+    
+    if missing_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=f"All vehicle-related fields must be filled. Missing: {', '.join(missing_fields)}"
+        )
+    
     job = await db.job_orders.find_one({"id": data.job_order_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job order not found")
@@ -3348,6 +3601,26 @@ async def create_delivery_order(data: DeliveryOrderCreate, current_user: dict = 
 @api_router.get("/delivery-orders", response_model=List[DeliveryOrder])
 async def get_delivery_orders(current_user: dict = Depends(get_current_user)):
     orders = await db.delivery_orders.find({}, {"_id": 0}).sort("issued_at", -1).to_list(1000)
+    
+    # Enrich delivery orders with vehicle data from transport_outward if missing
+    for order in orders:
+        # If vehicle fields are missing/empty, try to get from related transport
+        if not order.get("vehicle_type") or not order.get("vehicle_number") or not order.get("driver_name"):
+            job_order_id = order.get("job_order_id")
+            if job_order_id:
+                transport = await db.transport_outward.find_one(
+                    {"job_order_id": job_order_id},
+                    {"_id": 0, "vehicle_type": 1, "vehicle_number": 1, "driver_name": 1}
+                )
+                if transport:
+                    # Only fill in missing fields, don't overwrite existing ones
+                    if not order.get("vehicle_type") and transport.get("vehicle_type"):
+                        order["vehicle_type"] = transport.get("vehicle_type")
+                    if not order.get("vehicle_number") and transport.get("vehicle_number"):
+                        order["vehicle_number"] = transport.get("vehicle_number")
+                    if not order.get("driver_name") and transport.get("driver_name"):
+                        order["driver_name"] = transport.get("driver_name")
+    
     return orders
 
 # ==================== SHIPPING ROUTES ====================
@@ -8570,9 +8843,10 @@ async def auto_generate_procurement(current_user: dict = Depends(get_current_use
     # Get all pending job orders that require procurement
     # Include job orders that have procurement_required=True, procurement_status="pending", 
     # or have material_shortages array with items
+    # Also include ready_for_dispatch jobs that may have raw material shortages
     pending_jobs_raw = await db.job_orders.find(
         {
-            "status": {"$in": ["pending", "procurement", "in_production"]}
+            "status": {"$in": ["pending", "procurement", "in_production", "ready_for_dispatch"]}
         },
         {"_id": 0}
     ).to_list(1000)
@@ -10431,6 +10705,7 @@ class TransportInward(BaseModel):
     po_number: str
     supplier_name: str
     incoterm: str
+    vehicle_type: Optional[str] = None
     vehicle_number: Optional[str] = None
     driver_name: Optional[str] = None
     driver_contact: Optional[str] = None
@@ -10450,7 +10725,9 @@ class TransportOutward(BaseModel):
     job_number: Optional[str] = None
     customer_name: str
     transport_type: str = "LOCAL"  # LOCAL, CONTAINER
+    vehicle_type: Optional[str] = None
     vehicle_number: Optional[str] = None
+    driver_name: Optional[str] = None
     container_number: Optional[str] = None
     destination: Optional[str] = None
     dispatch_date: Optional[str] = None
@@ -10482,7 +10759,9 @@ async def get_transport_inward(status: Optional[str] = None, current_user: dict 
                 
                 # Get unit from first line (assuming all lines have same UOM)
                 if po_lines and len(po_lines) > 0:
-                    record["total_uom"] = po_lines[0].get("uom", "KG")
+                    unit = po_lines[0].get("uom", "KG")
+                    record["total_uom"] = unit
+                    record["total_unit"] = unit  # Also set total_unit for backward compatibility
                 
                 # Get product/item names summary from lines
                 product_names = [line.get("item_name", "Unknown") for line in po_lines if line.get("item_name")]
@@ -11085,6 +11364,7 @@ async def book_transport_inward_exw(data: dict, current_user: dict = Depends(get
         "source": "PO_EXW",
         "transporter": data.get("transporter", ""),
         "transporter_name": data.get("transporter", ""),  # Ensure transporter_name is set
+        "vehicle_type": data.get("vehicle_type", ""),
         "vehicle_number": data.get("vehicle_number", ""),
         "driver_name": data.get("driver_name", ""),
         "driver_phone": data.get("driver_phone", ""),
@@ -11136,6 +11416,7 @@ async def book_transport_inward_import(data: dict, current_user: dict = Depends(
         "source": "IMPORT",
         "transporter": data.get("transporter", ""),
         "transporter_name": data.get("transporter", ""),  # Ensure transporter_name is set
+        "vehicle_type": data.get("vehicle_type", ""),
         "vehicle_number": data.get("vehicle_number", ""),
         "driver_name": data.get("driver_name", ""),
         "driver_phone": data.get("driver_phone", ""),
@@ -13003,6 +13284,13 @@ async def create_do_from_qc(inspection: dict, current_user: dict):
         if quotation:
             customer_type = quotation.get("order_type", "local")
     
+    # Get vehicle and driver info from transport if available
+    vehicle_number = None
+    driver_name = None
+    if transport and transport.get("id"):
+        vehicle_number = transport.get("vehicle_number")
+        driver_name = transport.get("driver_name")  # May not exist in transport_outward model
+    
     delivery_order = {
         "id": str(uuid.uuid4()),
         "do_number": do_number,
@@ -13014,6 +13302,8 @@ async def create_do_from_qc(inspection: dict, current_user: dict):
         "customer_type": customer_type,
         "qc_inspection_id": inspection["id"],
         "net_weight": inspection.get("net_weight"),
+        "vehicle_number": vehicle_number,  # Include vehicle number from transport
+        "driver_name": driver_name,  # Include driver name if available
         "issued_by": current_user["id"],
         "issued_at": datetime.now(timezone.utc).isoformat()
     }
@@ -13025,14 +13315,42 @@ async def create_do_from_qc(inspection: dict, current_user: dict):
         {"$set": {"status": "dispatched"}}
     )
     
-    # Deduct from inventory
+    # Deduct from inventory (CRITICAL - must update both products.current_stock and inventory_balances.on_hand)
     product = await db.products.find_one({"id": job.get("product_id")}, {"_id": 0})
-    if product:
-        new_stock = max(0, product.get("current_stock", 0) - job.get("quantity", 0))
+    if not product:
+        print(f"WARNING: Product {job.get('product_id')} not found. Cannot deduct stock for delivery order {do_number}.")
+    else:
+        prev_stock = product.get("current_stock", 0)
+        new_stock = max(0, prev_stock - job.get("quantity", 0))
+        
+        # Update products collection
         await db.products.update_one(
             {"id": job.get("product_id")},
             {"$set": {"current_stock": new_stock}}
         )
+        
+        # ALSO update inventory_balances (CRITICAL - ensures sync with Inventory page)
+        await db.inventory_balances.update_one(
+            {"item_id": job.get("product_id")},
+            {"$inc": {"on_hand": -job.get("quantity", 0)}},
+            upsert=True
+        )
+        
+        # Create inventory movement record
+        movement = InventoryMovement(
+            product_id=job.get("product_id"),
+            product_name=job.get("product_name", "Unknown"),
+            sku=product.get("sku", ""),
+            movement_type="do_deduct",
+            quantity=job.get("quantity", 0),
+            reference_type="delivery_order",
+            reference_id=delivery_order["id"],
+            reference_number=do_number,
+            previous_stock=prev_stock,
+            new_stock=new_stock,
+            created_by=current_user["id"]
+        )
+        await db.inventory_movements.insert_one(movement.model_dump())
     
     # Update transport status
     if transport.get("id"):
@@ -13974,6 +14292,71 @@ async def update_contact_for_dispatch(data: dict, current_user: dict = Depends(g
         upsert=True
     )
     return {"message": "Contact for dispatch updated successfully", "data": data}
+
+@api_router.post("/migrate/vehicle-fields")
+async def migrate_vehicle_fields(current_user: dict = Depends(get_current_user)):
+    """
+    Migration endpoint: Add vehicle_type, vehicle_number, and driver_name fields to existing records.
+    This populates the new vehicle-related fields that were added to TransportInward, TransportOutward, and DeliveryOrder models.
+    """
+    if current_user["role"] not in ["admin"]:
+        raise HTTPException(status_code=403, detail="Only admin can run migrations")
+    
+    results = {
+        "transport_inward": {"updated": 0, "total": 0},
+        "transport_outward": {"updated": 0, "total": 0},
+        "delivery_orders": {"updated": 0, "total": 0}
+    }
+    
+    # 1. Update TransportInward records - add vehicle_type if missing
+    inward_count = await db.transport_inward.count_documents({})
+    inward_result = await db.transport_inward.update_many(
+        {"vehicle_type": {"$exists": False}},
+        {"$set": {"vehicle_type": None}}
+    )
+    results["transport_inward"]["updated"] = inward_result.modified_count
+    results["transport_inward"]["total"] = inward_count
+    
+    # 2. Update TransportOutward records - add vehicle_type and driver_name if missing
+    outward_count = await db.transport_outward.count_documents({})
+    
+    # Update vehicle_type
+    outward_vehicle_type_result = await db.transport_outward.update_many(
+        {"vehicle_type": {"$exists": False}},
+        {"$set": {"vehicle_type": None}}
+    )
+    
+    # Update driver_name
+    outward_driver_result = await db.transport_outward.update_many(
+        {"driver_name": {"$exists": False}},
+        {"$set": {"driver_name": None}}
+    )
+    
+    results["transport_outward"]["updated"] = max(
+        outward_vehicle_type_result.modified_count,
+        outward_driver_result.modified_count
+    )
+    results["transport_outward"]["total"] = outward_count
+    
+    # 3. Update DeliveryOrder records - add vehicle_type if missing
+    do_count = await db.delivery_orders.count_documents({})
+    do_result = await db.delivery_orders.update_many(
+        {"vehicle_type": {"$exists": False}},
+        {"$set": {"vehicle_type": None}}
+    )
+    results["delivery_orders"]["updated"] = do_result.modified_count
+    results["delivery_orders"]["total"] = do_count
+    
+    return {
+        "message": "Vehicle fields migration completed",
+        "results": results,
+        "summary": {
+            "transport_inward_updated": results["transport_inward"]["updated"],
+            "transport_outward_updated": results["transport_outward"]["updated"],
+            "delivery_orders_updated": results["delivery_orders"]["updated"],
+            "total_records_processed": results["transport_inward"]["total"] + results["transport_outward"]["total"] + results["delivery_orders"]["total"]
+        }
+    }
 
 
 app.include_router(api_router)

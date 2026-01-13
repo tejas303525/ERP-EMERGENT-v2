@@ -67,7 +67,9 @@ export default function ShippingPage() {
         jobOrderAPI.getAll('ready_for_dispatch'),
       ]);
       setBookings(bookingsRes.data);
-      setJobs(jobsRes.data);
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      setJobs(Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []));
     } catch (error) {
       toast.error('Failed to load data');
     } finally {

@@ -21,6 +21,7 @@ const TransportPlannerPage = () => {
   const [inwardEXW, setInwardEXW] = useState([]);
   const [inwardImport, setInwardImport] = useState([]);
   const [dispatch, setDispatch] = useState([]);
+  const [outwardTransports, setOutwardTransports] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showBookingModal, setShowBookingModal] = useState(false);
@@ -84,8 +85,12 @@ const TransportPlannerPage = () => {
       
       // Get dispatch jobs
       const outward = outwardRes.data || [];
+      setOutwardTransports(outward); // Store all outward transports for MT calculations
       const jobsRes = await api.get('/job-orders', { params: { status: 'ready_for_dispatch' } }).catch(() => ({ data: [] }));
-      const readyJobs = (jobsRes.data || []).filter(j => 
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      const jobsData = Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []);
+      const readyJobs = jobsData.filter(j => 
         j.status === 'ready_for_dispatch' || j.status === 'approved'
       );
       
@@ -113,14 +118,15 @@ const TransportPlannerPage = () => {
           
           // Calculate quantity booked from all transport bookings
           const quantityBooked = jobTransports.reduce((sum, t) => sum + (t.quantity || 0), 0);
-          const totalQuantity = job.quantity || 0;
-          const balanceQuantity = totalQuantity - quantityBooked;
+          // Use total_weight_mt instead of quantity (quantity is in drums/KG, but bookings are in MT)
+          const totalQuantityMT = job.total_weight_mt || 0;
+          const balanceQuantity = totalQuantityMT - quantityBooked;
           
           return {
             ...job,
             type: 'JO',
-            // Job needs booking if no properly booked transport exists for it
-            needs_booking: !hasTransport,
+            // Job needs booking if balance quantity > 0 (regardless of whether transports exist)
+            needs_booking: balanceQuantity > 0,
             status: job.status === 'ready_for_dispatch' ? 'READY' : 'APPROVED',
             // Include transport bookings and calculated quantities
             transport_bookings: jobTransports,
@@ -133,8 +139,9 @@ const TransportPlannerPage = () => {
           if (t.job_order_id) {
             const jobTransports = transportByJobId[t.job_order_id] || [];
             const quantityBooked = jobTransports.reduce((sum, tr) => sum + (tr.quantity || 0), 0);
-            const totalQuantity = t.quantity || 0;
-            const balanceQuantity = totalQuantity - quantityBooked;
+            // Use total_weight_mt instead of quantity for MT calculation
+            const totalQuantityMT = t.total_weight_mt || 0;
+            const balanceQuantity = totalQuantityMT - quantityBooked;
             
             return {
               ...t,
@@ -165,6 +172,27 @@ const TransportPlannerPage = () => {
   const importPending = inwardImport.filter(t => t.status === 'PENDING').length;
   const dispatchNeedsBooking = dispatch.filter(t => t.needs_booking).length;
 
+  // Calculate MT totals for dispatched and pending
+  const dispatchedMT = outwardTransports
+    .filter(t => ['DISPATCHED', 'DELIVERED', 'AT_PORT', 'SHIPPED'].includes(t.status))
+    .reduce((sum, t) => {
+      const qty = parseFloat(t.quantity) || 0;
+      if (qty === 0 && t.total_weight_mt) {
+        return sum + (parseFloat(t.total_weight_mt) || 0);
+      }
+      return sum + qty;
+    }, 0);
+  
+  const pendingMT = outwardTransports
+    .filter(t => ['PENDING', 'LOADING', 'NEEDS_BOOKING'].includes(t.status))
+    .reduce((sum, t) => {
+      let qty = parseFloat(t.quantity) || 0;
+      if (qty === 0 && t.total_weight_mt) {
+        qty = parseFloat(t.total_weight_mt) || 0;
+      }
+      return sum + qty;
+    }, 0);
+
   return (
     <div className="p-6 max-w-[1800px] mx-auto" data-testid="transport-planner-page">
       {/* Header */}
@@ -179,7 +207,7 @@ const TransportPlannerPage = () => {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-5 gap-4 mb-6">
         <div className="glass p-4 rounded-lg border border-blue-500/30">
           <p className="text-sm text-muted-foreground">EXW Needs Booking</p>
           <p className="text-2xl font-bold text-blue-400">{exwNeedsBooking}</p>
@@ -191,6 +219,14 @@ const TransportPlannerPage = () => {
         <div className="glass p-4 rounded-lg border border-amber-500/30">
           <p className="text-sm text-muted-foreground">Dispatch Needs Booking</p>
           <p className="text-2xl font-bold text-amber-400">{dispatchNeedsBooking}</p>
+        </div>
+        <div className="glass p-4 rounded-lg border border-cyan-500/30">
+          <p className="text-sm text-muted-foreground">Dispatched MT</p>
+          <p className="text-2xl font-bold text-cyan-400">{dispatchedMT.toFixed(2)}</p>
+        </div>
+        <div className="glass p-4 rounded-lg border border-orange-500/30">
+          <p className="text-sm text-muted-foreground">Pending MT</p>
+          <p className="text-2xl font-bold text-orange-400">{pendingMT.toFixed(2)}</p>
         </div>
       </div>
 
@@ -832,18 +868,19 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
     }
   });
   
-  // Calculate quantity booked and balance quantity for each job order
+  // Use already-calculated values from loadData if available, otherwise recalculate
+  // The loadData function already calculates quantity_booked and balance_quantity correctly
   const itemsWithQuantities = jobOrders.map(item => {
+    // If quantity_booked and balance_quantity are already calculated in loadData, use them
+    if (item.quantity_booked !== undefined && item.balance_quantity !== undefined) {
+      return item;
+    }
+    
+    // Otherwise, recalculate (fallback for edge cases)
     const jobTransports = transportByJobId[item.id] || [];
-    
-    // Calculate total quantity booked from all transport bookings
     const quantityBooked = jobTransports.reduce((sum, t) => sum + (t.quantity || 0), 0);
-    
-    // Get job order total quantity
-    const totalQuantity = item.quantity || 0;
-    
-    // Calculate balance quantity
-    const balanceQuantity = totalQuantity - quantityBooked;
+    const totalQuantityMT = item.total_weight_mt || 0;
+    const balanceQuantity = totalQuantityMT - quantityBooked;
     
     return {
       ...item,
@@ -904,8 +941,8 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Job Number</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Total MT</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Booked Quantity</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Balance Quantity</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Booked MT</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Balance MT</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Customer</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Action</th>
@@ -922,15 +959,17 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                     <tr key={item.id} className="border-b border-border/50 hover:bg-muted/10">
                       <td className="p-3 font-mono font-medium">{item.job_number}</td>
                       <td className="p-3">{item.product_name || item.items?.[0]?.product_name || '-'}</td>
-                      <td className="p-3 font-mono">{item.quantity || item.items?.[0]?.quantity || 0} {unit}</td>
+                      <td className="p-3 font-mono text-cyan-400 font-semibold">
+                        {(item.total_weight_mt || 0).toFixed(2)} MT
+                      </td>
                       <td className="p-3">
                         <span className={quantityBooked > 0 ? 'text-green-400' : 'text-muted-foreground'}>
-                          {quantityBooked} {unit}
+                          {quantityBooked.toFixed(2)} MT
                         </span>
                       </td>
                       <td className="p-3">
                         <span className={balanceQty > 0 ? 'text-amber-400 font-semibold' : 'text-green-400'}>
-                          {balanceQty} {unit}
+                          {balanceQty.toFixed(2)} MT
                         </span>
                       </td>
                       <td className="p-3">{item.customer_name || '-'}</td>
@@ -981,8 +1020,8 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Job Number</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Total MT</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Booked Quantity</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Balance Quantity</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Booked MT</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Balance MT</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
                 </tr>
               </thead>
@@ -995,9 +1034,11 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                     <tr key={item.id} className="border-b border-border/50 hover:bg-muted/10">
                       <td className="p-3 font-mono font-medium">{item.job_number}</td>
                       <td className="p-3">{item.product_name || item.items?.[0]?.product_name || '-'}</td>
-                      <td className="p-3 font-mono">{item.quantity || item.items?.[0]?.quantity || 0} {unit}</td>
-                      <td className="p-3 text-green-400">{quantityBooked} {unit}</td>
-                      <td className="p-3 text-green-400 font-semibold">{balanceQty} {unit}</td>
+                      <td className="p-3 font-mono text-cyan-400 font-semibold">
+                        {(item.total_weight_mt || 0).toFixed(2)} MT
+                      </td>
+                      <td className="p-3 text-green-400">{quantityBooked.toFixed(2)} MT</td>
+                      <td className="p-3 text-green-400 font-semibold">{balanceQty.toFixed(2)} MT</td>
                       <td className="p-3">
                         <Badge className="bg-green-500/20 text-green-400">
                           Ready for Dispatch
@@ -1117,7 +1158,29 @@ const TransportBookingModal = ({ type, item, onClose, onBooked }) => {
         };
       }
       
-      await api.post(endpoint, payload);
+      const response = await api.post(endpoint, payload);
+      const transportData = response.data;
+      
+      // Store notification for Security Window when vehicle is booked
+      if (form.vehicle_number && transportData) {
+        const notificationKey = `security-vehicle-booked-${transportData.id || transportData.transport_number || Date.now()}`;
+        const notificationData = {
+          transport_number: transportData.transport_number || item.transport_number || '-',
+          vehicle_number: form.vehicle_number,
+          transporter_name: form.transporter_name,
+          driver_name: form.driver_name,
+          driver_contact: form.driver_contact,
+          po_number: item.po_number,
+          import_number: item.import_number,
+          job_number: item.job_number,
+          supplier_name: item.supplier_name,
+          customer_name: item.customer_name,
+          timestamp: new Date().toISOString(),
+          type: 'VEHICLE_BOOKED',
+          transport_type: type
+        };
+        localStorage.setItem(notificationKey, JSON.stringify(notificationData));
+      }
       
       toast.success('Transport booked successfully');
       onBooked();

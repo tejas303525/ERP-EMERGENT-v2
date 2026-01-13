@@ -24,10 +24,33 @@ export default function LoadingUnloadingWindow() {
   const [activeTab, setActiveTab] = useState('loading');
   const [dismissedNotifications, setDismissedNotifications] = useState(new Set());
   const [searchTerm, setSearchTerm] = useState('');
+  const [statusUpdateNotifications, setStatusUpdateNotifications] = useState([]);
 
   useEffect(() => {
     loadData();
+    loadStatusUpdateNotifications();
   }, []);
+
+  const loadStatusUpdateNotifications = () => {
+    // Check localStorage for status update notifications
+    const notifications = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith('unloading-in-transit-') || key.startsWith('loading-started-'))) {
+        try {
+          const data = JSON.parse(localStorage.getItem(key));
+          notifications.push({
+            key,
+            ...data
+          });
+        } catch (e) {
+          // Invalid JSON, remove it
+          localStorage.removeItem(key);
+        }
+      }
+    }
+    setStatusUpdateNotifications(notifications);
+  };
 
   const loadData = async () => {
     setLoading(true);
@@ -148,6 +171,9 @@ export default function LoadingUnloadingWindow() {
       // Auto-expand today's date
       const today = new Date().toISOString().split('T')[0];
       setExpandedDates({ [today]: true });
+      
+      // Reload status update notifications
+      loadStatusUpdateNotifications();
     } catch (error) {
       console.error('Failed to load data:', error);
       toast.error('Failed to load loading/unloading schedule');
@@ -283,6 +309,28 @@ export default function LoadingUnloadingWindow() {
     setDismissedNotifications(prev => new Set([...prev, key]));
   };
 
+  const dismissStatusNotification = (key) => {
+    // Remove from localStorage
+    localStorage.removeItem(key);
+    // Remove from state
+    setStatusUpdateNotifications(prev => prev.filter(n => n.key !== key));
+    // Also mark as dismissed to prevent re-showing
+    setDismissedNotifications(prev => new Set([...prev, key]));
+  };
+
+  // Filter status update notifications by type and dismissed status
+  const loadingStatusNotifications = useMemo(() => {
+    return statusUpdateNotifications.filter(
+      n => n.type === 'LOADING' && !dismissedNotifications.has(n.key)
+    );
+  }, [statusUpdateNotifications, dismissedNotifications]);
+
+  const unloadingStatusNotifications = useMemo(() => {
+    return statusUpdateNotifications.filter(
+      n => n.type === 'IN_TRANSIT' && !dismissedNotifications.has(n.key)
+    );
+  }, [statusUpdateNotifications, dismissedNotifications]);
+
   return (
     <div className="page-container" data-testid="loading-unloading-window">
       {/* Transport Booking Notifications */}
@@ -381,6 +429,94 @@ export default function LoadingUnloadingWindow() {
                     variant="ghost"
                     size="sm"
                     onClick={() => dismissNotification(`unloading-${op.transport_number || op.id}`)}
+                    className="ml-2"
+                  >
+                    <X className="w-4 h-4" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Status Update Notifications - Loading Started */}
+      {activeTab === 'loading' && loadingStatusNotifications.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {loadingStatusNotifications.map((notification) => (
+            <Card key={notification.key} className="bg-amber-500/10 border-amber-500/30">
+              <CardContent className="p-4">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-start gap-3 flex-1">
+                    <Bell className="w-5 h-5 text-amber-400 mt-0.5" />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <p className="font-semibold text-amber-400">Loading Started</p>
+                        <Badge className="bg-amber-500/20 text-amber-400">
+                          {notification.transport_number || notification.job_number}
+                        </Badge>
+                      </div>
+                      <div className="text-sm text-muted-foreground space-y-1">
+                        {notification.job_number && (
+                          <p>Job Order: {notification.job_number}</p>
+                        )}
+                        {notification.customer_name && (
+                          <p>Customer: {notification.customer_name}</p>
+                        )}
+                        <p className="text-amber-400 font-medium">
+                          Status: Loading operations have started
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => dismissStatusNotification(notification.key)}
+                    className="ml-2"
+                  >
+                    <X className="w-4 h-4" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Status Update Notifications - In Transit */}
+      {activeTab === 'unloading' && unloadingStatusNotifications.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {unloadingStatusNotifications.map((notification) => (
+            <Card key={notification.key} className="bg-blue-500/10 border-blue-500/30">
+              <CardContent className="p-4">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-start gap-3 flex-1">
+                    <Bell className="w-5 h-5 text-blue-400 mt-0.5" />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <p className="font-semibold text-blue-400">Transport In Transit</p>
+                        <Badge className="bg-blue-500/20 text-blue-400">
+                          {notification.transport_number}
+                        </Badge>
+                      </div>
+                      <div className="text-sm text-muted-foreground space-y-1">
+                        {notification.po_number && (
+                          <p>PO: {notification.po_number}</p>
+                        )}
+                        {notification.supplier_name && (
+                          <p>Supplier: {notification.supplier_name}</p>
+                        )}
+                        <p className="text-blue-400 font-medium">
+                          Status: Transport is now in transit and expected for unloading
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => dismissStatusNotification(notification.key)}
                     className="ml-2"
                   >
                     <X className="w-4 h-4" />

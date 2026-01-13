@@ -57,7 +57,9 @@ export default function JobOrdersPage() {
         salesOrderAPI.getAll('active'),
         productAPI.getAll(),
       ]);
-      setJobs(jobsRes.data);
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      setJobs(Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []));
       setSalesOrders(ordersRes.data);
       setProducts(productsRes.data);
     } catch (error) {

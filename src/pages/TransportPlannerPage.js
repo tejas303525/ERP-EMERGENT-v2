@@ -60,46 +60,12 @@ const TransportPlannerPage = () => {
       
       // Get dispatch jobs
       const outward = outwardRes.data || [];
-      
-      // Get job IDs that have transports
-      const jobIdsWithTransport = [...new Set(outward.map(t => t.job_order_id).filter(Boolean))];
-      
-      // Fetch jobs that are ready for dispatch
-      const jobsRes = await api.get('/job-orders', { 
-        params: { status: 'ready_for_dispatch' } 
-      }).catch(() => ({ data: [] }));
-      
-      let readyJobs = jobsRes.data || [];
-      
-      // Also fetch individual jobs that have transports but aren't in ready_for_dispatch
-      // This ensures we show balance for all jobs with partial bookings
-      if (jobIdsWithTransport.length > 0) {
-        const missingJobIds = jobIdsWithTransport.filter(jobId => 
-          !readyJobs.find(j => j.id === jobId)
-        );
-        
-        if (missingJobIds.length > 0) {
-          try {
-            const transportJobsRes = await Promise.all(
-              missingJobIds.slice(0, 50).map(jobId => // Limit to 50 to avoid too many requests
-                api.get(`/job-orders/${jobId}`).catch(() => null)
-              )
-            );
-            const transportJobs = transportJobsRes
-              .filter(j => j && j.data)
-              .map(j => j.data);
-            readyJobs = [...readyJobs, ...transportJobs];
-          } catch (err) {
-            console.warn('Error fetching transport jobs:', err);
-          }
-        }
-      }
-      
-      // Filter to include ready_for_dispatch, approved, or jobs with transports
-      readyJobs = readyJobs.filter(j => 
-        j.status === 'ready_for_dispatch' || 
-        j.status === 'approved' || 
-        jobIdsWithTransport.includes(j.id)
+      const jobsRes = await api.get('/job-orders', { params: { status: 'ready_for_dispatch' } }).catch(() => ({ data: [] }));
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      const jobsData = Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []);
+      const readyJobs = jobsData.filter(j => 
+        j.status === 'ready_for_dispatch' || j.status === 'approved'
       );
       
       // Group transport bookings by job_order_id to calculate quantities
@@ -114,123 +80,45 @@ const TransportPlannerPage = () => {
         }
       });
       
-      // Helper function to normalize units for comparison
-      const normalizeUnit = (unit) => {
-        if (!unit) return '';
-        const u = unit.toUpperCase().trim();
-        // Normalize common unit variations
-        if (u.includes('DRUM') || u.includes('STEEL DRUM')) return 'DRUM';
-        if (u === 'MT' || u === 'TON' || u === 'TONNE') return 'MT';
-        if (u === 'KG' || u === 'KILOGRAM') return 'KG';
-        return u;
-      };
-      
-      // Helper function to convert quantity to job order unit
-      const convertToJobUnit = (qty, fromUnit, toUnit) => {
-        if (!qty || !fromUnit || !toUnit) return qty;
-        const from = normalizeUnit(fromUnit);
-        const to = normalizeUnit(toUnit);
-        
-        // If units match, return as is
-        if (from === to) return qty;
-        
-        // Convert MT to KG (1 MT = 1000 KG)
-        if (from === 'MT' && to === 'KG') return qty * 1000;
-        if (from === 'KG' && to === 'MT') return qty / 1000;
-        
-        // For DRUM, we can't convert without knowing weight per drum
-        // So we'll assume same unit if both are DRUM-related
-        if ((from.includes('DRUM') || from === 'DRUM') && 
-            (to.includes('DRUM') || to === 'DRUM')) {
-          return qty;
-        }
-        
-        // If units don't match and can't convert, return original quantity
-        // This might indicate a data issue, but we'll still show it
-        return qty;
-      };
-      
-      // Create a map of job IDs to avoid duplicates
-      const jobMap = new Map();
-      
-      // Process ready jobs first
-      readyJobs.forEach(job => {
-        const jobTransports = transportByJobId[job.id] || [];
-        const hasTransport = jobTransports.length > 0;
-        
-        // Calculate quantity booked from all transport bookings in MT
-        // All transport bookings should be in MT for consistency
-        let quantityBookedMT = 0;
-        
-        jobTransports.forEach(t => {
-          const transportUnit = normalizeUnit(t.unit || '');
-          let transportQtyMT = t.quantity || 0;
+      setDispatch([
+        ...readyJobs.map(job => {
+          const jobTransports = transportByJobId[job.id] || [];
+          const hasTransport = jobTransports.length > 0;
           
-          // Convert transport quantity to MT if needed
-          if (transportUnit === 'KG') {
-            transportQtyMT = transportQtyMT / 1000;
-          } else if (transportUnit === 'DRUM') {
-            // For drums, we can't convert without knowing weight per drum
-            // Assume transport quantity is already in MT or use a conversion factor
-            // For now, we'll use the transport quantity as-is if it's in drums
-            // This should be handled by ensuring transport bookings are always in MT
-            transportQtyMT = t.quantity || 0;
-          }
-          // If already in MT, use as-is
+          // Calculate quantity booked from all transport bookings
+          const quantityBooked = jobTransports.reduce((sum, t) => sum + (t.quantity || 0), 0);
+          const totalQuantity = job.quantity || 0;
+          const balanceQuantity = totalQuantity - quantityBooked;
           
-          quantityBookedMT += transportQtyMT;
-        });
-        
-        // Use total_weight_mt from job order for balance calculation
-        const totalQuantityMT = job.total_weight_mt || 0;
-        const balanceQuantityMT = Math.max(0, totalQuantityMT - quantityBookedMT);
-        
-        jobMap.set(job.id, {
-          ...job,
-          type: 'JO',
-          needs_booking: balanceQuantityMT > 0, // Needs booking if there's balance quantity
-          status: job.status === 'ready_for_dispatch' ? 'READY' : (job.status === 'approved' ? 'APPROVED' : job.status?.toUpperCase() || 'PENDING'),
-          transport_bookings: jobTransports,
-          quantity_booked_mt: quantityBookedMT,
-          balance_quantity_mt: balanceQuantityMT
-        });
-      });
-      
-      // Also include transport records for jobs that might not be in ready_for_dispatch status
-      // but have transport bookings
-      outward.forEach(t => {
-        if (t.job_order_id && !jobMap.has(t.job_order_id)) {
-          // Fetch job order if not already loaded
-          const jobTransports = transportByJobId[t.job_order_id] || [];
-          const quantityBookedMT = jobTransports.reduce((sum, tr) => {
-            const transportUnit = normalizeUnit(tr.unit || '');
-            let transportQtyMT = tr.quantity || 0;
-            
-            // Convert transport quantity to MT if needed
-            if (transportUnit === 'KG') {
-              transportQtyMT = transportQtyMT / 1000;
-            }
-            // If already in MT or DRUM, use as-is (should be MT for consistency)
-            
-            return sum + transportQtyMT;
-          }, 0);
-          
-          // Try to get total_weight_mt from transport record or default to 0
-          const totalQuantityMT = t.total_weight_mt || 0;
-          const balanceQuantityMT = Math.max(0, totalQuantityMT - quantityBookedMT);
-          
-          jobMap.set(t.job_order_id, {
-            ...t,
-            job_number: t.job_number || '',
+          return {
+            ...job,
             type: 'JO',
-            quantity_booked_mt: quantityBookedMT,
-            balance_quantity_mt: balanceQuantityMT,
-            transport_bookings: jobTransports
-          });
-        }
-      });
-      
-      setDispatch(Array.from(jobMap.values()));
+            needs_booking: !hasTransport,
+            status: job.status === 'ready_for_dispatch' ? 'READY' : 'APPROVED',
+            // Include transport bookings and calculated quantities
+            transport_bookings: jobTransports,
+            quantity_booked: quantityBooked,
+            balance_quantity: balanceQuantity
+          };
+        }),
+        ...outward.map(t => {
+          // For transport records, also calculate quantities if job_order_id exists
+          if (t.job_order_id) {
+            const jobTransports = transportByJobId[t.job_order_id] || [];
+            const quantityBooked = jobTransports.reduce((sum, tr) => sum + (tr.quantity || 0), 0);
+            // Try to get job order quantity from the transport record or fetch it
+            const totalQuantity = t.quantity || 0; // This might need to be enriched from job order
+            const balanceQuantity = totalQuantity - quantityBooked;
+            
+            return {
+              ...t,
+              quantity_booked: quantityBooked,
+              balance_quantity: balanceQuantity
+            };
+          }
+          return t;
+        })
+      ]);
       
       setSuppliers(suppliersRes.data || []);
     } catch (error) {
@@ -578,71 +466,23 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
     }
   });
   
-  // Helper function to normalize units for comparison
-  const normalizeUnit = (unit) => {
-    if (!unit) return '';
-    const u = unit.toUpperCase().trim();
-    // Normalize common unit variations
-    if (u.includes('DRUM') || u.includes('STEEL DRUM')) return 'DRUM';
-    if (u === 'MT' || u === 'TON' || u === 'TONNE') return 'MT';
-    if (u === 'KG' || u === 'KILOGRAM') return 'KG';
-    return u;
-  };
-  
-  // Helper function to convert quantity to job order unit
-  const convertToJobUnit = (qty, fromUnit, toUnit) => {
-    if (!qty || !fromUnit || !toUnit) return qty;
-    const from = normalizeUnit(fromUnit);
-    const to = normalizeUnit(toUnit);
-    
-    // If units match, return as is
-    if (from === to) return qty;
-    
-    // Convert MT to KG (1 MT = 1000 KG)
-    if (from === 'MT' && to === 'KG') return qty * 1000;
-    if (from === 'KG' && to === 'MT') return qty / 1000;
-    
-    // For DRUM, we can't convert without knowing weight per drum
-    // So we'll assume same unit if both are DRUM-related
-    if ((from.includes('DRUM') || from === 'DRUM') && 
-        (to.includes('DRUM') || to === 'DRUM')) {
-      return qty;
-    }
-    
-    // If units don't match and can't convert, return original quantity
-    return qty;
-  };
-  
-  // Calculate quantity booked and balance quantity for each job order in MT
+  // Calculate quantity booked and balance quantity for each job order
   const itemsWithQuantities = jobOrders.map(item => {
     const jobTransports = transportByJobId[item.id] || [];
     
-    // Calculate total quantity booked from all transport bookings in MT
-    let quantityBookedMT = 0;
-    jobTransports.forEach(t => {
-      const transportUnit = normalizeUnit(t.unit || '');
-      let transportQtyMT = t.quantity || 0;
-      
-      // Convert transport quantity to MT if needed
-      if (transportUnit === 'KG') {
-        transportQtyMT = transportQtyMT / 1000;
-      }
-      // If already in MT, use as-is
-      // Transport bookings should always be in MT for consistency
-      
-      quantityBookedMT += transportQtyMT;
-    });
+    // Calculate total quantity booked from all transport bookings
+    const quantityBooked = jobTransports.reduce((sum, t) => sum + (t.quantity || 0), 0);
     
-    // Use total_weight_mt from job order for balance calculation
-    const totalQuantityMT = item.total_weight_mt || 0;
+    // Get job order total quantity
+    const totalQuantity = item.quantity || 0;
     
-    // Calculate balance quantity in MT (ensure it's not negative)
-    const balanceQuantityMT = Math.max(0, totalQuantityMT - quantityBookedMT);
+    // Calculate balance quantity
+    const balanceQuantity = totalQuantity - quantityBooked;
     
     return {
       ...item,
-      quantity_booked_mt: quantityBookedMT,
-      balance_quantity_mt: balanceQuantityMT,
+      quantity_booked: quantityBooked,
+      balance_quantity: balanceQuantity,
       transport_bookings: jobTransports
     };
   });
@@ -650,12 +490,12 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
   // Filter: Show items that need booking OR have balance quantity > 0
   // Items remain on the page until balance quantity = 0
   const needsBooking = itemsWithQuantities.filter(i => 
-    i.needs_booking || (i.balance_quantity_mt && i.balance_quantity_mt > 0)
+    i.needs_booking || (i.balance_quantity && i.balance_quantity > 0)
   );
   
   // Only show fully dispatched items (balance = 0) - these can change status to dispatched
   const fullyDispatched = itemsWithQuantities.filter(i => 
-    i.balance_quantity_mt === 0 && i.quantity_booked_mt > 0
+    i.balance_quantity === 0 && i.quantity_booked > 0
   );
 
   return (
@@ -696,8 +536,8 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                 <tr>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Job Number</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Total MT</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Booked Quantity</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Total Quantity</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Quantity Booked</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Balance Quantity</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Customer</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
@@ -705,24 +545,23 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
               </thead>
               <tbody>
                 {needsBooking.map((item) => {
-                  const balanceQtyMT = item.balance_quantity_mt || 0;
-                  const quantityBookedMT = item.quantity_booked_mt || 0;
-                  const totalQtyMT = item.total_weight_mt || 0;
-                  const isFullyBooked = balanceQtyMT === 0 && quantityBookedMT > 0;
+                  const unit = item.unit || 'drums';
+                  const balanceQty = item.balance_quantity || 0;
+                  const isFullyBooked = balanceQty === 0 && item.quantity_booked > 0;
                   
                   return (
                     <tr key={item.id} className="border-b border-border/50 hover:bg-muted/10">
                       <td className="p-3 font-mono font-medium">{item.job_number}</td>
                       <td className="p-3">{item.product_name}</td>
-                      <td className="p-3 font-mono">{totalQtyMT.toFixed(2)} MT</td>
+                      <td className="p-3">{item.quantity} {unit}</td>
                       <td className="p-3">
-                        <span className={quantityBookedMT > 0 ? 'text-green-400' : 'text-muted-foreground'}>
-                          <span className="font-mono">{quantityBookedMT.toFixed(2)} MT</span>
+                        <span className={item.quantity_booked > 0 ? 'text-green-400' : 'text-muted-foreground'}>
+                          {item.quantity_booked || 0} {unit}
                         </span>
                       </td>
                       <td className="p-3">
-                        <span className={balanceQtyMT > 0 ? 'text-amber-400 font-semibold' : 'text-green-400'}>
-                          <span className="font-mono">{balanceQtyMT.toFixed(2)} MT</span>
+                        <span className={balanceQty > 0 ? 'text-amber-400 font-semibold' : 'text-green-400'}>
+                          {balanceQty} {unit}
                         </span>
                       </td>
                       <td className="p-3">{item.customer_name || '-'}</td>
@@ -737,7 +576,7 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                               {item.status}
                             </Badge>
                           )}
-                          {balanceQtyMT > 0 && (
+                          {balanceQty > 0 && (
                             <Button
                               size="sm"
                               variant="outline"
@@ -777,24 +616,22 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                 <tr>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Job Number</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Total MT</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Booked Quantity</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Total Quantity</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Quantity Booked</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Balance Quantity</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {fullyDispatched.map((item) => {
-                  const quantityBookedMT = item.quantity_booked_mt || 0;
-                  const balanceQtyMT = item.balance_quantity_mt || 0;
-                  const totalQtyMT = item.total_weight_mt || 0;
+                  const unit = item.unit || 'drums';
                   return (
                     <tr key={item.id} className="border-b border-border/50 hover:bg-muted/10">
                       <td className="p-3 font-mono font-medium">{item.job_number}</td>
                       <td className="p-3">{item.product_name}</td>
-                      <td className="p-3 font-mono">{totalQtyMT.toFixed(2)} MT</td>
-                      <td className="p-3 text-green-400 font-mono">{quantityBookedMT.toFixed(2)} MT</td>
-                      <td className="p-3 text-green-400 font-semibold font-mono">{balanceQtyMT.toFixed(2)} MT</td>
+                      <td className="p-3">{item.quantity} {unit}</td>
+                      <td className="p-3 text-green-400">{item.quantity_booked || 0} {unit}</td>
+                      <td className="p-3 text-green-400 font-semibold">0 {unit}</td>
                       <td className="p-3">
                         <Badge className="bg-green-500/20 text-green-400">
                           Ready for Dispatch
@@ -814,21 +651,9 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
 
 // ==================== TRANSPORT BOOKING MODAL ====================
 const TransportBookingModal = ({ type, jobOrder, onClose, onBooked }) => {
-  // Initialize quantity properly - use balance_quantity_mt if available and > 0, otherwise use total_weight_mt
-  const getInitialQuantity = () => {
-    if (!jobOrder) return '';
-    const balanceQtyMT = jobOrder.balance_quantity_mt;
-    const totalQtyMT = jobOrder.total_weight_mt;
-    // If balance_quantity_mt exists and is > 0, use it; otherwise use total_weight_mt
-    if (balanceQtyMT !== undefined && balanceQtyMT !== null && balanceQtyMT > 0) {
-      return balanceQtyMT;
-    }
-    return totalQtyMT || '';
-  };
-
   const [form, setForm] = useState({
     job_order_id: jobOrder?.id || '',
-    quantity_mt: getInitialQuantity(), // Quantity in MT
+    quantity: jobOrder?.balance_quantity || jobOrder?.quantity || '',
     transporter_name: '',
     vehicle_type: 'tanker',
     vehicle_number: '',
@@ -840,16 +665,10 @@ const TransportBookingModal = ({ type, jobOrder, onClose, onBooked }) => {
   // Update form when jobOrder changes
   useEffect(() => {
     if (jobOrder) {
-      const balanceQtyMT = jobOrder.balance_quantity_mt;
-      const totalQtyMT = jobOrder.total_weight_mt;
-      const initialQtyMT = (balanceQtyMT !== undefined && balanceQtyMT !== null && balanceQtyMT > 0) 
-        ? balanceQtyMT 
-        : (totalQtyMT || '');
-      
       setForm(prev => ({
         ...prev,
         job_order_id: jobOrder.id,
-        quantity_mt: initialQtyMT
+        quantity: jobOrder.balance_quantity || jobOrder.quantity || ''
       }));
     }
   }, [jobOrder]);
@@ -865,8 +684,8 @@ const TransportBookingModal = ({ type, jobOrder, onClose, onBooked }) => {
       return;
     }
     
-    if (type === 'DISPATCH' && (!form.quantity_mt || form.quantity_mt <= 0)) {
-      toast.error('Please enter a valid quantity in MT');
+    if (type === 'DISPATCH' && (!form.quantity || form.quantity <= 0)) {
+      toast.error('Please enter a valid quantity');
       return;
     }
     
@@ -874,35 +693,12 @@ const TransportBookingModal = ({ type, jobOrder, onClose, onBooked }) => {
     try {
       // Create transport booking
       const endpoint = type === 'INWARD_EXW' ? '/transport/inward/book' : '/transport/outward/book';
-      
-      // Ensure quantity is properly converted to number for dispatch (in MT)
-      let bookingQuantityMT = form.quantity_mt;
-      if (type === 'DISPATCH') {
-        if (bookingQuantityMT === '' || bookingQuantityMT === null || bookingQuantityMT === undefined) {
-          toast.error('Please enter a valid quantity in MT');
-          setSaving(false);
-          return;
-        }
-        bookingQuantityMT = parseFloat(bookingQuantityMT);
-        if (isNaN(bookingQuantityMT) || bookingQuantityMT <= 0) {
-          toast.error('Please enter a valid quantity in MT greater than 0');
-          setSaving(false);
-          return;
-        }
-      }
-      
-      const bookingData = {
+      await api.post(endpoint, {
         ...form,
-        quantity: bookingQuantityMT, // Send as quantity in MT
-        unit: 'MT', // Explicitly set unit to MT
-        transport_type: type === 'INWARD_EXW' ? 'INWARD' : 'LOCAL',
+        transport_type: type,
         job_id: form.job_order_id || undefined,
         job_order_id: form.job_order_id || undefined
-      };
-      
-      console.log('Booking transport with data:', bookingData); // Debug log
-      
-      await api.post(endpoint, bookingData);
+      });
       
       toast.success('Transport booked successfully');
       onBooked();
@@ -929,38 +725,27 @@ const TransportBookingModal = ({ type, jobOrder, onClose, onBooked }) => {
               <p className="text-sm font-medium">Job Order: {jobOrder.job_number}</p>
               <p className="text-xs text-muted-foreground">
                 Product: {jobOrder.product_name} | 
-                Total Weight: <span className="font-mono">{(jobOrder.total_weight_mt || 0).toFixed(2)} MT</span> | 
-                Balance: <span className="font-mono">{(jobOrder.balance_quantity_mt || jobOrder.total_weight_mt || 0).toFixed(2)} MT</span>
+                Total: {jobOrder.quantity} {jobOrder.unit || 'drums'} | 
+                Balance: {jobOrder.balance_quantity || jobOrder.quantity} {jobOrder.unit || 'drums'}
               </p>
             </div>
           )}
           
           {type === 'DISPATCH' && (
             <div>
-              <Label>Quantity Being Dispatched (MT) *</Label>
+              <Label>Quantity to Book *</Label>
               <Input
                 type="number"
                 step="0.01"
                 min="0"
-                max={jobOrder?.balance_quantity_mt || jobOrder?.total_weight_mt || ''}
-                value={form.quantity_mt}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  // Allow empty string for clearing, or parse as float
-                  if (val === '') {
-                    setForm({...form, quantity_mt: ''});
-                  } else {
-                    const numVal = parseFloat(val);
-                    if (!isNaN(numVal) && numVal >= 0) {
-                      setForm({...form, quantity_mt: numVal});
-                    }
-                  }
-                }}
-                placeholder="Enter quantity in MT"
+                max={jobOrder?.balance_quantity || jobOrder?.quantity || ''}
+                value={form.quantity}
+                onChange={(e) => setForm({...form, quantity: parseFloat(e.target.value) || ''})}
+                placeholder="Enter quantity"
               />
               {jobOrder && (
                 <p className="text-xs text-muted-foreground mt-1">
-                  Available: <span className="font-mono">{(jobOrder.balance_quantity_mt || jobOrder.total_weight_mt || 0).toFixed(2)} MT</span>
+                  Available: {jobOrder.balance_quantity || jobOrder.quantity} {jobOrder.unit || 'drums'}
                 </p>
               )}
             </div>

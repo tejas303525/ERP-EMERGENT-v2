@@ -34,7 +34,16 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    // Log error details in development
+    const isCheckAvailability = error.config?.url?.includes('/check-availability');
+    const isNetworkError = error.code === 'ERR_NETWORK' || error.message === 'Network Error' || !error.response;
+
+    // Suppress console logs for check-availability network/CORS errors
+    if (isCheckAvailability && isNetworkError) {
+      // Silently handle - don't log to console
+      return Promise.reject(error);
+    }
+
+    // Log error details in development (for non-suppressed errors)
     if (process.env.NODE_ENV === 'development') {
       console.error('[API Error]', {
         url: error.config?.url,
@@ -53,8 +62,8 @@ api.interceptors.response.use(
       window.location.href = '/login';
     }
 
-    // Handle CORS/Network errors
-    if (error.code === 'ERR_NETWORK' || error.message === 'Network Error') {
+    // Handle CORS/Network errors (only log if not suppressed above)
+    if (isNetworkError && !isCheckAvailability) {
       console.error('[API] Network error - check if backend is running at', BACKEND_URL);
     }
 
@@ -109,7 +118,7 @@ export const paymentAPI = {
 
 // Job Orders
 export const jobOrderAPI = {
-  getAll: (status) => api.get('/job-orders', { params: { status } }),
+  getAll: (status, page = 1, pageSize = 1000) => api.get('/job-orders', { params: { status, page, page_size: pageSize } }),
   getOne: (id) => api.get(`/job-orders/${id}`),
   create: (data) => api.post('/job-orders', data),
   updateStatus: (id, status) => api.put(`/job-orders/${id}/status`, null, { params: { status } }),

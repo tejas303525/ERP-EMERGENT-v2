@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
 import { formatCurrency } from '../lib/utils';
-import { Plus, Package, Trash2 } from 'lucide-react';
+import { Plus, Package, Trash2, Edit } from 'lucide-react';
 
 const CATEGORIES = [
   { value: 'raw_material', label: 'Raw Material' },
@@ -23,6 +23,8 @@ export default function ProductsPage() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
 
@@ -55,6 +57,11 @@ export default function ProductsPage() {
     }
   };
 
+  const resetForm = () => {
+    setForm({ sku: '', name: '', description: '', unit: 'KG', price_usd: 0, price_aed: 0, price_eur: 0, category: 'finished_product', min_stock: 0, type: 'MANUFACTURED' });
+    setSelectedProduct(null);
+  };
+
   const handleCreate = async () => {
     if (!form.sku || !form.name) {
       toast.error('Please enter SKU and name');
@@ -64,10 +71,47 @@ export default function ProductsPage() {
       await productAPI.create(form);
       toast.success('Product created');
       setCreateOpen(false);
-      setForm({ sku: '', name: '', description: '', unit: 'KG', price_usd: 0, price_aed: 0, price_eur: 0, category: 'finished_product', min_stock: 0, type: 'MANUFACTURED' });
+      resetForm();
       loadData();
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Failed to create product');
+    }
+  };
+
+  const handleEdit = (product) => {
+    setSelectedProduct(product);
+    setForm({
+      sku: product.sku || '',
+      name: product.name || '',
+      description: product.description || '',
+      unit: product.unit || 'KG',
+      price_usd: product.price_usd || 0,
+      price_aed: product.price_aed || 0,
+      price_eur: product.price_eur || 0,
+      category: product.category || 'finished_product',
+      min_stock: product.min_stock || 0,
+      type: product.type || 'MANUFACTURED',
+    });
+    setEditOpen(true);
+  };
+
+  const handleUpdate = async () => {
+    if (!form.sku || !form.name) {
+      toast.error('Please enter SKU and name');
+      return;
+    }
+    if (!selectedProduct) {
+      toast.error('No product selected');
+      return;
+    }
+    try {
+      await productAPI.update(selectedProduct.id, form);
+      toast.success('Product updated');
+      setEditOpen(false);
+      resetForm();
+      loadData();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to update product');
     }
   };
 
@@ -230,6 +274,131 @@ export default function ProductsPage() {
               </div>
             </DialogContent>
           </Dialog>
+
+          {/* Edit Dialog */}
+          <Dialog open={editOpen} onOpenChange={(open) => { setEditOpen(open); if (!open) resetForm(); }}>
+            <DialogContent className="max-w-2xl">
+              <DialogHeader>
+                <DialogTitle>Edit Product</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 py-4">
+                <div className="form-grid">
+                  <div className="form-field">
+                    <Label>SKU *</Label>
+                    <Input
+                      value={form.sku}
+                      onChange={(e) => setForm({...form, sku: e.target.value})}
+                      placeholder="e.g., PRD-001"
+                      data-testid="edit-product-sku-input"
+                    />
+                  </div>
+                  <div className="form-field">
+                    <Label>Name *</Label>
+                    <Input
+                      value={form.name}
+                      onChange={(e) => setForm({...form, name: e.target.value})}
+                      placeholder="Product name"
+                      data-testid="edit-product-name-input"
+                    />
+                  </div>
+                  <div className="form-field">
+                    <Label>Category</Label>
+                    <Select value={form.category} onValueChange={(v) => setForm({...form, category: v})}>
+                      <SelectTrigger data-testid="edit-product-category-select">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CATEGORIES.map(c => (
+                          <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="form-field">
+                    <Label>Product Type *</Label>
+                    <Select value={form.type} onValueChange={(v) => setForm({...form, type: v})}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="MANUFACTURED">Manufacturing Product</SelectItem>
+                        <SelectItem value="TRADED">Trading Product</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="form-field">
+                    <Label>Unit</Label>
+                    <Select value={form.unit} onValueChange={(v) => setForm({...form, unit: v})}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {UNITS.map(u => (
+                          <SelectItem key={u} value={u}>{u}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="form-grid">
+                  <div className="form-field">
+                    <Label>Price (USD)</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={form.price_usd || ''}
+                      onChange={(e) => setForm({...form, price_usd: parseFloat(e.target.value)})}
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div className="form-field">
+                    <Label>Price (AED)</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={form.price_aed || ''}
+                      onChange={(e) => setForm({...form, price_aed: parseFloat(e.target.value)})}
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div className="form-field">
+                    <Label>Price (EUR)</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={form.price_eur || ''}
+                      onChange={(e) => setForm({...form, price_eur: parseFloat(e.target.value)})}
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div className="form-field">
+                    <Label>Min Stock Level</Label>
+                    <Input
+                      type="number"
+                      value={form.min_stock || ''}
+                      onChange={(e) => setForm({...form, min_stock: parseFloat(e.target.value)})}
+                      placeholder="0"
+                    />
+                  </div>
+                </div>
+
+                <div className="form-field">
+                  <Label>Description</Label>
+                  <Textarea
+                    value={form.description}
+                    onChange={(e) => setForm({...form, description: e.target.value})}
+                    placeholder="Product description..."
+                  />
+                </div>
+
+                <div className="flex justify-end gap-3">
+                  <Button variant="outline" onClick={() => { setEditOpen(false); resetForm(); }}>Cancel</Button>
+                  <Button onClick={handleUpdate} data-testid="update-product-btn">Update Product</Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
       </div>
 
@@ -307,14 +476,26 @@ export default function ProductsPage() {
                   </td>
                   <td className="font-mono text-muted-foreground">{product.min_stock?.toLocaleString()}</td>
                   <td>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleDelete(product)}
-                      className="text-red-500 hover:text-red-700 hover:bg-red-50"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleEdit(product)}
+                        className="text-blue-500 hover:text-blue-700 hover:bg-blue-50"
+                        title="Edit product"
+                      >
+                        <Edit className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDelete(product)}
+                        className="text-red-500 hover:text-red-700 hover:bg-red-50"
+                        title="Delete product"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}

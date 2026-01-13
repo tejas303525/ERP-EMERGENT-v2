@@ -33,36 +33,93 @@ const TransportWindowPage = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [inwardRes, outwardRes, importsRes] = await Promise.all([
+      const [inwardRes, outwardRes, importsRes, posRes, jobsRes] = await Promise.all([
         api.get('/transport/inward'),
         api.get('/transport/outward'),
-        api.get('/imports').catch(() => ({ data: [] }))
+        api.get('/imports').catch(() => ({ data: [] })),
+        api.get('/purchase-orders', { params: { status: 'APPROVED' } }).catch(() => ({ data: [] })),
+        api.get('/job-orders', { params: { status: 'ready_for_dispatch' } }).catch(() => ({ data: [] }))
       ]);
       
       const inward = inwardRes.data || [];
-      // Separate EXW inward from Import inward
-      // Only show transports that have been properly booked (have transport_number)
-      // Note: Job orders with EXW incoterm should be routed here for local pickup/transport
-      setInwardEXW(inward.filter(t => 
-        (t.source === 'PO_EXW' || t.incoterm === 'EXW') && 
-        t.transport_number  // Only show booked transports
-      ));
+      // Show ALL EXW inward transports (both booked and unbooked)
+      const bookedEXW = inward.filter(t => 
+        (t.source === 'PO_EXW' || t.incoterm === 'EXW')
+      );
+      
+      // Get unbooked EXW POs that need transport booking
+      const existingPOIds = new Set(bookedEXW.map(t => t.po_id).filter(Boolean));
+      const unbookedPOs = (posRes.data || []).filter(po => 
+        po.status === 'APPROVED' &&
+        (po.incoterm === 'EXW' || po.incoterm === 'EXW') &&
+        !existingPOIds.has(po.id) &&
+        !po.transport_booked &&
+        !po.transport_number
+      );
+      
+      // Combine booked transports with unbooked POs
+      setInwardEXW([
+        ...bookedEXW,
+        ...unbookedPOs.map(po => ({
+          id: `unbooked-po-${po.id}`,
+          po_id: po.id,
+          po_number: po.po_number,
+          supplier_name: po.supplier_name,
+          incoterm: po.incoterm || 'EXW',
+          source: 'PO_EXW',
+          total_quantity: po.total_quantity,
+          total_unit: po.total_unit,
+          total_uom: po.total_unit,
+          delivery_date: po.delivery_date,
+          status: 'NOT_BOOKED',
+          transport_number: null,
+          needs_booking: true,
+          po_items: po.lines || po.po_items || []
+        }))
+      ]);
       
       // Import logistics from imports collection
       setInwardImport(importsRes.data || []);
       
       const outward = outwardRes.data || [];
-      // CRITICAL: Only show transports that have been properly booked through Transport Planner
-      // Check for transport_number (which indicates booking through planner) or source indicating proper booking
-      setLocalDispatch(outward.filter(t => 
-        t.transport_type === 'LOCAL' && 
-        t.transport_number && 
-        t.source !== 'JOB_LOCAL_AUTO'  // Exclude auto-created (unbooked) transports
-      ));
-      setExportContainer(outward.filter(t => 
-        t.transport_type === 'CONTAINER' && 
-        t.transport_number  // Only show booked container transports
-      ));
+      // Show ALL local dispatch transports (both booked and unbooked)
+      const bookedLocal = outward.filter(t => t.transport_type === 'LOCAL');
+      
+      // Get unbooked jobs that need dispatch booking
+      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
+      const jobsResponse = jobsRes?.data || {};
+      const jobsData = Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []);
+      const existingJobIds = new Set(bookedLocal.map(t => t.job_order_id).filter(Boolean));
+      const unbookedJobs = jobsData.filter(job => 
+        job.status === 'ready_for_dispatch' &&
+        !existingJobIds.has(job.id) &&
+        !job.transport_outward_id &&
+        !job.transport_booked &&
+        (!job.incoterm || ['EXW', 'DDP', 'DAP'].includes(job.incoterm.toUpperCase()))
+      );
+      
+      // Combine booked local dispatches with unbooked jobs
+      setLocalDispatch([
+        ...bookedLocal,
+        ...unbookedJobs.map(job => ({
+          id: `unbooked-job-${job.id}`,
+          job_order_id: job.id,
+          job_number: job.job_number,
+          customer_name: job.customer_name,
+          product_name: job.product_name,
+          products_summary: job.product_name,
+          total_quantity: job.quantity || job.total_weight_mt,
+          unit: job.unit || 'MT',
+          packaging: job.packaging,
+          transport_type: 'LOCAL',
+          status: 'NOT_BOOKED',
+          transport_number: null,
+          needs_booking: true
+        }))
+      ]);
+      
+      // Show ALL container transports (both booked and unbooked)
+      setExportContainer(outward.filter(t => t.transport_type === 'CONTAINER'));
     } catch (error) {
       console.error('Failed to load transport data:', error);
     } finally {
@@ -74,6 +131,38 @@ const TransportWindowPage = () => {
     try {
       await api.put(`/transport/${type}/${id}/status`, null, { params: { status } });
       toast.success(`Transport ${status.toLowerCase()}`);
+      
+      // Store notification for LoadingUnloadingWindow
+      if (status === 'IN_TRANSIT' && type === 'inward') {
+        // Get transport details for notification
+        const transport = [...inwardEXW, ...inwardImport].find(t => t.id === id);
+        if (transport) {
+          const notificationKey = `unloading-in-transit-${transport.transport_number || transport.id}`;
+          const notificationData = {
+            transport_number: transport.transport_number,
+            po_number: transport.po_number,
+            supplier_name: transport.supplier_name,
+            timestamp: new Date().toISOString(),
+            type: 'IN_TRANSIT'
+          };
+          localStorage.setItem(notificationKey, JSON.stringify(notificationData));
+        }
+      } else if (status === 'LOADING' && type === 'outward') {
+        // Get transport details for notification
+        const transport = [...localDispatch, ...exportContainer].find(t => t.id === id);
+        if (transport) {
+          const notificationKey = `loading-started-${transport.transport_number || transport.id}`;
+          const notificationData = {
+            transport_number: transport.transport_number,
+            job_number: transport.job_number || transport.job_numbers?.[0],
+            customer_name: transport.customer_name,
+            timestamp: new Date().toISOString(),
+            type: 'LOADING'
+          };
+          localStorage.setItem(notificationKey, JSON.stringify(notificationData));
+        }
+      }
+      
       loadData();
     } catch (error) {
       toast.error('Failed to update status');
@@ -91,6 +180,33 @@ const TransportWindowPage = () => {
   const localPending = localDispatch.filter(t => t.status === 'PENDING').length;
   const exportPending = exportContainer.filter(t => t.status === 'PENDING').length;
 
+  // Calculate MT totals for dispatched and pending
+  const allOutwardTransports = [...localDispatch, ...exportContainer];
+  
+  // Calculate dispatched MT (DISPATCHED, DELIVERED, AT_PORT, SHIPPED statuses)
+  const dispatchedMT = allOutwardTransports
+    .filter(t => ['DISPATCHED', 'DELIVERED', 'AT_PORT', 'SHIPPED'].includes(t.status))
+    .reduce((sum, t) => {
+      const qty = parseFloat(t.quantity) || 0;
+      // If quantity is 0 but total_weight_mt exists, use that
+      if (qty === 0 && t.total_weight_mt) {
+        return sum + (parseFloat(t.total_weight_mt) || 0);
+      }
+      return sum + qty;
+    }, 0);
+  
+  // Calculate pending MT (PENDING, LOADING, NEEDS_BOOKING statuses)
+  const pendingMT = allOutwardTransports
+    .filter(t => ['PENDING', 'LOADING', 'NEEDS_BOOKING'].includes(t.status))
+    .reduce((sum, t) => {
+      let qty = parseFloat(t.quantity) || 0;
+      // For unbooked jobs or if quantity is 0, try total_weight_mt
+      if (qty === 0 && t.total_weight_mt) {
+        qty = parseFloat(t.total_weight_mt) || 0;
+      }
+      return sum + qty;
+    }, 0);
+
   return (
     <div className="p-6 max-w-[1800px] mx-auto" data-testid="transport-window-page">
       {/* Header */}
@@ -105,7 +221,7 @@ const TransportWindowPage = () => {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-6 gap-4 mb-6">
         <div className="glass p-4 rounded-lg border border-blue-500/30">
           <p className="text-sm text-muted-foreground">Inward EXW Pending</p>
           <p className="text-2xl font-bold text-blue-400">{exwPending}</p>
@@ -121,6 +237,14 @@ const TransportWindowPage = () => {
         <div className="glass p-4 rounded-lg border border-green-500/30">
           <p className="text-sm text-muted-foreground">Export Container Pending</p>
           <p className="text-2xl font-bold text-green-400">{exportPending}</p>
+        </div>
+        <div className="glass p-4 rounded-lg border border-cyan-500/30">
+          <p className="text-sm text-muted-foreground">Dispatched MT</p>
+          <p className="text-2xl font-bold text-cyan-400">{dispatchedMT.toFixed(2)}</p>
+        </div>
+        <div className="glass p-4 rounded-lg border border-orange-500/30">
+          <p className="text-sm text-muted-foreground">Pending MT</p>
+          <p className="text-2xl font-bold text-orange-400">{pendingMT.toFixed(2)}</p>
         </div>
       </div>
 
@@ -243,12 +367,45 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails }) 
   
   const getStatusColor = (status) => {
     switch (status) {
+      case 'NOT_BOOKED': return 'bg-red-500/20 text-red-400';
       case 'PENDING': return 'bg-gray-500/20 text-gray-400';
       case 'IN_TRANSIT': return 'bg-blue-500/20 text-blue-400';
       case 'ARRIVED': return 'bg-amber-500/20 text-amber-400';
       case 'COMPLETED': return 'bg-green-500/20 text-green-400';
       default: return 'bg-gray-500/20 text-gray-400';
     }
+  };
+  
+  const getStatusDisplay = (transport) => {
+    // If no transport_number, show NOT_BOOKED status
+    if (!transport.transport_number) {
+      return 'NOT_BOOKED';
+    }
+    return transport.status || 'PENDING';
+  };
+
+  // Helper function to get the unit for a transport
+  const getTransportUnit = (transport) => {
+    // First check total_unit (legacy field)
+    if (transport.total_unit) {
+      return transport.total_unit;
+    }
+    // Then check total_uom (new field from backend)
+    if (transport.total_uom) {
+      return transport.total_uom;
+    }
+    // If neither exists, check po_items for unit
+    if (transport.po_items && transport.po_items.length > 0) {
+      const firstItem = transport.po_items[0];
+      // Check for unit in various possible field names
+      return firstItem.unit || firstItem.uom || firstItem.uom_unit || 'KG';
+    }
+    // Check items field (legacy)
+    if (transport.items && transport.items.length > 0) {
+      return transport.items[0].unit || 'KG';
+    }
+    // Default to KG if nothing found
+    return 'KG';
   };
 
   return (
@@ -293,7 +450,7 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails }) 
             <tbody>
               {transports.map((transport) => (
                 <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
-                  <td className="p-3 font-mono font-medium">{transport.transport_number}</td>
+                  <td className="p-3 font-mono font-medium">{transport.transport_number || '-'}</td>
                   <td className="p-3 text-blue-400 font-mono">{transport.po_number || '-'}</td>
                   <td className="p-3">{transport.supplier_name || '-'}</td>
                   <td className="p-3 text-sm max-w-[200px]">
@@ -315,7 +472,7 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails }) 
                   <td className="p-3">
                     {transport.total_quantity ? (
                       <Badge variant="outline" className="font-mono">
-                        {transport.total_quantity.toLocaleString()} {transport.total_unit || 'KG'}
+                        {transport.total_quantity.toLocaleString()} {getTransportUnit(transport)}
                       </Badge>
                     ) : '-'}
                   </td>
@@ -326,14 +483,9 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails }) 
                   </td>
                   <td className="p-3">
                     <div className="flex flex-col gap-1">
-                      <Badge className={getStatusColor(transport.status)}>
-                        {transport.status}
+                      <Badge className={getStatusColor(getStatusDisplay(transport))}>
+                        {getStatusDisplay(transport) === 'NOT_BOOKED' ? 'Transportation Not Booked' : transport.status}
                       </Badge>
-                      {!transport.transport_number && transport.status === 'PENDING' && (
-                        <Badge className="bg-amber-500/20 text-amber-400 text-xs">
-                          Transportation yet to be booked
-                        </Badge>
-                      )}
                     </div>
                   </td>
                   <td className="p-3">
@@ -346,7 +498,7 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails }) 
                       >
                         <Eye className="w-4 h-4" />
                       </Button>
-                      {!transport.transport_number && transport.status === 'PENDING' && (
+                      {!transport.transport_number && (
                         <Button 
                           size="sm" 
                           onClick={() => {
@@ -388,6 +540,7 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails }) => {
   
   const getStatusColor = (status) => {
     switch (status) {
+      case 'NOT_BOOKED': return 'bg-red-500/20 text-red-400';
       case 'PENDING': return 'bg-gray-500/20 text-gray-400';
       case 'DOCUMENTS_PENDING': return 'bg-amber-500/20 text-amber-400';
       case 'CUSTOMS_CLEARANCE': return 'bg-purple-500/20 text-purple-400';
@@ -395,6 +548,14 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails }) => {
       case 'ARRIVED': return 'bg-green-500/20 text-green-400';
       default: return 'bg-gray-500/20 text-gray-400';
     }
+  };
+  
+  const getStatusDisplay = (importRecord) => {
+    // If no transport_number, show NOT_BOOKED status
+    if (!importRecord.transport_number && !importRecord.transport_booked) {
+      return 'NOT_BOOKED';
+    }
+    return importRecord.status || 'PENDING';
   };
 
   const handleBookTransportClick = (importRecord) => {
@@ -508,14 +669,9 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails }) => {
                     </td>
                     <td className="p-3">
                       <div className="flex flex-col gap-1">
-                        <Badge className={getStatusColor(imp.status)}>
-                          {imp.status}
+                        <Badge className={getStatusColor(getStatusDisplay(imp))}>
+                          {getStatusDisplay(imp) === 'NOT_BOOKED' ? 'Transportation Not Booked' : imp.status}
                         </Badge>
-                        {!hasTransport && imp.status !== 'COMPLETED' && (
-                          <Badge className="bg-amber-500/20 text-amber-400 text-xs">
-                            Transportation yet to be booked
-                          </Badge>
-                        )}
                       </div>
                     </td>
                     <td className="p-3">
@@ -771,12 +927,21 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
   
   const getStatusColor = (status) => {
     switch (status) {
+      case 'NOT_BOOKED': return 'bg-red-500/20 text-red-400';
       case 'PENDING': return 'bg-gray-500/20 text-gray-400';
       case 'LOADING': return 'bg-amber-500/20 text-amber-400';
       case 'DISPATCHED': return 'bg-blue-500/20 text-blue-400';
       case 'DELIVERED': return 'bg-green-500/20 text-green-400';
       default: return 'bg-gray-500/20 text-gray-400';
     }
+  };
+  
+  const getStatusDisplay = (transport) => {
+    // If no transport_number, show NOT_BOOKED status
+    if (!transport.transport_number) {
+      return 'NOT_BOOKED';
+    }
+    return transport.status || 'PENDING';
   };
 
   const handleBookTransport = async (transport) => {
@@ -835,6 +1000,7 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Customer</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Products</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Quantity</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">MT</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
@@ -842,9 +1008,11 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
               </tr>
             </thead>
             <tbody>
-              {transports.map((transport) => (
+              {transports.map((transport) => {
+                const qtyMT = parseFloat(transport.quantity) || parseFloat(transport.total_weight_mt) || 0;
+                return (
                 <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
-                  <td className="p-3 font-mono font-medium">{transport.transport_number}</td>
+                  <td className="p-3 font-mono font-medium">{transport.transport_number || '-'}</td>
                   <td className="p-3 text-amber-400 font-mono">
                     {transport.job_number || transport.job_numbers?.join(', ') || '-'}
                   </td>
@@ -855,9 +1023,12 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
                   <td className="p-3">
                     {transport.total_quantity ? (
                       <Badge variant="outline" className="font-mono">
-                        {transport.total_quantity} {transport.packaging || 'units'}
+                        {transport.total_quantity} {transport.packaging || transport.unit || 'units'}
                       </Badge>
                     ) : '-'}
+                  </td>
+                  <td className="p-3 font-mono text-cyan-400 font-semibold">
+                    {qtyMT > 0 ? qtyMT.toFixed(2) : '-'}
                   </td>
                   <td className="p-3 font-mono">{transport.vehicle_number || '-'}</td>
                   <td className="p-3 text-sm">
@@ -865,14 +1036,9 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
                   </td>
                   <td className="p-3">
                     <div className="flex flex-col gap-1">
-                      <Badge className={getStatusColor(transport.status)}>
-                        {transport.status}
+                      <Badge className={getStatusColor(getStatusDisplay(transport))}>
+                        {getStatusDisplay(transport) === 'NOT_BOOKED' ? 'Transportation Not Booked' : transport.status}
                       </Badge>
-                      {!transport.transport_number && transport.status === 'PENDING' && (
-                        <Badge className="bg-amber-500/20 text-amber-400 text-xs">
-                          Transportation yet to be booked
-                        </Badge>
-                      )}
                     </div>
                   </td>
                   <td className="p-3">
@@ -885,7 +1051,7 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
                       >
                         <Eye className="w-4 h-4" />
                       </Button>
-                      {!transport.transport_number && transport.status === 'PENDING' && (
+                      {!transport.transport_number && (
                         <Button 
                           size="sm" 
                           onClick={() => handleBookTransport(transport)}
@@ -917,7 +1083,8 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -928,8 +1095,10 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
 
 // ==================== EXPORT CONTAINER TAB ====================
 const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails }) => {
+  const navigate = useNavigate();
   const getStatusColor = (status) => {
     switch (status) {
+      case 'NOT_BOOKED': return 'bg-red-500/20 text-red-400';
       case 'PENDING': return 'bg-gray-500/20 text-gray-400';
       case 'LOADING': return 'bg-amber-500/20 text-amber-400';
       case 'DISPATCHED': return 'bg-blue-500/20 text-blue-400';
@@ -937,6 +1106,14 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
       case 'SHIPPED': return 'bg-green-500/20 text-green-400';
       default: return 'bg-gray-500/20 text-gray-400';
     }
+  };
+  
+  const getStatusDisplay = (transport) => {
+    // If no transport_number, show NOT_BOOKED status
+    if (!transport.transport_number) {
+      return 'NOT_BOOKED';
+    }
+    return transport.status || 'PENDING';
   };
 
   return (
@@ -970,6 +1147,7 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Transport #</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Containers</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">MT</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">SI/LL Cutoff</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Pull Out</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Gate In</th>
@@ -982,9 +1160,11 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
               </tr>
             </thead>
             <tbody>
-              {transports.map((transport) => (
+              {transports.map((transport) => {
+                const qtyMT = parseFloat(transport.quantity) || parseFloat(transport.total_weight_mt) || 0;
+                return (
                 <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
-                  <td className="p-3 font-mono font-medium">{transport.transport_number}</td>
+                  <td className="p-3 font-mono font-medium">{transport.transport_number || '-'}</td>
                   <td className="p-3 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ')}>
                     {transport.products_summary || transport.product_names?.join(', ') || '-'}
                   </td>
@@ -994,6 +1174,9 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                         {transport.container_count} {transport.container_type || 'Container'}{transport.container_count > 1 ? 's' : ''}
                       </Badge>
                     ) : '-'}
+                  </td>
+                  <td className="p-3 font-mono text-cyan-400 font-semibold">
+                    {qtyMT > 0 ? qtyMT.toFixed(2) : '-'}
                   </td>
                   <td className="p-3 text-sm">
                     {transport.si_cutoff ? (
@@ -1016,14 +1199,9 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                   <td className="p-3">{transport.destination || '-'}</td>
                   <td className="p-3">
                     <div className="flex flex-col gap-1">
-                      <Badge className={getStatusColor(transport.status)}>
-                        {transport.status}
+                      <Badge className={getStatusColor(getStatusDisplay(transport))}>
+                        {getStatusDisplay(transport) === 'NOT_BOOKED' ? 'Transportation Not Booked' : transport.status}
                       </Badge>
-                      {!transport.transport_number && transport.status === 'PENDING' && (
-                        <Badge className="bg-amber-500/20 text-amber-400 text-xs">
-                          Transportation yet to be booked
-                        </Badge>
-                      )}
                     </div>
                   </td>
                   <td className="p-3">
@@ -1036,15 +1214,22 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                       >
                         <Eye className="w-4 h-4" />
                       </Button>
+                      {!transport.transport_number && (
+                        <Button 
+                          size="sm" 
+                          onClick={() => {
+                            navigate('/transport-planner', { state: { jobId: transport.job_order_id, autoOpen: 'DISPATCH' } });
+                            toast.info('Redirecting to Transport Planner to book transport');
+                          }}
+                        >
+                          <Plus className="w-4 h-4 mr-1" />
+                          Book Transport
+                        </Button>
+                      )}
                       {transport.transport_number && transport.status === 'PENDING' && (
                         <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'LOADING')}>
                           Start Loading
                         </Button>
-                      )}
-                      {!transport.transport_number && transport.status === 'PENDING' && (
-                        <Badge className="bg-amber-500/20 text-amber-400">
-                          Book Transport First
-                        </Badge>
                       )}
                       {transport.status === 'LOADING' && (
                         <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'DISPATCHED')}>
@@ -1059,7 +1244,8 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

@@ -94,10 +94,10 @@ class ProcurementAutoDemand:
     async def generate_from_inventory_shortages(self, job_order_id: str = None) -> Dict:
         """
         Check inventory_balances for items with on_hand - reserved <= 0
-        that are required for pending jobs
+        that are required for pending jobs or ready_for_dispatch jobs with raw material shortages
         """
-        # Get pending job orders
-        query = {"status": {"$in": ["pending", "in_production"]}}
+        # Get pending job orders AND ready_for_dispatch jobs (which may have raw material shortages)
+        query = {"status": {"$in": ["pending", "in_production", "ready_for_dispatch"]}}
         if job_order_id:
             query["id"] = job_order_id
         
@@ -135,7 +135,25 @@ class ProcurementAutoDemand:
                 
                 available = on_hand - reserved
                 
-                if available <= 0:
+                # Calculate required quantity based on job quantity
+                # Handle both Bulk and packaged products
+                job_quantity = job.get('quantity', 0)
+                packaging = job.get('packaging', 'Bulk')
+                net_weight_kg = job.get('net_weight_kg')
+                
+                if packaging != "Bulk":
+                    # Packaged: quantity is in drums, convert to KG
+                    net_weight = net_weight_kg if net_weight_kg is not None else 200
+                    finished_kg = job_quantity * net_weight
+                else:
+                    # Bulk: quantity is in MT, convert to KG
+                    finished_kg = job_quantity * 1000
+                
+                required = bom_item['qty_kg_per_kg_finished'] * finished_kg
+                shortage = max(0, required - available)
+                
+                # Create PR line if there's a shortage (not just if available <= 0)
+                if shortage > 0:
                     # Create PR line
                     if not pr:
                         pr = await self.db.procurement_requisitions.find_one({"status": "DRAFT"})
@@ -153,10 +171,6 @@ class ProcurementAutoDemand:
                     )
                     
                     if item:
-                        # Calculate shortage
-                        required = bom_item['qty_kg_per_kg_finished'] * job['quantity']
-                        shortage = max(0, required - available)
-                        
                         line = {
                             "id": str(uuid.uuid4()),
                             "pr_id": pr['id'],
