@@ -156,7 +156,7 @@ export default function ProductionSchedulePage() {
     <div className="page-container" data-testid="production-schedule-page">
       <div className="module-header">
         <div>
-          <h1 className="module-title">Production Schedule</h1>
+          <h1 className="module-title">Production Dashboard (Schedule and Planning)</h1>
           <p className="text-muted-foreground text-sm">Schedule based on material availability</p>
         </div>
         <Button variant="outline" onClick={loadData}>

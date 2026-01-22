@@ -39,6 +39,28 @@ async def seed_packaging():
         },
         {
             "id": generate_id(),
+            "name": "Steel Drum 210L",
+            "category": "DRUM",
+            "material_type": "STEEL",
+            "capacity_liters": 210,
+            "tare_weight_kg": 25.0,
+            "net_weight_kg_default": 185.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "name": "Steel Drum 210L Reconditioned",
+            "category": "DRUM",
+            "material_type": "STEEL_RECON",
+            "capacity_liters": 210,
+            "tare_weight_kg": 23.0,
+            "net_weight_kg_default": 185.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
             "name": "HDPE Drum 210L",
             "category": "DRUM",
             "material_type": "HDPE",
@@ -50,12 +72,67 @@ async def seed_packaging():
         },
         {
             "id": generate_id(),
+            "name": "HDPE Drum 210L Reconditioned",
+            "category": "DRUM",
+            "material_type": "HDPE_RECON",
+            "capacity_liters": 210,
+            "tare_weight_kg": 11.0,
+            "net_weight_kg_default": 190.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "name": "HDPE Drum 250L",
+            "category": "DRUM",
+            "material_type": "HDPE",
+            "capacity_liters": 250,
+            "tare_weight_kg": 14.0,
+            "net_weight_kg_default": 225.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "name": "Open Top Drum 210L",
+            "category": "DRUM",
+            "material_type": "OPEN_TOP",
+            "capacity_liters": 210,
+            "tare_weight_kg": 24.0,
+            "net_weight_kg_default": 185.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "name": "Open Top Drum 210L Reconditioned",
+            "category": "DRUM",
+            "material_type": "OPEN_TOP_RECON",
+            "capacity_liters": 210,
+            "tare_weight_kg": 22.0,
+            "net_weight_kg_default": 185.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
             "name": "Reconditioned Steel Drum 200L",
             "category": "DRUM",
             "material_type": "RECON",
             "capacity_liters": 200,
             "tare_weight_kg": 23.0,
             "net_weight_kg_default": 180.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "name": "Pallets",
+            "category": "PALLET",
+            "material_type": "WOODEN",
+            "capacity_liters": 0,
+            "tare_weight_kg": 25.0,
+            "net_weight_kg_default": 0.0,
             "is_active": True,
             "created_at": datetime.now(timezone.utc).isoformat()
         }

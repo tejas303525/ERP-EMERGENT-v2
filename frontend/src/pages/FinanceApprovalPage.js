@@ -1,21 +1,26 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { purchaseOrderAPI, emailAPI, quotationAPI, pdfAPI } from '../lib/api';
+import api from '../lib/api';
 import { Button } from '../components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
-import { DollarSign, Check, X, Send, Mail, AlertCircle, CheckCircle, Clock, Eye, FileText, Download } from 'lucide-react';
+import { DollarSign, Check, X, Send, Mail, AlertCircle, CheckCircle, Clock, Eye, FileText, Download, Calculator, Truck } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
+import CostingModal from '../components/CostingModal';
 
 const FinanceApprovalPage = () => {
   const [pendingPOs, setPendingPOs] = useState([]);
   const [approvedPOs, setApprovedPOs] = useState([]);
   const [pendingQuotations, setPendingQuotations] = useState([]);
+  const [pendingTransportCharges, setPendingTransportCharges] = useState([]);
   const [emailOutbox, setEmailOutbox] = useState({ smtp_configured: false, emails: [] });
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('quotations');
   const [viewPO, setViewPO] = useState(null);
   const [viewQuotation, setViewQuotation] = useState(null);
   const [showViewModal, setShowViewModal] = useState(false);
+  const [costingModalOpen, setCostingModalOpen] = useState(false);
+  const [costingQuotation, setCostingQuotation] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -24,18 +29,24 @@ const FinanceApprovalPage = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [pendingPORes, approvedPORes, quotationsRes, emailRes] = await Promise.all([
+      const [pendingPORes, approvedPORes, quotationsRes, emailRes, transportChargesRes] = await Promise.all([
         purchaseOrderAPI.getPendingApproval(),
         purchaseOrderAPI.getAll('APPROVED'),
         quotationAPI.getPendingFinanceApproval().catch((err) => {
           console.error('Failed to load quotations:', err);
           return { data: [] };
         }),
-        emailAPI.getOutbox()
+        emailAPI.getOutbox(),
+        // Fetch transports with charges pending approval (backend should return transports with transport_charges > 0 and charges_approved = false)
+        api.get('/transport/charges/pending-approval').catch((err) => {
+          console.error('Failed to load transport charges:', err);
+          return { data: [] };
+        })
       ]);
       setPendingPOs(pendingPORes.data);
       setApprovedPOs(approvedPORes.data);
       setPendingQuotations(quotationsRes.data || []);
+      setPendingTransportCharges(transportChargesRes.data || []);
       setEmailOutbox(emailRes.data);
     } catch (error) {
       console.error('Failed to load data:', error);
@@ -92,6 +103,26 @@ const FinanceApprovalPage = () => {
       loadData();
     } catch (error) {
       toast.error('Failed to approve quotation: ' + (error.response?.data?.detail || error.message));
+    }
+  };
+
+  const handleApproveTransportCharges = async (transportId) => {
+    try {
+      await api.put(`/transport/${transportId}/charges/approve`);
+      toast.success('Transport charges approved');
+      loadData();
+    } catch (error) {
+      toast.error('Failed to approve transport charges: ' + (error.response?.data?.detail || error.message));
+    }
+  };
+
+  const handleRejectTransportCharges = async (transportId, reason) => {
+    try {
+      await api.put(`/transport/${transportId}/charges/reject`, null, { params: { reason } });
+      toast.success('Transport charges rejected');
+      loadData();
+    } catch (error) {
+      toast.error('Failed to reject transport charges: ' + (error.response?.data?.detail || error.message));
     }
   };
 
@@ -170,6 +201,7 @@ const FinanceApprovalPage = () => {
         {[
           { id: 'quotations', label: 'Quotations (PFI)', count: pendingQuotations.length, icon: FileText },
           { id: 'pending', label: 'Purchase Orders', count: pendingPOs.length, icon: DollarSign },
+          { id: 'transport_charges', label: 'Transport Charges', count: pendingTransportCharges.length, icon: Truck },
           { id: 'approved', label: 'Approved POs (Ready to Send)', count: approvedPOs.length, icon: Send },
           { id: 'outbox', label: 'Email Outbox', count: emailOutbox.emails?.length || 0, icon: Mail },
         ].map((tab) => (
@@ -210,6 +242,10 @@ const FinanceApprovalPage = () => {
                     onApprove={() => handleApproveQuotation(quotation.id)}
                     onView={() => handleViewQuotation(quotation)}
                     onDownloadPDF={() => handleDownloadQuotationPDF(quotation.id, quotation.pfi_number)}
+                    onCheckCost={() => {
+                      setCostingQuotation(quotation);
+                      setCostingModalOpen(true);
+                    }}
                   />
                 ))
               )}
@@ -257,6 +293,89 @@ const FinanceApprovalPage = () => {
                     showSendAction
                     smtpConfigured={emailOutbox.smtp_configured}
                   />
+                ))
+              )}
+            </div>
+          )}
+
+          {/* Transport Charges Tab */}
+          {activeTab === 'transport_charges' && (
+            <div className="space-y-4">
+              {pendingTransportCharges.length === 0 ? (
+                <div className="glass p-8 rounded-lg border border-border text-center">
+                  <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-4 opacity-50" />
+                  <p className="text-muted-foreground">No transport charges pending approval</p>
+                </div>
+              ) : (
+                pendingTransportCharges.map((transport) => (
+                  <div key={transport.id} className="glass p-4 rounded-lg border border-border">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Truck className="w-5 h-5 text-indigo-500" />
+                          <span className="font-mono font-medium">{transport.transport_number || '-'}</span>
+                          <Badge className={transport.type === 'INWARD' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'}>
+                            {transport.type || transport.ref_type || 'TRANSPORT'}
+                          </Badge>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mt-3">
+                          {transport.po_number && (
+                            <div>
+                              <p className="text-muted-foreground text-xs">PO Number</p>
+                              <p className="font-medium text-blue-400">{transport.po_number}</p>
+                            </div>
+                          )}
+                          {transport.job_number && (
+                            <div>
+                              <p className="text-muted-foreground text-xs">Job Number</p>
+                              <p className="font-medium text-amber-400">{transport.job_number}</p>
+                            </div>
+                          )}
+                          {transport.transporter_name && (
+                            <div>
+                              <p className="text-muted-foreground text-xs">Transporter</p>
+                              <p className="font-medium">{transport.transporter_name}</p>
+                            </div>
+                          )}
+                          <div>
+                            <p className="text-muted-foreground text-xs">Transport Charges</p>
+                            <p className="font-bold text-green-400 text-lg">
+                              {transport.currency || 'USD'} {transport.transport_charges?.toFixed(2) || '0.00'}
+                            </p>
+                          </div>
+                        </div>
+                        {transport.notes && (
+                          <div className="mt-2 text-sm text-muted-foreground">
+                            <p><strong>Notes:</strong> {transport.notes}</p>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex gap-2 ml-4">
+                        <Button 
+                          size="sm" 
+                          onClick={() => handleApproveTransportCharges(transport.id)}
+                          className="bg-green-500 hover:bg-green-600"
+                        >
+                          <Check className="w-4 h-4 mr-1" />
+                          Approve
+                        </Button>
+                        <Button 
+                          size="sm" 
+                          variant="outline" 
+                          className="border-red-500/50 text-red-400 hover:bg-red-500/10"
+                          onClick={() => {
+                            const reason = prompt('Enter rejection reason:');
+                            if (reason) {
+                              handleRejectTransportCharges(transport.id, reason);
+                            }
+                          }}
+                        >
+                          <X className="w-4 h-4 mr-1" />
+                          Reject
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
                 ))
               )}
             </div>
@@ -323,12 +442,176 @@ const FinanceApprovalPage = () => {
       {showViewModal && viewQuotation && (
         <QuotationViewModal quotation={viewQuotation} onClose={() => { setShowViewModal(false); setViewQuotation(null); }} />
       )}
+
+      {/* Costing Modal */}
+      {costingQuotation && (
+        <CostingModal
+          quotation={costingQuotation}
+          open={costingModalOpen}
+          onClose={() => {
+            setCostingModalOpen(false);
+            setCostingQuotation(null);
+          }}
+          onConfirmed={() => {
+            loadData();
+          }}
+        />
+      )}
     </div>
   );
 };
 
 // Quotation Card Component
-const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF }) => {
+const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCost }) => {
+  const [costing, setCosting] = useState(null);
+  const [loadingCosting, setLoadingCosting] = useState(false);
+
+  const loadCosting = useCallback(async () => {
+    try {
+      setLoadingCosting(true);
+      const response = await api.get(`/costing/QUOTATION/${quotation.id}`);
+      setCosting(response.data);
+    } catch (error) {
+      console.error('Failed to load costing:', error);
+      // Don't show error toast - costing might not exist yet
+    } finally {
+      setLoadingCosting(false);
+    }
+  }, [quotation.id]);
+
+  useEffect(() => {
+    // Fetch costing data if quotation has cost_confirmed
+    if (quotation.cost_confirmed) {
+      loadCosting();
+    }
+  }, [quotation.cost_confirmed, loadCosting]);
+
+  // Function to generate cost breakdown rows
+  const getCostBreakdown = () => {
+    if (!costing) return [];
+    
+    const rows = [];
+    let srNo = 1;
+    const containerCount = quotation.container_count || 1;
+    const currency = quotation.currency || 'USD';
+
+    // Raw Material Cost
+    if (costing.raw_material_cost > 0) {
+      rows.push({
+        srNo: srNo++,
+        description: 'Raw Material Cost',
+        rate: costing.raw_material_cost,
+        units: 1,
+        total: costing.raw_material_cost
+      });
+    }
+
+    // Packaging Costs (drums)
+    if (costing.packaging_cost > 0) {
+      const packagingType = costing.packaging_type || 'DRUM';
+      const packagingName = packagingType === 'BULK' ? 'Packaging (Bulk)' : 
+                           packagingType === 'DRUM' ? 'Drum Cost' : 
+                           `${packagingType} Cost`;
+      rows.push({
+        srNo: srNo++,
+        description: packagingName,
+        rate: costing.packaging_cost,
+        units: 1,
+        total: costing.packaging_cost
+      });
+    }
+
+    // Transport Costs
+    if (costing.local_transport_cost > 0) {
+      rows.push({
+        srNo: srNo++,
+        description: 'Transportation',
+        rate: costing.local_transport_cost,
+        units: 1,
+        total: costing.local_transport_cost
+      });
+    }
+
+    if (costing.inland_transport_cost > 0) {
+      rows.push({
+        srNo: srNo++,
+        description: 'Inland Transport',
+        rate: costing.inland_transport_cost,
+        units: 1,
+        total: costing.inland_transport_cost
+      });
+    }
+
+    // Export-specific charges
+    if (costing.thc_cost > 0) {
+      const containerType = quotation.container_type || '40ft';
+      const isDG = costing.is_dg ? 'DG' : '';
+      const description = containerType === '40ft' ? `THC 40ft ${isDG}`.trim() : `THC ${containerType} ${isDG}`.trim();
+      rows.push({
+        srNo: srNo++,
+        description: description || 'THC (Terminal Handling)',
+        rate: containerCount > 0 ? costing.thc_cost / containerCount : costing.thc_cost,
+        units: containerCount,
+        total: costing.thc_cost
+      });
+    }
+
+    if (costing.isps_cost > 0) {
+      rows.push({
+        srNo: srNo++,
+        description: 'ISPS',
+        rate: containerCount > 0 ? costing.isps_cost / containerCount : costing.isps_cost,
+        units: containerCount,
+        total: costing.isps_cost
+      });
+    }
+
+    if (costing.bl_cost > 0) {
+      rows.push({
+        srNo: srNo++,
+        description: 'BL Charges',
+        rate: containerCount > 0 ? costing.bl_cost / containerCount : costing.bl_cost,
+        units: containerCount,
+        total: costing.bl_cost
+      });
+    }
+
+    if (costing.documentation_cost > 0) {
+      rows.push({
+        srNo: srNo++,
+        description: 'Document Processing Charges',
+        rate: containerCount > 0 ? costing.documentation_cost / containerCount : costing.documentation_cost,
+        units: containerCount,
+        total: costing.documentation_cost
+      });
+    }
+
+    if (costing.ocean_freight_cost > 0) {
+      rows.push({
+        srNo: srNo++,
+        description: 'Ocean Freight',
+        rate: containerCount > 0 ? costing.ocean_freight_cost / containerCount : costing.ocean_freight_cost,
+        units: containerCount,
+        total: costing.ocean_freight_cost
+      });
+    }
+
+    if (costing.port_charges > 0) {
+      rows.push({
+        srNo: srNo++,
+        description: 'Port Charges',
+        rate: costing.port_charges,
+        units: 1,
+        total: costing.port_charges
+      });
+    }
+
+    return rows;
+  };
+
+  const costRows = getCostBreakdown();
+  const totalCost = costing?.total_cost || 0;
+
   return (
     <div className="glass p-4 rounded-lg border border-border" data-testid={`quotation-${quotation.id}`}>
       <div className="flex items-start justify-between">
@@ -343,15 +626,39 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF }) => {
                 PROFORMA INVOICE
               </Badge>
             )}
+            {quotation.cost_confirmed ? (
+              <Badge variant="outline" className="border-green-500 text-green-400">
+                Cost Confirmed
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="border-yellow-500 text-yellow-400">
+                Cost Pending
+              </Badge>
+            )}
           </div>
           <p className="text-muted-foreground text-sm">Customer: {quotation.customer_name}</p>
           <p className="text-sm text-muted-foreground">Type: {quotation.order_type?.toUpperCase()}</p>
           <p className="text-green-400 font-medium text-lg mt-1">
             {quotation.currency} {quotation.total?.toFixed(2)}
           </p>
+          {quotation.margin !== undefined && quotation.margin !== null && (
+            <p className={`text-sm mt-1 ${quotation.margin >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              Margin: {quotation.currency} {quotation.margin?.toFixed(2)} ({quotation.margin_percentage?.toFixed(2) || 0}%)
+            </p>
+          )}
         </div>
 
         <div className="flex gap-2">
+          <Button 
+            size="sm" 
+            variant="outline" 
+            onClick={onCheckCost}
+            className={!quotation.cost_confirmed ? "bg-yellow-500/20 hover:bg-yellow-500/30 border-yellow-500/50" : ""}
+            data-testid={`check-cost-${quotation.id}`}
+          >
+            <Calculator className="w-4 h-4 mr-1" />
+            Check Cost
+          </Button>
           <Button size="sm" variant="outline" onClick={onView} data-testid={`view-quotation-${quotation.id}`}>
             <Eye className="w-4 h-4 mr-1" />
             View
@@ -361,7 +668,14 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF }) => {
             PDF
           </Button>
           {!quotation.finance_approved && (
-            <Button size="sm" onClick={onApprove} className="bg-green-500 hover:bg-green-600" data-testid={`approve-quotation-${quotation.id}`}>
+            <Button 
+              size="sm" 
+              onClick={onApprove} 
+              className="bg-green-500 hover:bg-green-600" 
+              data-testid={`approve-quotation-${quotation.id}`}
+              disabled={!quotation.cost_confirmed || (quotation.margin !== undefined && quotation.margin < 0)}
+              title={!quotation.cost_confirmed ? "Costing must be confirmed before approval" : (quotation.margin !== undefined && quotation.margin < 0 ? "Negative margin - cannot approve" : "Approve as PFI")}
+            >
               <Check className="w-4 h-4 mr-1" />
               Approve as PFI
             </Button>
@@ -386,6 +700,64 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF }) => {
               <span className="text-right">{quotation.currency} {item.total?.toFixed(2)}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Cost Breakdown Table */}
+      {quotation.cost_confirmed && (
+        <div className="mt-4 border-t border-border pt-3">
+          <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
+            <Calculator className="w-4 h-4" />
+            Cost Breakdown
+          </h4>
+          {loadingCosting ? (
+            <div className="text-center py-4 text-muted-foreground">Loading costing...</div>
+          ) : costing && costRows.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-muted/30">
+                  <tr>
+                    <th className="p-2 text-left text-xs font-medium text-muted-foreground">Sr. No.</th>
+                    <th className="p-2 text-left text-xs font-medium text-muted-foreground">Description</th>
+                    <th className="p-2 text-right text-xs font-medium text-muted-foreground">Rate</th>
+                    <th className="p-2 text-right text-xs font-medium text-muted-foreground">No. of Units/Container</th>
+                    <th className="p-2 text-right text-xs font-medium text-muted-foreground">Total Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {costRows.map((row) => (
+                    <tr key={row.srNo} className="border-b border-border/30 hover:bg-muted/10">
+                      <td className="p-2 font-mono text-xs">{row.srNo}</td>
+                      <td className="p-2">{row.description}</td>
+                      <td className="p-2 text-right font-mono">{quotation.currency} {row.rate.toFixed(2)}</td>
+                      <td className="p-2 text-right font-mono">{row.units}</td>
+                      <td className="p-2 text-right font-mono font-medium">{quotation.currency} {row.total.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot className="bg-muted/20">
+                  <tr>
+                    <td colSpan={4} className="p-2 text-right font-semibold">Total Cost:</td>
+                    <td className="p-2 text-right font-bold">{quotation.currency} {totalCost.toFixed(2)}</td>
+                  </tr>
+                  <tr>
+                    <td colSpan={4} className="p-2 text-right font-semibold">Selling Price:</td>
+                    <td className="p-2 text-right font-bold text-green-400">{quotation.currency} {quotation.total?.toFixed(2) || '0.00'}</td>
+                  </tr>
+                  <tr>
+                    <td colSpan={4} className="p-2 text-right font-semibold">Margin:</td>
+                    <td className={`p-2 text-right font-bold ${costing.margin_amount >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {quotation.currency} {costing.margin_amount?.toFixed(2) || '0.00'} ({costing.margin_percentage?.toFixed(2) || 0}%)
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-4 text-muted-foreground text-sm">
+              Cost breakdown not available. Click "Check Cost" to calculate.
+            </div>
+          )}
         </div>
       )}
     </div>

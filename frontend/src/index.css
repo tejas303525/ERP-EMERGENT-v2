@@ -174,3 +174,25 @@ input:focus, select:focus, textarea:focus {
   animation: fadeIn 0.3s ease-out 0.3s forwards;
   opacity: 0;
 }
+
+/* Blinking animation for today's deliveries */
+@keyframes blink-delivery {
+  0%, 100% { 
+    opacity: 1; 
+    background-color: rgba(59, 130, 246, 0.1);
+  }
+  50% { 
+    opacity: 0.3; 
+    background-color: rgba(59, 130, 246, 0.2);
+  }
+}
+
+.today-delivery-row {
+  animation: blink-delivery 2s infinite;
+}
+
+.today-delivery-row:hover {
+  animation: none;
+  opacity: 1;
+  background-color: rgba(59, 130, 246, 0.15);
+}

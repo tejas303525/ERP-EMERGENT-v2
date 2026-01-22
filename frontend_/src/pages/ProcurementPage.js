@@ -215,6 +215,7 @@ const ProcurementPage = () => {
           selectedItems={selectedShortages}
           suppliers={suppliers}
           companies={companies}
+          paymentTerms={paymentTerms}
           onClose={() => setShowGeneratePO(false)}
           onCreated={() => {
             setShowGeneratePO(false);
@@ -516,7 +517,7 @@ const POCard = ({ po, onRefresh, showStatus }) => {
 };
 
 // ==================== GENERATE PO MODAL ====================
-const GeneratePOModal = ({ selectedItems, suppliers, companies, onClose, onCreated }) => {
+const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, onClose, onCreated }) => {
   const [form, setForm] = useState({
     supplier_id: '',
     billing_company_id: '',

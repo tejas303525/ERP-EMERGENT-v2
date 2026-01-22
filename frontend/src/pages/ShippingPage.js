@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { shippingAPI, jobOrderAPI } from '../lib/api';
+import { shippingAPI, jobOrderAPI, purchaseOrderAPI } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -12,7 +12,7 @@ import { Checkbox } from '../components/ui/checkbox';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { toast } from 'sonner';
 import { formatDate, getStatusColor } from '../lib/utils';
-import { Plus, Ship, Edit2, FileText, AlertTriangle } from 'lucide-react';
+import { Plus, Ship, Edit2, FileText, AlertTriangle, Package } from 'lucide-react';
 
 const CONTAINER_TYPES = ['20ft', '40ft', '40ft_hc'];
 const STATUSES = ['pending', 'cro_received', 'transport_scheduled', 'loaded', 'shipped'];
@@ -20,14 +20,18 @@ const STATUSES = ['pending', 'cro_received', 'transport_scheduled', 'loaded', 's
 export default function ShippingPage() {
   const { user } = useAuth();
   const [bookings, setBookings] = useState([]);
-  const [jobs, setJobs] = useState([]);
+  const [purchaseOrders, setPurchaseOrders] = useState([]);
+  const [jobOrders, setJobOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
+  const [bookingType, setBookingType] = useState(null); // 'import' or 'export'
+  const [activeTab, setActiveTab] = useState('export'); // 'import' or 'export'
   const [croOpen, setCroOpen] = useState(false);
   const [selectedBooking, setSelectedBooking] = useState(null);
   const [statusFilter, setStatusFilter] = useState('all');
 
   const [form, setForm] = useState({
+    po_ids: [],
     job_order_ids: [],
     shipping_line: '',
     container_type: '20ft',
@@ -39,6 +43,20 @@ export default function ShippingPage() {
     is_dg: false,
     dg_class: '',
     notes: '',
+    // CRO fields for FOB (customer-provided)
+    cro_number: '',
+    vessel_name: '',
+    vessel_date: '',
+    cutoff_date: '',
+    gate_cutoff: '',
+    vgm_cutoff: '',
+    freight_rate: 0,
+    freight_currency: 'USD',
+    freight_charges: 0,
+    pull_out_date: '',
+    si_cutoff: '',
+    gate_in_date: '',
+    booking_source: 'SELLER', // 'SELLER' or 'CUSTOMER'
   });
 
   const [croForm, setCroForm] = useState({
@@ -65,18 +83,78 @@ export default function ShippingPage() {
 
   const loadData = async () => {
     try {
-      const [bookingsRes, jobsRes] = await Promise.all([
+      // Load job orders with both 'ready_for_dispatch' and 'dispatched' statuses
+      // 'dispatched' jobs might still need container shipping bookings
+      const [bookingsRes, posRes, readyJobsRes, dispatchedJobsRes] = await Promise.all([
         shippingAPI.getAll(),
-        // Request ready_for_dispatch jobs - using max page_size of 100 (backend limit)
-        // If more than 100 jobs exist, we'll need to make multiple requests
-        jobOrderAPI.getAll('ready_for_dispatch', 1, 100),
+        // Load approved POs for import bookings
+        purchaseOrderAPI.getAll('APPROVED'),
+        // Load job orders ready for dispatch
+        jobOrderAPI.getAll('ready_for_dispatch'),
+        // Also load dispatched jobs (they might need container shipping)
+        jobOrderAPI.getAll('dispatched'),
       ]);
+      
+      // Combine both job order responses
+      const readyJobsResponse = readyJobsRes?.data || {};
+      const dispatchedJobsResponse = dispatchedJobsRes?.data || {};
+      const readyJobsData = Array.isArray(readyJobsResponse.data) ? readyJobsResponse.data : (Array.isArray(readyJobsResponse) ? readyJobsResponse : []);
+      const dispatchedJobsData = Array.isArray(dispatchedJobsResponse.data) ? dispatchedJobsResponse.data : (Array.isArray(dispatchedJobsResponse) ? dispatchedJobsResponse : []);
+      const allJobsData = [...readyJobsData, ...dispatchedJobsData];
       // Ensure data is always an array to prevent .map() and .filter() errors
       const bookingsData = Array.isArray(bookingsRes?.data) ? bookingsRes.data : [];
       
-      // Enrich bookings with job order details (customer name and job numbers)
+      // Enrich bookings with job order details (for exports) or PO details (for imports)
       const enrichedBookings = await Promise.all(
         bookingsData.map(async (booking) => {
+          // Detect PO import bookings: ref_type === 'PO_IMPORT' OR has po_id/po_ids but no job_order_ids
+          const hasPO = booking.po_id || (booking.po_ids && booking.po_ids.length > 0);
+          const hasJobs = booking.job_order_ids && booking.job_order_ids.length > 0;
+          const isPOImport = booking.ref_type === 'PO_IMPORT' || (hasPO && !hasJobs);
+          
+          // Handle PO import bookings differently
+          if (isPOImport) {
+            let poNumber = booking.po_number || '';
+            let supplierName = booking.supplier_name || '';
+            
+            // Get PO ID - could be po_id (singular) or first from po_ids (array)
+            const poId = booking.po_id || (booking.po_ids && booking.po_ids.length > 0 ? booking.po_ids[0] : null);
+            
+            // If PO number is missing but we have po_id, fetch PO data
+            if (!poNumber && poId) {
+              try {
+                const poRes = await purchaseOrderAPI.getOne(poId);
+                if (poRes?.data) {
+                  poNumber = poRes.data.po_number || poNumber;
+                  supplierName = poRes.data.supplier_name || supplierName;
+                }
+              } catch (error) {
+                console.error(`Failed to fetch PO ${poId}:`, error);
+              }
+            }
+            
+            // If still missing, try to get from booking object's other fields
+            if (!poNumber) {
+              poNumber = booking.po_number || poId || '';
+            }
+            if (!supplierName) {
+              supplierName = booking.supplier_name || booking.supplier || 'Supplier';
+            }
+            
+            return {
+              ...booking,
+              ref_type: 'PO_IMPORT', // Ensure ref_type is set
+              job_orders: [],
+              customer_name: 'Asia Petrochemicals LLC', // APC is the buyer for imports
+              supplier_name: supplierName,
+              po_number: poNumber,
+              po_id: poId || booking.po_id, // Ensure po_id is set
+              job_numbers: '', // No job numbers for PO imports
+              is_po_import: true
+            };
+          }
+          
+          // Handle export bookings (with job orders)
           const jobOrderIds = booking.job_order_ids || [];
           const jobOrders = [];
           const customerNames = new Set();
@@ -95,39 +173,144 @@ export default function ShippingPage() {
                 }
               }
             } catch (error) {
-              console.error(`Failed to fetch job order ${jobId}:`, error);
+              // Silently handle 404 errors for deleted job orders - don't spam console
+              if (error?.response?.status !== 404) {
+                console.error(`Failed to fetch job order ${jobId}:`, error);
+              }
+              // Continue processing other job orders even if one is missing
             }
           }
           
           return {
             ...booking,
             job_orders: jobOrders,
-            customer_name: Array.from(customerNames).join(', '),
-            job_numbers: jobNumbers.join(', ')
+            customer_name: Array.from(customerNames).join(', ') || booking.customer_name || '',
+            job_numbers: jobNumbers.join(', '),
+            is_po_import: false
           };
         })
       );
       
       setBookings(enrichedBookings);
       
-      // Filter job orders by export incoterms (FOB, CFR, CIF, CIP) for shipping page
-      // The API returns paginated response: {data: [...], pagination: {...}}
-      const exportIncoterms = ['FOB', 'CFR', 'CIF', 'CIP'];
-      // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
-      const jobsResponse = jobsRes?.data || {};
-      const jobsData = Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []);
-      const filteredJobs = jobsData.filter(job => 
-        job.incoterm && exportIncoterms.includes(job.incoterm.toUpperCase())
-      );
-      setJobs(filteredJobs);
+      // Filter POs that can be used for import bookings (approved POs without shipping booking)
+      const posData = Array.isArray(posRes?.data) ? posRes.data : [];
+      
+      // IMPORTANT: Use ALL bookings from API (not just enriched ones) to check for PO references
+      // This ensures we catch bookings that might have failed enrichment but still reference POs
+      const allBookingsData = Array.isArray(bookingsRes?.data) ? bookingsRes.data : [];
+      
+      console.log(`Total bookings from API: ${allBookingsData.length}, Enriched bookings: ${enrichedBookings.length}`);
+      console.log('All booking numbers:', allBookingsData.map(b => b.booking_number || b.id).slice(0, 10));
+      
+      // Log bookings with PO references for debugging
+      const bookingsWithPOs = allBookingsData.filter(b => b.po_id || b.po_number || (b.po_ids && b.po_ids.length > 0));
+      if (bookingsWithPOs.length > 0) {
+        console.log('Bookings with PO references:', bookingsWithPOs.map(b => ({
+          booking: b.booking_number,
+          status: b.status,
+          po_id: b.po_id,
+          po_number: b.po_number,
+          po_ids: b.po_ids
+        })));
+      }
+      
+      // Collect all PO IDs and PO numbers from existing bookings (check both po_id and po_ids array)
+      const bookingsPOIds = new Set();
+      const bookingReferences = new Map(); // Track which booking references which PO
+      
+      // Check ALL bookings (including those that might have failed enrichment)
+      // IMPORTANT: Only consider active bookings (exclude cancelled/deleted)
+      allBookingsData.forEach(b => {
+        // Skip cancelled or deleted bookings
+        const status = b.status?.toLowerCase() || '';
+        if (status === 'cancelled' || status === 'deleted') {
+          return; // Skip this booking
+        }
+        
+        if (b.po_id) {
+          bookingsPOIds.add(b.po_id);
+          if (!bookingReferences.has(b.po_id)) {
+            bookingReferences.set(b.po_id, []);
+          }
+          bookingReferences.get(b.po_id).push({
+            booking_number: b.booking_number,
+            booking_id: b.id,
+            field: 'po_id',
+            status: b.status
+          });
+        }
+        if (b.po_number) {
+          bookingsPOIds.add(b.po_number);
+          if (!bookingReferences.has(b.po_number)) {
+            bookingReferences.set(b.po_number, []);
+          }
+          bookingReferences.get(b.po_number).push({
+            booking_number: b.booking_number,
+            booking_id: b.id,
+            field: 'po_number',
+            status: b.status
+          });
+        }
+        if (b.po_ids && Array.isArray(b.po_ids)) {
+          b.po_ids.forEach(id => {
+            bookingsPOIds.add(id);
+            if (!bookingReferences.has(id)) {
+              bookingReferences.set(id, []);
+            }
+            bookingReferences.get(id).push({
+              booking_number: b.booking_number,
+              booking_id: b.id,
+              field: 'po_ids',
+              status: b.status
+            });
+          });
+        }
+      });
+      
+      // Show POs that are approved and don't already have a shipping booking
+      const availablePOs = posData.filter(po => {
+        if (po.status !== 'APPROVED') {
+          console.log(`PO ${po.po_number} filtered out: status is ${po.status}, not APPROVED`);
+          return false;
+        }
+        // Exclude POs that already have a booking
+        if (bookingsPOIds.has(po.id) || bookingsPOIds.has(po.po_number)) {
+          const refs = bookingReferences.get(po.id) || bookingReferences.get(po.po_number) || [];
+          console.log(`PO ${po.po_number} filtered out: already has booking`, {
+            po_id: po.id,
+            po_number: po.po_number,
+            referenced_by: refs
+          });
+          return false;
+        }
+        return true;
+      });
+      
+      console.log(`Total POs from API: ${posData.length}, Available POs after filtering: ${availablePOs.length}`);
+      console.log('Available POs:', availablePOs.map(po => ({ po_number: po.po_number, status: po.status, id: po.id })));
+      
+      setPurchaseOrders(availablePOs);
+      
+      setJobOrders(allJobsData);
     } catch (error) {
       toast.error('Failed to load data');
       // Set empty arrays on error to prevent rendering issues
       setBookings([]);
-      setJobs([]);
+      setPurchaseOrders([]);
+      setJobOrders([]);
     } finally {
       setLoading(false);
     }
+  };
+
+  const togglePOSelection = (poId) => {
+    setForm(prev => ({
+      ...prev,
+      po_ids: prev.po_ids.includes(poId)
+        ? prev.po_ids.filter(id => id !== poId)
+        : [...prev.po_ids, poId]
+    }));
   };
 
   const toggleJobSelection = (jobId) => {
@@ -140,18 +323,120 @@ export default function ShippingPage() {
   };
 
   const handleCreate = async () => {
-    if (form.job_order_ids.length === 0 || !form.shipping_line) {
-      toast.error('Please select job orders and shipping line');
-      return;
-    }
-    try {
-      await shippingAPI.create(form);
-      toast.success('Booking created. Now get CRO from shipping line.');
-      setCreateOpen(false);
-      resetForm();
-      loadData();
-    } catch (error) {
-      toast.error(error.response?.data?.detail || 'Failed to create booking');
+    if (bookingType === 'import') {
+      // Import booking (PO-based)
+      if (form.po_ids.length === 0) {
+        toast.error('Please select purchase orders');
+        return;
+      }
+
+      // Check if selected POs are FOB (require customer CRO)
+      const selectedPOs = purchaseOrders.filter(po => form.po_ids.includes(po.id));
+      const isFOB = selectedPOs.some(po => po.incoterm?.toUpperCase() === 'FOB');
+      const isMixed = selectedPOs.some(po => po.incoterm?.toUpperCase() === 'FOB') && 
+                      selectedPOs.some(po => po.incoterm?.toUpperCase() !== 'FOB');
+
+      if (isMixed) {
+        toast.error('Cannot mix FOB and non-FOB POs in same booking. FOB requires customer CRO.');
+        return;
+      }
+
+      // For PO imports: Require basic shipping details
+      if (!form.shipping_line) {
+        toast.error('Please provide shipping line');
+        return;
+      }
+      if (!form.port_of_loading) {
+        toast.error('Please provide port of loading');
+        return;
+      }
+      if (!form.port_of_discharge) {
+        toast.error('Please provide port of discharge');
+        return;
+      }
+      
+      if (isFOB) {
+        form.booking_source = 'CUSTOMER';
+      } else {
+        form.booking_source = 'SELLER';
+      }
+
+      try {
+        const { po_ids, job_order_ids, ...formWithoutIds } = form;
+        const payload = {
+          ...formWithoutIds,
+          job_order_ids: [], // Empty for PO_IMPORT bookings
+          po_ids: po_ids // Include PO IDs for import bookings
+        };
+        
+        await shippingAPI.create(payload);
+        toast.success('Import booking created. Please add CRO details when received from shipping line or customer.');
+        setCreateOpen(false);
+        resetForm();
+        loadData();
+      } catch (error) {
+        // Show detailed error message from backend validation
+        const errorMessage = error.response?.data?.detail || error.message || 'Failed to create booking';
+        if (error.response?.status === 400) {
+          // Validation error - show specific message
+          toast.error(errorMessage);
+        } else if (error.response?.status === 404) {
+          // Not found error
+          toast.error(`Resource not found: ${errorMessage}`);
+        } else {
+          // Other errors
+          toast.error(`Failed to create booking: ${errorMessage}`);
+        }
+        console.error('Booking creation error:', error);
+      }
+    } else if (bookingType === 'export') {
+      // Export booking (Job Order-based)
+      if (form.job_order_ids.length === 0) {
+        toast.error('Please select job orders');
+        return;
+      }
+
+      if (!form.shipping_line || !form.shipping_line.trim()) {
+        toast.error('Please enter shipping line');
+        return;
+      }
+      if (!form.port_of_loading) {
+        toast.error('Please provide port of loading');
+        return;
+      }
+      if (!form.port_of_discharge) {
+        toast.error('Please provide port of discharge');
+        return;
+      }
+
+      try {
+        const { po_ids, job_order_ids, ...formWithoutIds } = form;
+        const payload = {
+          ...formWithoutIds,
+          job_order_ids: job_order_ids, // Job order IDs for export bookings
+          po_ids: [] // Empty for export bookings
+        };
+        
+        await shippingAPI.create(payload);
+        toast.success('Export booking created. Please add CRO details when received from shipping line.');
+        setCreateOpen(false);
+        resetForm();
+        loadData();
+      } catch (error) {
+        // Show detailed error message from backend validation
+        const errorMessage = error.response?.data?.detail || error.message || 'Failed to create booking';
+        if (error.response?.status === 400) {
+          // Validation error - show specific message
+          toast.error(errorMessage);
+        } else if (error.response?.status === 404) {
+          // Not found error
+          toast.error(`Resource not found: ${errorMessage}`);
+        } else {
+          // Other errors
+          toast.error(`Failed to create booking: ${errorMessage}`);
+        }
+        console.error('Booking creation error:', error);
+      }
     }
   };
 
@@ -162,7 +447,12 @@ export default function ShippingPage() {
     }
     try {
       await shippingAPI.updateCRO(selectedBooking.id, croForm);
-      toast.success('CRO details saved. Transport schedule auto-generated!');
+      const isPOImport = selectedBooking?.is_po_import || selectedBooking?.ref_type === 'PO_IMPORT';
+      if (isPOImport) {
+        toast.success('CRO details saved. Import record created - Go to Import Window to track shipment!');
+      } else {
+        toast.success('CRO details saved. Transport schedule auto-generated!');
+      }
       setCroOpen(false);
       loadData();
     } catch (error) {
@@ -194,6 +484,7 @@ export default function ShippingPage() {
 
   const resetForm = () => {
     setForm({
+      po_ids: [],
       job_order_ids: [],
       shipping_line: '',
       container_type: '20ft',
@@ -205,10 +496,50 @@ export default function ShippingPage() {
       is_dg: false,
       dg_class: '',
       notes: '',
+      cro_number: '',
+      vessel_name: '',
+      vessel_date: '',
+      cutoff_date: '',
+      gate_cutoff: '',
+      vgm_cutoff: '',
+      freight_rate: 0,
+      freight_currency: 'USD',
+      freight_charges: 0,
+      pull_out_date: '',
+      si_cutoff: '',
+      gate_in_date: '',
+      booking_source: 'SELLER',
     });
+    setBookingType(null);
   };
 
-  const filteredBookings = statusFilter === 'all' ? bookings : bookings.filter(b => b.status === statusFilter);
+
+  // Check if selected POs are FOB
+  const selectedPOs = purchaseOrders.filter(po => form.po_ids.includes(po.id));
+  const isFOBBooking = selectedPOs.length > 0 && selectedPOs.every(po => po.incoterm?.toUpperCase() === 'FOB');
+
+  // Separate bookings into Import and Export
+  const importBookings = bookings
+    .filter(b => b.ref_type === 'PO_IMPORT' || b.po_id || (b.po_ids && b.po_ids.length > 0))
+    .sort((a, b) => {
+      const dateA = new Date(a.created_at || a.vessel_date || 0);
+      const dateB = new Date(b.created_at || b.vessel_date || 0);
+      return dateB - dateA; // Descending (newest first)
+    });
+  
+  const exportBookings = bookings
+    .filter(b => b.ref_type !== 'PO_IMPORT' && !b.po_id && (!b.po_ids || b.po_ids.length === 0))
+    .sort((a, b) => {
+      const dateA = new Date(a.created_at || a.vessel_date || 0);
+      const dateB = new Date(b.created_at || b.vessel_date || 0);
+      return dateB - dateA; // Descending (newest first)
+    });
+
+  // Apply status filter to active tab
+  const filteredBookings = activeTab === 'import' 
+    ? (statusFilter === 'all' ? importBookings : importBookings.filter(b => b.status === statusFilter))
+    : (statusFilter === 'all' ? exportBookings : exportBookings.filter(b => b.status === statusFilter));
+  
   const pendingCRO = bookings.filter(b => b.status === 'pending').length;
   const canCreate = ['admin', 'shipping'].includes(user?.role);
 
@@ -232,74 +563,369 @@ export default function ShippingPage() {
             </SelectContent>
           </Select>
           {canCreate && (
-            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+            <Dialog open={createOpen} onOpenChange={(open) => {
+              setCreateOpen(open);
+              if (!open) {
+                resetForm();
+              }
+            }}>
               <DialogTrigger asChild>
-                <Button data-testid="create-booking-btn" className="rounded-sm">
+                <Button data-testid="create-booking-btn" className="rounded-sm" onClick={() => {
+                  setCreateOpen(true);
+                  setBookingType(null);
+                }}>
                   <Plus className="w-4 h-4 mr-2" /> New Booking
                 </Button>
               </DialogTrigger>
-              <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+              <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
                 <DialogHeader>
-                  <DialogTitle>Create Container Booking Request</DialogTitle>
+                  <DialogTitle>
+                    {!bookingType ? 'Select Booking Type' : 
+                     bookingType === 'import' ? (isFOBBooking ? 'Create Import Booking from Customer CRO (FOB)' : 'Create Import Container Booking Request') :
+                     'Create Export Container Booking Request'}
+                  </DialogTitle>
+                  {bookingType === 'import' && isFOBBooking && (
+                    <p className="text-sm text-amber-400 mt-2">
+                      ⚠️ FOB Incoterm: Customer is responsible for booking. Enter CRO details provided by customer.
+                    </p>
+                  )}
                 </DialogHeader>
                 <div className="space-y-6 py-4">
-                  {/* Job Orders Selection */}
-                  <div>
-                    <Label className="mb-2 block">Select Job Orders (Ready for Dispatch)</Label>
-                    <div className="border border-border rounded-sm max-h-48 overflow-y-auto">
-                      {jobs.length > 0 ? jobs.map(job => (
-                        <div key={job.id} className="flex items-center gap-3 p-3 border-b border-border last:border-0 hover:bg-muted/30">
-                          <Checkbox
-                            checked={form.job_order_ids.includes(job.id)}
-                            onCheckedChange={() => toggleJobSelection(job.id)}
-                          />
-                          <div className="flex-1">
-                            <p className="font-mono text-sm">{job.job_number}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {job.customer_name && <span className="font-medium">{job.customer_name} - </span>}
-                              {job.product_name} - Qty: {job.quantity}
-                            </p>
+                  {/* Booking Type Selection */}
+                  {!bookingType && (
+                    <div className="space-y-4">
+                      <p className="text-sm text-muted-foreground">Choose the type of booking you want to create:</p>
+                      <div className="grid grid-cols-2 gap-4">
+                        <Button
+                          variant="outline"
+                          className="h-24 flex flex-col items-center justify-center gap-2"
+                          onClick={() => setBookingType('import')}
+                        >
+                          <Ship className="w-6 h-6 text-blue-400" />
+                          <span className="font-medium">Import Booking (PO)</span>
+                          <span className="text-xs text-muted-foreground">For purchase orders</span>
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="h-24 flex flex-col items-center justify-center gap-2"
+                          onClick={() => setBookingType('export')}
+                        >
+                          <Package className="w-6 h-6 text-amber-400" />
+                          <span className="font-medium">Export Booking (Job Order)</span>
+                          <span className="text-xs text-muted-foreground">For job orders</span>
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Purchase Orders Selection for Import */}
+                  {bookingType === 'import' && (
+                    <div>
+                      <Label className="mb-2 block">
+                        Select Purchase Orders {isFOBBooking ? '(Awaiting Customer Booking)' : '(Ready for Import Booking)'}
+                      </Label>
+                      <div className="border border-border rounded-sm max-h-48 overflow-y-auto">
+                        {purchaseOrders.length > 0 ? purchaseOrders.map(po => (
+                          <div key={po.id} className="flex items-center gap-3 p-3 border-b border-border last:border-0 hover:bg-muted/30">
+                            <Checkbox
+                              checked={form.po_ids.includes(po.id)}
+                              onCheckedChange={() => togglePOSelection(po.id)}
+                            />
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2">
+                                <p className="font-mono text-sm">{po.po_number}</p>
+                                {po.incoterm && (
+                                  <Badge variant="outline" className="text-xs">
+                                    {po.incoterm}
+                                  </Badge>
+                                )}
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                <span className="font-medium">{po.supplier_name || 'Supplier'} - </span>
+                                {po.lines && po.lines.length > 0 ? (
+                                  <span>{po.lines[0].item_name} - Qty: {po.lines[0].qty} {po.lines[0].uom}</span>
+                                ) : (
+                                  <span>Total: {po.currency} {po.total_amount?.toFixed(2)}</span>
+                                )}
+                              </p>
+                            </div>
+                          </div>
+                        )) : (
+                          <p className="p-4 text-center text-muted-foreground text-sm">No purchase orders available for booking</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Job Order Selection for Export */}
+                  {bookingType === 'export' && (
+                    <div>
+                      <Label className="mb-2 block">
+                        Select Job Orders (Ready for Dispatch)
+                      </Label>
+                      <div className="border border-border rounded-sm max-h-48 overflow-y-auto">
+                        {jobOrders.length > 0 ? jobOrders.map(job => (
+                          <div key={job.id} className="flex items-center gap-3 p-3 border-b border-border last:border-0 hover:bg-muted/30">
+                            <Checkbox
+                              checked={form.job_order_ids.includes(job.id)}
+                              onCheckedChange={() => toggleJobSelection(job.id)}
+                            />
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2">
+                                <p className="font-mono text-sm">{job.job_number}</p>
+                                {job.status && (
+                                  <Badge variant="outline" className="text-xs">
+                                    {job.status}
+                                  </Badge>
+                                )}
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                <span className="font-medium">{job.customer_name || 'Customer'} - </span>
+                                {job.delivery_date ? (
+                                  <span>Delivery: {new Date(job.delivery_date).toLocaleDateString()}</span>
+                                ) : (
+                                  <span>No delivery date</span>
+                                )}
+                              </p>
+                            </div>
+                          </div>
+                        )) : (
+                          <p className="p-4 text-center text-muted-foreground text-sm">No job orders ready for dispatch</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Show form fields only when booking type is selected */}
+                  {bookingType && (
+                    <>
+                  {bookingType === 'import' && isFOBBooking && (
+                    <>
+                      <div className="border-t border-border pt-4 mt-4">
+                        <h3 className="font-medium mb-4 text-blue-400">Customer CRO Details (Required for FOB)</h3>
+                        <div className="form-grid">
+                          <div className="form-field">
+                            <Label>CRO Number *</Label>
+                            <Input
+                              value={form.cro_number}
+                              onChange={(e) => setForm({...form, cro_number: e.target.value})}
+                              placeholder="Container Release Order number"
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Shipping Line *</Label>
+                            <Input
+                              value={form.shipping_line}
+                              onChange={(e) => setForm({...form, shipping_line: e.target.value})}
+                              placeholder="e.g., MSC, Maersk, Hapag"
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Vessel Name *</Label>
+                            <Input
+                              value={form.vessel_name}
+                              onChange={(e) => setForm({...form, vessel_name: e.target.value})}
+                              placeholder="Vessel name"
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Vessel Date *</Label>
+                            <Input
+                              type="date"
+                              value={form.vessel_date}
+                              onChange={(e) => setForm({...form, vessel_date: e.target.value})}
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Cutoff Date *</Label>
+                            <Input
+                              type="date"
+                              value={form.cutoff_date}
+                              onChange={(e) => setForm({...form, cutoff_date: e.target.value})}
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Gate Cutoff</Label>
+                            <Input
+                              type="datetime-local"
+                              value={form.gate_cutoff}
+                              onChange={(e) => setForm({...form, gate_cutoff: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>VGM Cutoff</Label>
+                            <Input
+                              type="datetime-local"
+                              value={form.vgm_cutoff}
+                              onChange={(e) => setForm({...form, vgm_cutoff: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>SI Cutoff</Label>
+                            <Input
+                              type="datetime-local"
+                              value={form.si_cutoff}
+                              onChange={(e) => setForm({...form, si_cutoff: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Gate In Date</Label>
+                            <Input
+                              type="date"
+                              value={form.gate_in_date}
+                              onChange={(e) => setForm({...form, gate_in_date: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Pull Out Date</Label>
+                            <Input
+                              type="date"
+                              value={form.pull_out_date}
+                              onChange={(e) => setForm({...form, pull_out_date: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Freight Rate</Label>
+                            <Input
+                              type="number"
+                              value={form.freight_rate || ''}
+                              onChange={(e) => setForm({...form, freight_rate: parseFloat(e.target.value) || 0})}
+                              placeholder="0.00"
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Freight Currency</Label>
+                            <Select value={form.freight_currency} onValueChange={(v) => setForm({...form, freight_currency: v})}>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="USD">USD</SelectItem>
+                                <SelectItem value="EUR">EUR</SelectItem>
+                                <SelectItem value="AED">AED</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="form-field">
+                            <Label>Freight Charges (Total)</Label>
+                            <Input
+                              type="number"
+                              value={form.freight_charges || ''}
+                              onChange={(e) => setForm({...form, freight_charges: parseFloat(e.target.value) || 0})}
+                              placeholder="0.00"
+                            />
                           </div>
                         </div>
-                      )) : (
-                        <p className="p-4 text-center text-muted-foreground text-sm">No jobs ready for dispatch</p>
-                      )}
-                    </div>
-                  </div>
+                      </div>
+                    </>
+                  )}
 
-                  <div className="form-grid">
-                    <div className="form-field">
-                      <Label>Shipping Line *</Label>
-                      <Input
-                        value={form.shipping_line}
-                        onChange={(e) => setForm({...form, shipping_line: e.target.value})}
-                        placeholder="e.g., MSC, Maersk, Hapag"
-                        data-testid="shipping-line-input"
-                      />
+                  {bookingType === 'import' && !(selectedPOs.length > 0 && selectedPOs.every(po => po.incoterm?.toUpperCase() === 'FOB')) && (
+                    <div className="form-grid">
+                      <div className="form-field">
+                        <Label>Shipping Line *</Label>
+                        <Input
+                          value={form.shipping_line}
+                          onChange={(e) => setForm({...form, shipping_line: e.target.value})}
+                          placeholder="e.g., MSC, Maersk, Hapag"
+                          data-testid="shipping-line-input"
+                          required
+                        />
+                      </div>
+                      <div className="form-field">
+                        <Label>Container Type</Label>
+                        <Select value={form.container_type} onValueChange={(v) => setForm({...form, container_type: v})}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {CONTAINER_TYPES.map(t => (
+                              <SelectItem key={t} value={t}>{t.toUpperCase()}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="form-field">
+                        <Label>Container Count</Label>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={form.container_count}
+                          onChange={(e) => setForm({...form, container_count: parseInt(e.target.value)})}
+                        />
+                      </div>
                     </div>
-                    <div className="form-field">
-                      <Label>Container Type</Label>
-                      <Select value={form.container_type} onValueChange={(v) => setForm({...form, container_type: v})}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {CONTAINER_TYPES.map(t => (
-                            <SelectItem key={t} value={t}>{t.toUpperCase()}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                  )}
+
+                  {bookingType === 'import' && selectedPOs.length > 0 && selectedPOs.every(po => po.incoterm?.toUpperCase() === 'FOB') && (
+                    <div className="form-grid">
+                      <div className="form-field">
+                        <Label>Container Type</Label>
+                        <Select value={form.container_type} onValueChange={(v) => setForm({...form, container_type: v})}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {CONTAINER_TYPES.map(t => (
+                              <SelectItem key={t} value={t}>{t.toUpperCase()}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="form-field">
+                        <Label>Container Count</Label>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={form.container_count}
+                          onChange={(e) => setForm({...form, container_count: parseInt(e.target.value)})}
+                        />
+                      </div>
                     </div>
-                    <div className="form-field">
-                      <Label>Container Count</Label>
-                      <Input
-                        type="number"
-                        min="1"
-                        value={form.container_count}
-                        onChange={(e) => setForm({...form, container_count: parseInt(e.target.value)})}
-                      />
+                  )}
+
+                  {/* Shipping Line for Export Bookings */}
+                  {bookingType === 'export' && (
+                    <div className="form-grid">
+                      <div className="form-field">
+                        <Label>Shipping Line *</Label>
+                        <Input
+                          value={form.shipping_line}
+                          onChange={(e) => setForm({...form, shipping_line: e.target.value})}
+                          placeholder="e.g., MSC, Maersk, Hapag"
+                          data-testid="shipping-line-input-export"
+                          required
+                        />
+                      </div>
+                      <div className="form-field">
+                        <Label>Container Type</Label>
+                        <Select value={form.container_type} onValueChange={(v) => setForm({...form, container_type: v})}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {CONTAINER_TYPES.map(t => (
+                              <SelectItem key={t} value={t}>{t.toUpperCase()}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="form-field">
+                        <Label>Container Count</Label>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={form.container_count}
+                          onChange={(e) => setForm({...form, container_count: parseInt(e.target.value)})}
+                        />
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   <div className="form-grid">
                     <div className="form-field">
@@ -369,9 +995,16 @@ export default function ShippingPage() {
                   </div>
 
                   <div className="flex justify-end gap-3">
-                    <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
-                    <Button onClick={handleCreate} data-testid="submit-booking-btn">Create Booking Request</Button>
+                    <Button variant="outline" onClick={() => {
+                      setCreateOpen(false);
+                      resetForm();
+                    }}>Cancel</Button>
+                    <Button onClick={handleCreate} data-testid="submit-booking-btn">
+                      {bookingType === 'import' && isFOBBooking ? 'Create Booking from Customer CRO' : 'Create Booking Request'}
+                    </Button>
                   </div>
+                    </>
+                  )}
                 </div>
               </DialogContent>
             </Dialog>
@@ -412,11 +1045,19 @@ export default function ShippingPage() {
             <thead>
               <tr>
                 <th>Booking #</th>
-                <th>Customer</th>
-                <th>Job Order(s)</th>
+                {activeTab === 'import' ? (
+                  <>
+                    <th>PO #</th>
+                    <th>Supplier</th>
+                  </>
+                ) : (
+                  <>
+                    <th>Job #</th>
+                    <th>Customer</th>
+                  </>
+                )}
                 <th>Shipping Line</th>
                 <th>Container</th>
-                <th>Route</th>
                 <th>CRO #</th>
                 <th>Vessel</th>
                 <th>Cutoff</th>
@@ -429,11 +1070,27 @@ export default function ShippingPage() {
               {filteredBookings.map((booking) => (
                 <tr key={booking.id} data-testid={`booking-row-${booking.booking_number}`}>
                   <td className="font-medium">{booking.booking_number}</td>
-                  <td className="text-sm">{booking.customer_name || '-'}</td>
-                  <td className="text-xs font-mono text-muted-foreground">{booking.job_numbers || '-'}</td>
+                  {activeTab === 'import' ? (
+                    <>
+                      <td className="text-xs font-mono text-blue-400">
+                        {booking.po_number || '-'}
+                      </td>
+                      <td className="text-sm">{booking.supplier_name || '-'}</td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="text-xs font-mono text-amber-400">
+                        {Array.isArray(booking.job_numbers) 
+                          ? booking.job_numbers.join(', ') 
+                          : (typeof booking.job_numbers === 'string' 
+                            ? booking.job_numbers 
+                            : (booking.job_number || '-'))}
+                      </td>
+                      <td className="text-sm">{booking.customer_name || '-'}</td>
+                    </>
+                  )}
                   <td>{booking.shipping_line}</td>
                   <td>{booking.container_count}x {booking.container_type?.toUpperCase()}</td>
-                  <td className="text-xs">{booking.port_of_loading} → {booking.port_of_discharge}</td>
                   <td className={booking.cro_number ? 'text-emerald-400 font-mono' : 'text-amber-400'}>
                     {booking.cro_number || 'Pending'}
                   </td>
@@ -670,6 +1327,7 @@ export default function ShippingPage() {
           </div>
         </DialogContent>
       </Dialog>
+
     </div>
   );
 }

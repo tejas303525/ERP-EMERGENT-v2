@@ -41,7 +41,7 @@ const menuItems = [
   { icon: FileText, label: 'Quotations', path: '/quotations', roles: ['admin', 'sales', 'finance'] },
   { icon: ShoppingCart, label: 'Sales Orders', path: '/sales-orders', roles: ['admin', 'sales', 'finance'] },
   { icon: Factory, label: 'Job Orders', path: '/job-orders', roles: ['admin', 'production', 'procurement'] },
-  { icon: Calendar, label: 'Production Schedule', path: '/production-schedule', roles: ['admin', 'production', 'procurement'] },
+  { icon: Calendar, label: 'Production Dashboard (Schedule and Planning)', path: '/production-schedule', roles: ['admin', 'production', 'procurement'] },
   { icon: FlaskConical, label: 'Blend Reports', path: '/blend-reports', roles: ['admin', 'production', 'qc'] },
   { icon: FileStack, label: 'BOM Management', path: '/bom-management', roles: ['admin', 'production', 'inventory'] },
   { icon: Boxes, label: 'Inventory', path: '/inventory', roles: ['admin', 'inventory', 'production', 'procurement'] },

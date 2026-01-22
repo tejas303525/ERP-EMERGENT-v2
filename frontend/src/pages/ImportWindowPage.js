@@ -161,7 +161,8 @@ const ImportWindowPage = () => {
           <table className="w-full">
             <thead className="bg-muted/30">
               <tr>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Import #</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Qty</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO #</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Incoterm</th>
@@ -173,22 +174,30 @@ const ImportWindowPage = () => {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="p-8 text-center">
+                  <td colSpan={8} className="p-8 text-center">
                     <RefreshCw className="w-6 h-6 animate-spin mx-auto text-muted-foreground" />
                   </td>
                 </tr>
               ) : getTabImports().length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="p-8 text-center text-muted-foreground">
+                  <td colSpan={8} className="p-8 text-center text-muted-foreground">
                     No imports in this status
                   </td>
                 </tr>
               ) : (
-                getTabImports().map((imp) => (
-                  <tr key={imp.id} className="border-b border-border/50 hover:bg-muted/10">
-                    <td className="p-3 font-mono font-medium">{imp.import_number}</td>
-                    <td className="p-3 text-blue-400">{imp.po_number || '-'}</td>
-                    <td className="p-3">{imp.supplier_name || '-'}</td>
+                getTabImports().map((imp) => {
+                  // Get first product or summary
+                  const firstItem = imp.lines?.[0] || imp.po_items?.[0];
+                  const productName = firstItem?.item_name || firstItem?.product_name || firstItem?.name || '-';
+                  const totalQty = imp.total_quantity || (firstItem?.qty || firstItem?.quantity || 0);
+                  const uom = imp.total_uom || imp.total_unit || firstItem?.uom || firstItem?.unit || 'units';
+
+                  return (
+                    <tr key={imp.id} className="border-b border-border/50 hover:bg-muted/10">
+                      <td className="p-3 font-medium">{productName}</td>
+                      <td className="p-3 font-mono">{totalQty} {uom}</td>
+                      <td className="p-3 text-blue-400">{imp.po_number || '-'}</td>
+                      <td className="p-3">{imp.supplier_name || '-'}</td>
                     <td className="p-3">
                       <Badge className="bg-purple-500/20 text-purple-400">
                         {imp.incoterm || 'FOB'}
@@ -211,7 +220,7 @@ const ImportWindowPage = () => {
                         <Button size="sm" variant="ghost" onClick={() => openDetails(imp)}>
                           <Eye className="w-4 h-4" />
                         </Button>
-                        {imp.status === 'PENDING' && (
+                        {(imp.status === 'PENDING' || imp.status === 'PENDING_DOCS') && (
                           <Button size="sm" onClick={() => handleUpdateStatus(imp.id, 'IN_TRANSIT')}>
                             In Transit
                           </Button>
@@ -235,7 +244,8 @@ const ImportWindowPage = () => {
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -394,7 +404,7 @@ const ImportDetailsModal = ({ importRecord, requiredDocs, onClose, onMoveToTrans
                     key={doc.key}
                     onClick={() => {
                       const newStatus = !isReceived;
-                      handleUpdateDocument(importRecord.id, doc.key, newStatus);
+                      onUpdateDocument(importRecord.id, doc.key, newStatus);
                     }}
                     className={`flex items-center gap-2 p-2 rounded bg-muted/20 hover:bg-muted/40 transition-colors cursor-pointer ${
                       isReceived ? 'border border-green-500/50' : 'border border-transparent'

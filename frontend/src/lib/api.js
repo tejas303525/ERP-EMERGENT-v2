@@ -200,6 +200,17 @@ export const productionAPI = {
   getProcurementList: () => api.get('/production/procurement-list'),
 };
 
+// Production Logs
+export const productionLogAPI = {
+  create: (data) => api.post('/production/logs', data),
+  getAll: (jobOrderId, productId) => api.get('/production/logs', { 
+    params: { job_order_id: jobOrderId, product_id: productId } 
+  }),
+  getJobsByCategory: (category) => api.get('/production/jobs-by-category', { 
+    params: { category } 
+  }),
+};
+
 // Drums Production Scheduling (New)
 export const drumScheduleAPI = {
   regenerate: (weekStart) => api.post(`/production/drum-schedule/regenerate?week_start=${weekStart}`),
@@ -338,6 +349,39 @@ export const userAPI = {
   update: (id, data) => api.put(`/users/${id}`, data),
   changePassword: (id, newPassword) => api.put(`/users/${id}/password`, { new_password: newPassword }),
   delete: (id) => api.delete(`/users/${id}`),
+};
+
+// Costing & Margin Validation
+export const costingAPI = {
+  calculate: (referenceType, referenceId, rawMaterialCost, oceanFreight) => 
+    api.post('/costing/calculate', null, {
+      params: {
+        reference_type: referenceType,
+        reference_id: referenceId,
+        raw_material_cost: rawMaterialCost,
+        ocean_freight: oceanFreight,
+      },
+    }),
+  get: (referenceType, referenceId) => api.get(`/costing/${referenceType}/${referenceId}`),
+  confirm: (costingId) => api.put(`/costing/${costingId}/confirm`),
+  update: (costingId, data) => api.put(`/costing/${costingId}`, data),
+  getSummary: (costingId) => api.get(`/costing/${costingId}/summary`),
+};
+
+// Transport Routes Master Data
+export const transportRoutesAPI = {
+  getAll: (origin, destination, isActive) => 
+    api.get('/transport-routes', { params: { origin, destination, is_active: isActive } }),
+  create: (data) => api.post('/transport-routes', data),
+  update: (id, data) => api.put(`/transport-routes/${id}`, data),
+};
+
+// Fixed Charges Master Data
+export const fixedChargesAPI = {
+  getAll: (chargeType, isActive) => 
+    api.get('/fixed-charges', { params: { charge_type: chargeType, is_active: isActive } }),
+  create: (data) => api.post('/fixed-charges', data),
+  update: (id, data) => api.put(`/fixed-charges/${id}`, data),
 };
 
 export default api;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { jobOrderAPI, salesOrderAPI, productAPI } from '../lib/api';
+import { jobOrderAPI, salesOrderAPI, productAPI, quotationAPI, productionLogAPI } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
 import { formatDate, getStatusColor, getPriorityColor } from '../lib/utils';
-import { Plus, Factory, Eye, Play, CheckCircle, Trash2, AlertTriangle, Check, Loader2, Printer, Download, Search, RefreshCw } from 'lucide-react';
+import { Plus, Factory, Eye, Play, Trash2, AlertTriangle, Check, Loader2, Printer, Download, Search, RefreshCw, FileText } from 'lucide-react';
 import api from '../lib/api';
 import {
   Pagination,
@@ -24,6 +24,123 @@ import {
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'];
 const STATUSES = ['pending', 'approved', 'in_production', 'procurement', 'ready_for_dispatch'];
+
+const LABEL_TRANSLATIONS = {
+  en: {
+    product_name: 'PRODUCT NAME',
+    exporter_name: "EXPORTER'S NAME",
+    production_date: 'PRODUCTION DATE',
+    expiry_date: 'EXPIRY DATE',
+    net_weight: 'NET WEIGHT',
+    batch_no: 'BATCH NO',
+    country_of_origin: 'COUNTRY OF ORIGIN',
+    handling_instruction: 'HANDLING INSTRUCTION:',
+    handling_text: 'Keep away from heat. Keep away from source of ignition. Ground all equipment containing material. Do not ingest. Do not breathe gas/fumes/vapor/ spray. Wear suitable protective clothing. In case of insufficient ventilation, wear suitable respiratory equipment. If ingested, seek medical advice immediately and show the container or the label. Avoid Contact with skin and eyes'
+  },
+  ar: {
+    product_name: 'اسم المنتج',
+    exporter_name: 'اسم المصدر',
+    production_date: 'تاريخ الإنتاج',
+    expiry_date: 'تاريخ انتهاء الصلاحية',
+    net_weight: 'الوزن الصافي',
+    batch_no: 'رقم الدفعة',
+    country_of_origin: 'بلد المنشأ',
+    handling_instruction: 'تعليمات التعامل:',
+    handling_text: 'ابتعد عن الحرارة. ابتعد عن مصدر الاشتعال. قم بتأريض جميع المعدات التي تحتوي على المادة. لا تبتلع. لا تستنشق الغاز/الأبخرة/البخار/الرذاذ. ارتدِ ملابس واقية مناسبة. في حالة عدم كفاية التهوية، ارتدِ معدات تنفسية مناسبة. إذا تم ابتلاعها، اطلب المشورة الطبية على الفور وأظهر الحاوية أو الملصق. تجنب ملامسة الجلد والعينين'
+  }
+};
+
+// Arabic month names
+const ARABIC_MONTHS = {
+  'JANUARY': 'يناير',
+  'FEBRUARY': 'فبراير',
+  'MARCH': 'مارس',
+  'APRIL': 'أبريل',
+  'MAY': 'مايو',
+  'JUNE': 'يونيو',
+  'JULY': 'يوليو',
+  'AUGUST': 'أغسطس',
+  'SEPTEMBER': 'سبتمبر',
+  'OCTOBER': 'أكتوبر',
+  'NOVEMBER': 'نوفمبر',
+  'DECEMBER': 'ديسمبر'
+};
+
+// Arabic numerals mapping
+const ARABIC_NUMERALS = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+
+// Convert English date to Arabic format
+const convertDateToArabic = (dateStr) => {
+  if (!dateStr) return '';
+  
+  // Extract month and year from date string like "JANUARY 2026"
+  const parts = dateStr.split(' ');
+  if (parts.length >= 2) {
+    const month = parts[0].toUpperCase();
+    const year = parts[1];
+    
+    // Convert month to Arabic
+    const arabicMonth = ARABIC_MONTHS[month] || month;
+    
+    // Convert year digits to Arabic numerals
+    const arabicYear = year.split('').map(digit => {
+      const num = parseInt(digit);
+      return ARABIC_NUMERALS[num] || digit;
+    }).join('');
+    
+    return `${arabicMonth} ${arabicYear}`;
+  }
+  
+  return dateStr;
+};
+
+// Convert number to Arabic numerals
+const convertNumberToArabic = (num) => {
+  if (num === null || num === undefined) return '';
+  return num.toString().split('').map(digit => {
+    const num = parseInt(digit);
+    return isNaN(num) ? digit : ARABIC_NUMERALS[num];
+  }).join('');
+};
+
+// Convert net weight display to Arabic
+const convertNetWeightToArabic = (netWeightDisplay) => {
+  if (!netWeightDisplay) return '';
+  
+  // If it's just "Bulk" or other text
+  if (netWeightDisplay.toUpperCase() === 'BULK') {
+    return 'بالك';
+  }
+  
+  // Extract number and text parts - handle formats like "185KG STEEL DRUM" or "185 KG STEEL DRUM"
+  const match = netWeightDisplay.match(/(\d+)\s*(KG|kg)?\s*(.*)/i);
+  if (match) {
+    const number = match[1];
+    const unit = match[2] || '';
+    const packaging = match[3] || '';
+    
+    const arabicNumber = convertNumberToArabic(number);
+    const arabicUnit = unit ? 'كجم' : '';
+    const arabicPackaging = packaging ? packaging : '';
+    
+    return `${arabicNumber}${arabicUnit ? ' ' + arabicUnit : ''}${arabicPackaging ? ' ' + arabicPackaging : ''}`.trim();
+  }
+  
+  return netWeightDisplay;
+};
+
+// Convert country name to Arabic
+const convertCountryToArabic = (country) => {
+  if (!country) return '';
+  
+  const countryMap = {
+    'UAE': 'الإمارات',
+    'UNITED ARAB EMIRATES': 'الإمارات',
+    'EMIRATES': 'الإمارات'
+  };
+  
+  return countryMap[country.toUpperCase()] || country;
+};
 
 export default function JobOrdersPage() {
   const { user } = useAuth();
@@ -43,6 +160,14 @@ export default function JobOrdersPage() {
   const [showCreateButton, setShowCreateButton] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [bomAvailability, setBomAvailability] = useState({});
+  const [loadingAvailability, setLoadingAvailability] = useState(false);
+  const [labelInfo, setLabelInfo] = useState(null);
+  const [loadingLabelInfo, setLoadingLabelInfo] = useState(false);
+  const [companySettings, setCompanySettings] = useState(null);
+  const [editLabelOpen, setEditLabelOpen] = useState(false);
+  const [editableLabel, setEditableLabel] = useState(null);
+  const [labelLanguage, setLabelLanguage] = useState('en'); // 'en' or 'ar'
   const [pagination, setPagination] = useState({
     total: 0,
     page: 1,
@@ -78,6 +203,19 @@ export default function JobOrdersPage() {
   useEffect(() => {
     setCurrentPage(1);
   }, [statusFilter]);
+
+  // Load company settings for label
+  useEffect(() => {
+    const loadCompanySettings = async () => {
+      try {
+        const settingsRes = await api.get('/settings/all').catch(() => ({ data: {} }));
+        setCompanySettings(settingsRes.data);
+      } catch (error) {
+        console.error('Failed to load company settings:', error);
+      }
+    };
+    loadCompanySettings();
+  }, []);
 
   const loadData = async () => {
     try {
@@ -129,6 +267,17 @@ export default function JobOrdersPage() {
     const salesOrder = salesOrders.find(o => o.id === salesOrderId);
     if (!salesOrder) return;
 
+    // Get expected_delivery_date from quotation if available
+    let expectedDeliveryDate = salesOrder.expected_delivery_date || '';
+    if (salesOrder.quotation_id && !expectedDeliveryDate) {
+      try {
+        const quotationRes = await quotationAPI.getOne(salesOrder.quotation_id);
+        expectedDeliveryDate = quotationRes.data?.expected_delivery_date || '';
+      } catch (error) {
+        console.error('Failed to fetch quotation:', error);
+      }
+    }
+
     // Get items from the sales order (from quotation)
     const items = salesOrder.items || [];
     
@@ -144,7 +293,7 @@ export default function JobOrdersPage() {
         quantity: item.quantity,
         packaging: item.packaging,
         net_weight_kg: item.net_weight_kg,  // CRITICAL FIX: Preserve from quotation
-        delivery_date: salesOrder.expected_delivery_date || '',
+        delivery_date: expectedDeliveryDate,
       }));
       
       // Load BOM for the product
@@ -154,13 +303,14 @@ export default function JobOrdersPage() {
       setForm(prev => ({
         ...prev,
         sales_order_id: salesOrderId,
-        delivery_date: salesOrder.expected_delivery_date || '',
+        delivery_date: expectedDeliveryDate,
       }));
       toast.info(`Sales order has ${items.length} items. Please select a product.`);
     } else {
       setForm(prev => ({
         ...prev,
         sales_order_id: salesOrderId,
+        delivery_date: expectedDeliveryDate,
       }));
     }
   };
@@ -177,6 +327,17 @@ export default function JobOrdersPage() {
     const item = salesOrder?.items?.find(i => i.product_id === productId);
     
     if (item) {
+      // Get expected_delivery_date from quotation if available
+      let expectedDeliveryDate = salesOrder.expected_delivery_date || '';
+      if (salesOrder.quotation_id && !expectedDeliveryDate) {
+        try {
+          const quotationRes = await quotationAPI.getOne(salesOrder.quotation_id);
+          expectedDeliveryDate = quotationRes.data?.expected_delivery_date || '';
+        } catch (error) {
+          console.error('Failed to fetch quotation:', error);
+        }
+      }
+
       setForm(prev => ({
         ...prev,
         product_id: item.product_id,
@@ -185,7 +346,7 @@ export default function JobOrdersPage() {
         quantity: item.quantity,
         packaging: item.packaging,
         net_weight_kg: item.net_weight_kg,  // CRITICAL FIX: Preserve from quotation
-        delivery_date: salesOrder.expected_delivery_date || '',
+        delivery_date: expectedDeliveryDate,
       }));
       
       await loadProductBOM(item.product_id, item.quantity, item.packaging, item.net_weight_kg);
@@ -612,6 +773,54 @@ export default function JobOrdersPage() {
     }
   };
 
+  // Refresh BOM availability for a job order
+  const refreshBomAvailability = async (job) => {
+    if (!job?.bom || job.bom.length === 0) {
+      setBomAvailability({});
+      return;
+    }
+    
+    setLoadingAvailability(true);
+    const availabilityMap = {};
+    
+    try {
+      // Fetch current availability for each BOM item
+      const availabilityPromises = job.bom.map(async (item) => {
+        try {
+          // Use product_id from BOM item to check availability
+          const itemId = item.product_id || item.material_item_id;
+          if (!itemId) return null;
+          
+          const availRes = await api.get(`/inventory-items/${itemId}/availability`);
+          return {
+            itemId: itemId,
+            available: availRes.data?.available || 0
+          };
+        } catch (err) {
+          console.warn(`Failed to check availability for ${item.product_name}:`, err);
+          return {
+            itemId: item.product_id || item.material_item_id,
+            available: 0
+          };
+        }
+      });
+      
+      const results = await Promise.all(availabilityPromises);
+      results.forEach(result => {
+        if (result) {
+          availabilityMap[result.itemId] = result.available;
+        }
+      });
+      
+      setBomAvailability(availabilityMap);
+    } catch (error) {
+      console.error('Failed to refresh BOM availability:', error);
+      setBomAvailability({});
+    } finally {
+      setLoadingAvailability(false);
+    }
+  };
+
   // Calculate procurement status
   const getProcurementStatus = (job) => {
     // First check procurement_status field (set by backend when materials are received)
@@ -637,6 +846,263 @@ export default function JobOrdersPage() {
     }
     
     return { status: 'PENDING', label: 'Checking...', color: 'bg-gray-500/20 text-gray-400' };
+  };
+
+  // Fetch label information from PFI/quotation or job order
+  const fetchLabelInfo = async (job) => {
+    setLoadingLabelInfo(true);
+    try {
+      let quotation = null;
+      
+      // Try to get quotation via sales order
+      if (job?.sales_order_id) {
+        try {
+          const salesOrderRes = await salesOrderAPI.getOne(job.sales_order_id);
+          const salesOrder = salesOrderRes.data;
+          
+          if (salesOrder?.quotation_id) {
+            const quotationRes = await quotationAPI.getOne(salesOrder.quotation_id);
+            quotation = quotationRes.data;
+          }
+        } catch (error) {
+          console.warn('Failed to fetch sales order or quotation:', error);
+        }
+      }
+      
+      // Fetch batch number from production log for this job order
+      let batchNo = null;
+      try {
+        if (job.id) {
+          const productId = job.product_id || (job.items && job.items.length > 0 ? job.items[0].product_id : null);
+          // Fetch production logs - if productId is available, filter by it; otherwise get all logs for the job
+          const logsRes = productId 
+            ? await productionLogAPI.getAll(job.id, productId)
+            : await productionLogAPI.getAll(job.id, null);
+          const logs = logsRes.data || [];
+          
+          // Get batch number from the most recent production log
+          if (logs.length > 0) {
+            // Sort by production_date descending to get the most recent
+            const sortedLogs = [...logs].sort((a, b) => {
+              const dateA = new Date(a.production_date || a.created_at || 0);
+              const dateB = new Date(b.production_date || b.created_at || 0);
+              return dateB - dateA;
+            });
+            batchNo = sortedLogs[0].batch_number;
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch production logs:', error);
+      }
+      
+      // Fall back to job order's batch_number field if no production log found
+      if (!batchNo && job.batch_number) {
+        batchNo = job.batch_number;
+      }
+      
+      // Fall back to generating batch number if still not found
+      if (!batchNo) {
+        const now = new Date();
+        batchNo = `APCTTEG${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+      }
+      
+      // Calculate production date (current month/year)
+      const now = new Date();
+      const productionDate = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase();
+      
+      // Calculate expiry date (2 years from production, same month)
+      const expiryDate = new Date(now);
+      expiryDate.setFullYear(expiryDate.getFullYear() + 2);
+      const expiryDateStr = expiryDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase();
+      
+      // Format net weight with packaging - from job order or quotation
+      let netWeightDisplay = '';
+      const netWeightKg = job.net_weight_kg || quotation?.items?.[0]?.net_weight_kg || null;
+      if (job.packaging && job.packaging !== 'Bulk') {
+        if (netWeightKg) {
+          netWeightDisplay = `${netWeightKg}KG ${job.packaging}`;
+        } else {
+          netWeightDisplay = job.packaging;
+        }
+      } else {
+        netWeightDisplay = 'Bulk';
+      }
+      
+          // Extract label information from quotation (priority) or job order
+          const customerName = quotation?.customer_name || job.customer_name || 'N/A';
+          const labelData = {
+            pfi_number: quotation?.pfi_number || 'N/A',
+            customer_name: customerName,
+            exporter_name: 'Asia petrochem LLC', // Fixed exporter name
+            product_name: job.product_name || quotation?.items?.[0]?.product_name || 'N/A',
+        product_sku: job.product_sku || quotation?.items?.[0]?.sku || 'N/A',
+        quantity: job.quantity || 0,
+        packaging: job.packaging || 'Bulk',
+        net_weight_kg: netWeightKg,
+        net_weight_display: netWeightDisplay,
+        country_of_origin: quotation?.country_of_origin || job.country_of_origin || 'UAE',
+        country_of_destination: quotation?.country_of_destination || job.country_of_destination || 'N/A',
+        batch_number: batchNo,
+        production_date: productionDate,
+        expiry_date: expiryDateStr,
+        handling_instruction: 'Keep away from heat. Keep away from source of ignition. Ground all equipment containing material. Do not ingest. Do not breathe gas/fumes/vapor/ spray. Wear suitable protective clothing. In case of insufficient ventilation, wear suitable respiratory equipment. If ingested, seek medical advice immediately and show the container or the label. Avoid Contact with skin and eyes'
+      };
+      
+      setLabelInfo(labelData);
+    } catch (error) {
+      console.error('Failed to fetch label information:', error);
+      setLabelInfo(null);
+    } finally {
+      setLoadingLabelInfo(false);
+    }
+  };
+
+  // Print label function
+  const handlePrintLabel = () => {
+    if (!labelInfo) return;
+    
+    const lang = labelLanguage; // Use current selected language
+    const isArabic = lang === 'ar';
+    const dir = isArabic ? 'rtl' : 'ltr';
+    const textAlign = isArabic ? 'right' : 'left';
+    const fontFamily = isArabic ? "'Arial', 'Tahoma', sans-serif" : 'Arial, sans-serif';
+    
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+    
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Product Label</title>
+          <style>
+            @media print {
+              @page {
+                size: A4;
+                margin: 20mm;
+              }
+            }
+            body {
+              font-family: ${fontFamily};
+              margin: 0;
+              padding: 20px;
+              background: #f5f5f5;
+            }
+            .label-container {
+              background: white;
+              border-radius: 8px;
+              padding: 30px;
+              max-width: 600px;
+              margin: 0 auto;
+              box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+              direction: ${dir};
+            }
+            .company-name {
+              color: #dc2626;
+              font-size: 24px;
+              font-weight: bold;
+              text-transform: uppercase;
+              margin-bottom: 20px;
+              letter-spacing: 1px;
+              text-align: center;
+            }
+            .product-info {
+              margin-bottom: 20px;
+            }
+            .product-info p {
+              margin: 8px 0;
+              font-weight: bold;
+              text-transform: uppercase;
+              font-size: 12px;
+              line-height: 1.6;
+              color: #111827;
+              text-align: ${textAlign};
+            }
+            .product-row {
+              margin-bottom: 8px;
+              border-bottom: 1px solid #e5e7eb;
+              padding-bottom: 8px;
+            }
+            .product-row:last-child {
+              border-bottom: none;
+            }
+            .handling-section {
+              margin-top: 20px;
+              border-top: 2px solid #e5e7eb;
+              padding-top: 15px;
+            }
+            .handling-title {
+              font-weight: bold;
+              text-transform: uppercase;
+              margin-bottom: 10px;
+              font-size: 12px;
+              color: #111827;
+              text-align: ${textAlign};
+            }
+            .handling-text {
+              font-size: 11px;
+              line-height: 1.6;
+              text-transform: none;
+              color: #111827;
+              text-align: ${textAlign};
+            }
+          </style>
+        </head>
+        <body>
+          <div class="label-container">
+            <div class="company-name">${labelInfo.customer_name}</div>
+            <div class="product-info">
+              <div class="product-row">
+                <p>${LABEL_TRANSLATIONS[lang].product_name}: ${labelInfo.product_name}</p>
+              </div>
+              <div class="product-row">
+                <p>${LABEL_TRANSLATIONS[lang].exporter_name}: ${labelInfo.exporter_name}</p>
+              </div>
+              <div class="product-row">
+                <p>${LABEL_TRANSLATIONS[lang].production_date}: ${lang === 'ar' ? convertDateToArabic(labelInfo.production_date) : labelInfo.production_date}</p>
+              </div>
+              <div class="product-row">
+                <p>${LABEL_TRANSLATIONS[lang].expiry_date}: ${lang === 'ar' ? convertDateToArabic(labelInfo.expiry_date) : labelInfo.expiry_date}</p>
+              </div>
+              <div class="product-row">
+                <p>${LABEL_TRANSLATIONS[lang].net_weight}: ${lang === 'ar' ? convertNetWeightToArabic(labelInfo.net_weight_display) : labelInfo.net_weight_display}</p>
+              </div>
+              <div class="product-row">
+                <p>${LABEL_TRANSLATIONS[lang].batch_no}: ${labelInfo.batch_number}</p>
+              </div>
+              <div class="product-row">
+                <p>${LABEL_TRANSLATIONS[lang].country_of_origin}: ${lang === 'ar' ? convertCountryToArabic(labelInfo.country_of_origin) : labelInfo.country_of_origin}</p>
+              </div>
+            </div>
+            <div class="handling-section">
+              <div class="handling-title">${LABEL_TRANSLATIONS[lang].handling_instruction}</div>
+              <div class="handling-text">${lang === 'en' ? (labelInfo.handling_instruction || LABEL_TRANSLATIONS.en.handling_text) : LABEL_TRANSLATIONS.ar.handling_text}</div>
+            </div>
+          </div>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+    }, 250);
+  };
+
+  const handleOpenEditLabel = () => {
+    if (labelInfo) {
+      setEditableLabel({ ...labelInfo });
+      setEditLabelOpen(true);
+    }
+  };
+
+  const handleSaveLabel = () => {
+    if (!editableLabel) return;
+    
+    // Update the labelInfo with edited values
+    setLabelInfo({ ...editableLabel });
+    setEditLabelOpen(false);
+    toast.success('Label information updated successfully');
   };
 
   return (
@@ -1047,6 +1513,7 @@ export default function JobOrdersPage() {
                 <th>Product</th>
                 <th>Quantity</th>
                 <th>MT</th>
+                <th>MT Product</th>
                 <th>Priority</th>
                 <th>Status</th>
                 <th>Procurement</th>
@@ -1073,6 +1540,43 @@ export default function JobOrdersPage() {
                     </td>
                     <td className="font-mono text-muted-foreground">
                       {job.total_weight_mt ? job.total_weight_mt.toFixed(3) : '-'}
+                    </td>
+                    <td className="font-mono text-cyan-400">
+                      {(() => {
+                        // Calculate MT for individual product/item
+                        if (job.items && job.items.length > 0) {
+                          // If job has items array, calculate MT for each item
+                          const itemMTs = job.items.map(item => {
+                            // For packaged items: (net_weight_kg * quantity) / 1000
+                            // For bulk: quantity is already in MT
+                            if (item.packaging && item.packaging !== 'Bulk' && item.net_weight_kg) {
+                              return ((item.net_weight_kg * (item.quantity || 0)) / 1000).toFixed(3);
+                            } else {
+                              // Bulk or quantity is already in MT
+                              return (item.quantity || 0).toFixed(3);
+                            }
+                          });
+                          
+                          // Show individual MTs separated by comma if multiple items
+                          if (itemMTs.length === 1) {
+                            return itemMTs[0];
+                          } else {
+                            return itemMTs.join(', ');
+                          }
+                        }
+                        
+                        // Fallback: calculate from job-level data if no items array
+                        if (job.packaging && job.packaging !== 'Bulk' && job.net_weight_kg) {
+                          return (((job.net_weight_kg * (job.quantity || 0)) / 1000)).toFixed(3);
+                        }
+                        
+                        // Last fallback: if quantity exists but no net_weight_kg, assume bulk
+                        if (job.quantity) {
+                          return job.quantity.toFixed(3);
+                        }
+                        
+                        return '-';
+                      })()}
                     </td>
                     <td>
                       <Badge className={getPriorityColor(job.priority)}>
@@ -1123,7 +1627,14 @@ export default function JobOrdersPage() {
                     <td>{formatDate(job.created_at)}</td>
                     <td>
                       <div className="flex gap-1">
-                        <Button variant="ghost" size="icon" onClick={() => { setSelectedJob(job); setViewOpen(true); }}>
+                        <Button variant="ghost" size="icon" onClick={async () => { 
+                          setSelectedJob(job); 
+                          setViewOpen(true);
+                          // Refresh availability when opening modal
+                          await refreshBomAvailability(job);
+                          // Fetch label info when opening modal
+                          await fetchLabelInfo(job);
+                        }}>
                           <Eye className="w-4 h-4" />
                         </Button>
                         <Button 
@@ -1137,11 +1648,7 @@ export default function JobOrdersPage() {
                         >
                           <Download className="w-4 h-4" />
                         </Button>
-                        {canManageJobs && job.status === 'pending' && (
-                          <Button variant="ghost" size="icon" onClick={() => handleStatusUpdate(job.id, 'approved')}>
-                            <CheckCircle className="w-4 h-4 text-green-500" />
-                          </Button>
-                        )}
+                        {/* Removed: Approve button (tick button) - status transitions are now automatic */}
                         {canManageJobs && job.status === 'approved' && (
                           <Button variant="ghost" size="icon" onClick={() => handleStatusUpdate(job.id, 'in_production')}>
                             <Play className="w-4 h-4 text-blue-500" />
@@ -1252,13 +1759,158 @@ export default function JobOrdersPage() {
       </div>
 
       {/* View Dialog */}
-      <Dialog open={viewOpen} onOpenChange={setViewOpen}>
-        <DialogContent className="max-w-3xl">
+      <Dialog open={viewOpen} onOpenChange={(open) => {
+        setViewOpen(open);
+        if (!open) {
+          // Reset availability when modal closes
+          setBomAvailability({});
+          setLoadingAvailability(false);
+          setLabelInfo(null);
+          setLabelLanguage('en'); // Reset to English when dialog closes
+        } else if (open && selectedJob) {
+          // Fetch label info when dialog opens
+          fetchLabelInfo(selectedJob);
+          setLabelLanguage('en'); // Reset to English when dialog opens
+        }
+      }}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Job Order Details - {selectedJob?.job_number}</DialogTitle>
           </DialogHeader>
           {selectedJob && (
             <div className="space-y-4">
+              {/* Label Information Section - Above Label Confirmation */}
+              {loadingLabelInfo ? (
+                <div className="p-4 border border-blue-500/30 rounded-lg bg-blue-500/5 flex items-center justify-center">
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  <span className="text-sm text-muted-foreground">Loading label information...</span>
+                </div>
+              ) : labelInfo ? (
+                <div className="relative">
+                  <div className="absolute top-2 right-2 z-10">
+                    <Button
+                      onClick={handlePrintLabel}
+                      size="sm"
+                      className="bg-blue-600 hover:bg-blue-700 text-white rounded-md"
+                    >
+                      <Printer className="w-4 h-4 mr-2" />
+                      Print Label
+                    </Button>
+                  </div>
+                  
+                  {/* Language Tabs */}
+                  <div className="flex gap-2 mb-4 border-b border-gray-300">
+                    <button
+                      onClick={() => setLabelLanguage('en')}
+                      className={`px-4 py-2 text-sm font-medium transition-colors ${
+                        labelLanguage === 'en'
+                          ? 'border-b-2 border-blue-600 text-blue-600'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      English
+                    </button>
+                    <button
+                      onClick={() => setLabelLanguage('ar')}
+                      className={`px-4 py-2 text-sm font-medium transition-colors ${
+                        labelLanguage === 'ar'
+                          ? 'border-b-2 border-blue-600 text-blue-600'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      Arabic
+                    </button>
+                  </div>
+                  
+                  <div className="p-6 border-2 border-gray-900 rounded-lg bg-white shadow-sm" style={{ minHeight: '400px' }}>
+                    {/* Customer Name - Red, Bold, Uppercase */}
+                    <div className="text-red-600 text-2xl font-bold uppercase mb-6 tracking-wide text-center">
+                      {labelInfo.customer_name}
+                    </div>
+                    
+                    {/* Product Information - Single Language */}
+                    <div className="space-y-2 mb-6">
+                      {/* Product Name */}
+                      <div className="border-b border-gray-200 pb-2">
+                        <p className={`font-bold uppercase text-sm leading-relaxed text-gray-900 ${labelLanguage === 'ar' ? 'text-right' : ''}`} dir={labelLanguage === 'ar' ? 'rtl' : 'ltr'} style={labelLanguage === 'ar' ? { fontFamily: 'Arial, Tahoma, sans-serif' } : {}}>
+                          {LABEL_TRANSLATIONS[labelLanguage].product_name}: {labelInfo.product_name}
+                        </p>
+                      </div>
+                      
+                      {/* Exporter's Name */}
+                      <div className="border-b border-gray-200 pb-2">
+                        <p className={`font-bold uppercase text-sm leading-relaxed text-gray-900 ${labelLanguage === 'ar' ? 'text-right' : ''}`} dir={labelLanguage === 'ar' ? 'rtl' : 'ltr'} style={labelLanguage === 'ar' ? { fontFamily: 'Arial, Tahoma, sans-serif' } : {}}>
+                          {LABEL_TRANSLATIONS[labelLanguage].exporter_name}: {labelInfo.exporter_name}
+                        </p>
+                      </div>
+                      
+                      {/* Production Date */}
+                      <div className="border-b border-gray-200 pb-2">
+                        <p className={`font-bold uppercase text-sm leading-relaxed text-gray-900 ${labelLanguage === 'ar' ? 'text-right' : ''}`} dir={labelLanguage === 'ar' ? 'rtl' : 'ltr'} style={labelLanguage === 'ar' ? { fontFamily: 'Arial, Tahoma, sans-serif' } : {}}>
+                          {LABEL_TRANSLATIONS[labelLanguage].production_date}: {labelLanguage === 'ar' ? convertDateToArabic(labelInfo.production_date) : labelInfo.production_date}
+                        </p>
+                      </div>
+                      
+                      {/* Expiry Date */}
+                      <div className="border-b border-gray-200 pb-2">
+                        <p className={`font-bold uppercase text-sm leading-relaxed text-gray-900 ${labelLanguage === 'ar' ? 'text-right' : ''}`} dir={labelLanguage === 'ar' ? 'rtl' : 'ltr'} style={labelLanguage === 'ar' ? { fontFamily: 'Arial, Tahoma, sans-serif' } : {}}>
+                          {LABEL_TRANSLATIONS[labelLanguage].expiry_date}: {labelLanguage === 'ar' ? convertDateToArabic(labelInfo.expiry_date) : labelInfo.expiry_date}
+                        </p>
+                      </div>
+                      
+                      {/* Net Weight */}
+                      <div className="border-b border-gray-200 pb-2">
+                        <p className={`font-bold uppercase text-sm leading-relaxed text-gray-900 ${labelLanguage === 'ar' ? 'text-right' : ''}`} dir={labelLanguage === 'ar' ? 'rtl' : 'ltr'} style={labelLanguage === 'ar' ? { fontFamily: 'Arial, Tahoma, sans-serif' } : {}}>
+                          {LABEL_TRANSLATIONS[labelLanguage].net_weight}: {labelLanguage === 'ar' ? convertNetWeightToArabic(labelInfo.net_weight_display) : labelInfo.net_weight_display}
+                        </p>
+                      </div>
+                      
+                      {/* Batch Number */}
+                      <div className="border-b border-gray-200 pb-2">
+                        <p className={`font-bold uppercase text-sm leading-relaxed text-gray-900 ${labelLanguage === 'ar' ? 'text-right' : ''}`} dir={labelLanguage === 'ar' ? 'rtl' : 'ltr'} style={labelLanguage === 'ar' ? { fontFamily: 'Arial, Tahoma, sans-serif' } : {}}>
+                          {LABEL_TRANSLATIONS[labelLanguage].batch_no}: {labelInfo.batch_number}
+                        </p>
+                      </div>
+                      
+                      {/* Country of Origin */}
+                      <div className="border-b border-gray-200 pb-2">
+                        <p className={`font-bold uppercase text-sm leading-relaxed text-gray-900 ${labelLanguage === 'ar' ? 'text-right' : ''}`} dir={labelLanguage === 'ar' ? 'rtl' : 'ltr'} style={labelLanguage === 'ar' ? { fontFamily: 'Arial, Tahoma, sans-serif' } : {}}>
+                          {LABEL_TRANSLATIONS[labelLanguage].country_of_origin}: {labelLanguage === 'ar' ? convertCountryToArabic(labelInfo.country_of_origin) : labelInfo.country_of_origin}
+                        </p>
+                      </div>
+                    </div>
+                    
+                    {/* Handling Instruction - Single Language */}
+                    <div className="mt-6 pt-4 border-t-2 border-gray-300">
+                      <div className={labelLanguage === 'ar' ? 'text-right' : ''} dir={labelLanguage === 'ar' ? 'rtl' : 'ltr'} style={labelLanguage === 'ar' ? { fontFamily: 'Arial, Tahoma, sans-serif' } : {}}>
+                        <p className="font-bold uppercase text-sm mb-2 text-gray-900">
+                          {LABEL_TRANSLATIONS[labelLanguage].handling_instruction}
+                        </p>
+                        <p className="text-sm leading-relaxed text-gray-900">
+                          {labelLanguage === 'en' 
+                            ? (labelInfo.handling_instruction || LABEL_TRANSLATIONS.en.handling_text)
+                            : LABEL_TRANSLATIONS.ar.handling_text}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Edit Label Button */}
+              {labelInfo && (
+                <div className="p-3 border border-blue-500/30 rounded-lg bg-blue-500/5">
+                  <Button
+                    onClick={handleOpenEditLabel}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+                    variant="default"
+                  >
+                    <FileText className="w-4 h-4 mr-2" />
+                    Edit Label Information
+                  </Button>
+                </div>
+              )}
+
               <div className="grid grid-cols-3 gap-4 text-sm">
                 <div>
                   <span className="text-muted-foreground">Product:</span>
@@ -1336,7 +1988,19 @@ export default function JobOrdersPage() {
 
               {selectedJob.bom?.length > 0 && (
                 <div>
-                  <h4 className="font-medium mb-2">Bill of Materials</h4>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="font-medium">Bill of Materials</h4>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => refreshBomAvailability(selectedJob)}
+                      disabled={loadingAvailability}
+                      className="h-7"
+                    >
+                      <RefreshCw className={`w-3 h-3 mr-1 ${loadingAvailability ? 'animate-spin' : ''}`} />
+                      Refresh
+                    </Button>
+                  </div>
                   <div className="data-grid max-h-64 overflow-y-auto">
                     <table className="erp-table w-full">
                       <thead>
@@ -1348,16 +2012,36 @@ export default function JobOrdersPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {selectedJob.bom.map((item, idx) => (
-                          <tr key={idx}>
-                            <td>{item.product_name}</td>
-                            <td className="font-mono">{item.required_qty?.toFixed(2)} {item.unit}</td>
-                            <td className="font-mono text-green-400">{item.available_qty?.toFixed(2)}</td>
-                            <td className={`font-mono ${item.shortage_qty > 0 ? 'text-red-400' : 'text-green-400'}`}>
-                              {item.shortage_qty?.toFixed(2)}
-                            </td>
-                          </tr>
-                        ))}
+                        {selectedJob.bom.map((item, idx) => {
+                          const itemId = item.product_id || item.material_item_id;
+                          // Use refreshed availability if available, otherwise fall back to stored value
+                          const currentAvailable = bomAvailability[itemId] !== undefined 
+                            ? bomAvailability[itemId] 
+                            : (item.available_qty || 0);
+                          const requiredQty = item.required_qty || 0;
+                          const currentShortage = Math.max(0, requiredQty - currentAvailable);
+                          
+                          return (
+                            <tr key={idx}>
+                              <td>{item.product_name}</td>
+                              <td className="font-mono">{requiredQty.toFixed(2)} {item.unit}</td>
+                              <td className="font-mono text-green-400">
+                                {loadingAvailability ? (
+                                  <Loader2 className="w-4 h-4 animate-spin inline" />
+                                ) : (
+                                  currentAvailable.toFixed(2)
+                                )}
+                              </td>
+                              <td className={`font-mono ${currentShortage > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                                {loadingAvailability ? (
+                                  <Loader2 className="w-4 h-4 animate-spin inline" />
+                                ) : (
+                                  currentShortage.toFixed(2)
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -1383,6 +2067,135 @@ export default function JobOrdersPage() {
                 </Button>
                 <Button variant="outline" onClick={() => setViewOpen(false)}>
                   Close
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Label Dialog */}
+      <Dialog open={editLabelOpen} onOpenChange={setEditLabelOpen}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Label Information</DialogTitle>
+          </DialogHeader>
+          
+          {editableLabel && (
+            <div className="space-y-4 mt-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="customer_name">Customer Name</Label>
+                  <Input
+                    id="customer_name"
+                    value={editableLabel.customer_name || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, customer_name: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="exporter_name">Exporter's Name</Label>
+                  <Input
+                    id="exporter_name"
+                    value={editableLabel.exporter_name || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, exporter_name: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="product_name">Product Name</Label>
+                  <Input
+                    id="product_name"
+                    value={editableLabel.product_name || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, product_name: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="pfi_number">PFI Number</Label>
+                  <Input
+                    id="pfi_number"
+                    value={editableLabel.pfi_number || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, pfi_number: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="production_date">Production Date</Label>
+                  <Input
+                    id="production_date"
+                    value={editableLabel.production_date || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, production_date: e.target.value })}
+                    className="mt-1"
+                    placeholder="e.g., JANUARY 2026"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="expiry_date">Expiry Date</Label>
+                  <Input
+                    id="expiry_date"
+                    value={editableLabel.expiry_date || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, expiry_date: e.target.value })}
+                    className="mt-1"
+                    placeholder="e.g., JANUARY 2028"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="net_weight_display">Net Weight</Label>
+                  <Input
+                    id="net_weight_display"
+                    value={editableLabel.net_weight_display || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, net_weight_display: e.target.value })}
+                    className="mt-1"
+                    placeholder="e.g., 180KG STEEL DRUM"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="batch_number">Batch Number</Label>
+                  <Input
+                    id="batch_number"
+                    value={editableLabel.batch_number || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, batch_number: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="country_of_origin">Country of Origin</Label>
+                  <Input
+                    id="country_of_origin"
+                    value={editableLabel.country_of_origin || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, country_of_origin: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="country_of_destination">Country of Destination</Label>
+                  <Input
+                    id="country_of_destination"
+                    value={editableLabel.country_of_destination || ''}
+                    onChange={(e) => setEditableLabel({ ...editableLabel, country_of_destination: e.target.value })}
+                    className="mt-1"
+                  />
+                </div>
+              </div>
+              
+              <div>
+                <Label htmlFor="handling_instruction">Handling Instruction</Label>
+                <Textarea
+                  id="handling_instruction"
+                  value={editableLabel.handling_instruction || ''}
+                  onChange={(e) => setEditableLabel({ ...editableLabel, handling_instruction: e.target.value })}
+                  className="mt-1"
+                  rows={5}
+                />
+              </div>
+              
+              <div className="flex justify-end gap-2 pt-4 border-t">
+                <Button variant="outline" onClick={() => setEditLabelOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={handleSaveLabel} className="bg-blue-600 hover:bg-blue-700">
+                  Save Changes
                 </Button>
               </div>
             </div>

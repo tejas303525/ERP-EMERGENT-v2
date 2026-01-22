@@ -14,14 +14,79 @@ import { Textarea } from '../components/ui/textarea';
 import { Checkbox } from '../components/ui/checkbox';
 import { toast } from 'sonner';
 import { formatCurrency, formatDate, getStatusColor, cn } from '../lib/utils';
-import { Plus, FileText, Check, X, Eye, Trash2, Download, Globe, MapPin, Ship, AlertTriangle, Edit, RefreshCw } from 'lucide-react';
+import { Plus, FileText, Check, X, Eye, Trash2, Download, Globe, MapPin, Ship, AlertTriangle, Edit, RefreshCw, DollarSign } from 'lucide-react';
+
+// Helper function to format FastAPI validation errors
+const formatError = (error) => {
+  if (error.response?.data?.detail) {
+    const detail = error.response.data.detail;
+    if (Array.isArray(detail)) {
+      // Pydantic validation errors - format them
+      return detail.map(err => {
+        const field = err.loc?.join('.') || 'field';
+        return `${field}: ${err.msg || 'Invalid value'}`;
+      }).join(', ');
+    } else if (typeof detail === 'string') {
+      return detail;
+    } else {
+      return JSON.stringify(detail);
+    }
+  }
+  return error.message || 'An error occurred';
+};
 
 const CURRENCIES = ['USD', 'AED', 'EUR', 'INR'];
 const ORDER_TYPES = ['local', 'export'];
-const PAYMENT_TERMS = ['Cash', 'LC', 'CAD', 'TT', 'Net 30', 'Net 60', 'Advance 50%'];
+const PAYMENT_TERMS = ['100% CASH /TT/CDC IN ADVANCE',
+  '100% cash In Advance Before Shipment/Loading',
+  '100% CASH/TT/CDC AGAINST DELIVERY',
+  '20% Advance Balance 80% against scan copy docs',
+  '25% Advance and Balance 75% CAD at sight thru bank',
+  '30 DAYS FROM INVOICE/DELIVERY DATE',
+  '30 DAYS PDC AGAINST DELIVERY',
+  '30 DAYS PDC IN ADVANCE',
+  '30% Advance Balance 70% against scan copy docs',
+  '50% Advance and Balance 50% CAD at sight thru bank',
+  '50% Advance Balance 50% against scan copy docs',
+  '60 DAYS FROM INVOICE /DELIVERY DATE',
+  '60 DAYS PDC AGAINST DELIVERY',
+  '60 DAYS PDC IN ADVANCE',
+  '90 DAYS FROM INVOICE/ DELIVERY DATE',
+  '90 DAYS PDC AGAINST DELIVERY',
+  '90 DAYS PDC IN ADVANCE',
+  'Avalised Draft 30 Days from Bill of Lading date',
+  'Avalised Draft 60 Days from Bill of Lading date',
+  'Avalised Draft 90 Days from Bill of Lading date',
+  'Cash against Documents (CAD)',
+  'Cash against Documents (CAD) Payable at sight through Bank',
+  'Confirm Letter of credit payable at 30 days from Bill of Lading date',
+  'Confirm Letter of credit payable at 60 days from Bill of Lading date',
+  'Confirm Letter of credit payable at 90 days from Bill of Lading date',
+  'Irrevocable Letter of Credit payable at sight',
+  'Payable at 30 days from Bill of Lading Date thru Bank',
+  'Payable at 30 days from Shipped on Board Date',
+  'Payable at 60 days from Bill of Lading Date thru Bank',
+  'Payable at 60 days from Shipped on Board Date',
+  'Payable at 90 days from Bill of Lading Date thru Bank',
+  'Payable at 90 days from Shipped on Board Date'];
 const INCOTERMS = ['FOB', 'CFR', 'CIF', 'EXW', 'DDP', 'CIP', 'DAP'];
 // Default packaging - will be replaced by settings data
-const DEFAULT_PACKAGING = ['Bulk', '200L Drum', '210L Drum', 'IBC 1000L', 'Flexitank', 'ISO Tank'];
+const DEFAULT_PACKAGING = [
+  'Bulk', 
+  '200L Drum', 
+  '210L Drum',
+  'Steel Drum 210L',
+  'Steel Drum 210L Reconditioned',
+  'HDPE Drum 210L',
+  'HDPE Drum 210L Reconditioned',
+  'HDPE Drum 250L',
+  'Open Top Drum 210L',
+  'Open Top Drum 210L Reconditioned',
+  'IBC 1000L', 
+  'Flexitank', 
+  'ISO Tank',
+  'Pallets'
+];
 
 // Container types with max capacity
 const CONTAINER_TYPES = [
@@ -77,6 +142,7 @@ export default function QuotationsPage() {
   const [packagingTypes, setPackagingTypes] = useState(DEFAULT_PACKAGING);
   const [packagingObjects, setPackagingObjects] = useState([]); // Store full packaging objects
   const [bankAccounts, setBankAccounts] = useState([]);
+  const [paymentTerms, setPaymentTerms] = useState(PAYMENT_TERMS); // Payment terms from settings + defaults
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -104,11 +170,20 @@ export default function QuotationsPage() {
     country_of_destination: '',
     payment_terms: 'Cash',
     validity_days: 30,
+    expected_delivery_date: '',
     notes: '',
     items: [],
     required_documents: DOCUMENT_TYPES.filter(d => d.defaultChecked).map(d => d.id),
     include_vat: true,
     bank_id: '',
+    transport_mode: 'ocean',  // 'ocean', 'road', 'air'
+    local_type: null,  // 'direct_to_customer', 'bulk_to_plant', 'packaged_to_plant'
+    // Additional freight fields
+    additional_freight_rate_per_fcl: 0,
+    additional_freight_currency: 'USD',
+    cfr_amount: 0,
+    additional_freight_amount: 0,
+    total_receivable: 0,
   });
 
   const [newItem, setNewItem] = useState({
@@ -117,15 +192,43 @@ export default function QuotationsPage() {
     sku: '',
     quantity: 0,
     unit_price: 0,
+    uom: 'per_mt', // Unit of Measure: 'per_unit', 'per_liter', 'per_mt'
     packaging: 'Bulk',
     net_weight_kg: null,
     availableNetWeights: [], // Store available netweights for current packaging
     palletized: false, // Palletized or non-palletized
+    // Container and export detail fields
+    container_number: 1,
+    container_count_per_item: 0, // Number of containers allocated to this item
+    brand: '',
+    color: '',
+    detailed_packing: '',
+    fcl_breakdown: '',
+    quantity_in_units: 0,
+    unit_type: 'CRTN', // CRTN, PAILS, DRUMS, etc.
+    item_country_of_origin: 'UAE',
+    packing_display: '',
   });
+  
+  const [currentContainer, setCurrentContainer] = useState(1);
 
   useEffect(() => {
     loadData();
   }, []);
+
+  // Auto-set transport_mode to 'road' if GCC country selected
+  useEffect(() => {
+    const gccCountries = ['Saudi Arabia', 'Bahrain', 'Kuwait', 'Oman', 'Qatar'];
+    const countryLower = form.country_of_destination?.trim().toLowerCase() || '';
+    const isGCC = gccCountries.some(gcc => gcc.toLowerCase() === countryLower);
+    
+    if (form.order_type === 'export' && isGCC) {
+      setForm(prev => ({...prev, transport_mode: 'road'}));
+    } else if (form.order_type === 'export' && countryLower && !isGCC) {
+      // Reset to ocean if not GCC (only if country is entered)
+      setForm(prev => ({...prev, transport_mode: prev.transport_mode === 'road' ? 'ocean' : prev.transport_mode}));
+    }
+  }, [form.country_of_destination, form.order_type]);
 
   const loadData = async () => {
     try {
@@ -148,6 +251,30 @@ export default function QuotationsPage() {
       const allPackaging = ['Bulk', ...packagingFromSettings.map(p => p.name || p).filter(p => p !== 'Bulk')];
       setPackagingTypes(allPackaging.length > 1 ? allPackaging : DEFAULT_PACKAGING);
       setBankAccounts(settings.bank_accounts || []);
+      
+      // Load payment terms from settings and merge with defaults
+      const paymentTermsFromSettings = settings.payment_terms || [];
+      const termsFromSettings = paymentTermsFromSettings.map(t => t.name || t).filter(Boolean);
+      
+      // Merge defaults with settings terms, checking for duplicates
+      const merged = [...PAYMENT_TERMS];
+      const duplicates = [];
+      
+      termsFromSettings.forEach(term => {
+        const existsIndex = merged.findIndex(t => t.toLowerCase() === term.toLowerCase());
+        if (existsIndex >= 0) {
+          duplicates.push(term);
+        } else {
+          merged.push(term);
+        }
+      });
+      
+      if (duplicates.length > 0) {
+        console.warn('Duplicate payment terms found:', duplicates);
+        toast.warning(`Duplicate payment terms ignored: ${duplicates.join(', ')}`);
+      }
+      
+      setPaymentTerms(merged);
     } catch (error) {
       toast.error('Failed to load data');
     } finally {
@@ -178,9 +305,28 @@ export default function QuotationsPage() {
     }
   };
 
+  // Helper function to infer U.O.M from packaging
+  const inferUOMFromPackaging = (packaging) => {
+    if (!packaging) return 'per_mt';
+    
+    const packagingLower = packaging.toLowerCase();
+    
+    if (['drum', 'carton', 'pail', 'ibc', 'bag', 'box'].some(keyword => packagingLower.includes(keyword))) {
+      return 'per_unit';
+    } else if (['flexi', 'iso', 'tank'].some(keyword => packagingLower.includes(keyword))) {
+      return 'per_liter';
+    } else if (packagingLower === 'bulk') {
+      return 'per_mt';
+    }
+    return 'per_mt'; // Default
+  };
+
   const handlePackagingChange = async (packagingName) => {
+    // Infer U.O.M from packaging
+    const inferredUom = inferUOMFromPackaging(packagingName);
+    
     if (packagingName === 'Bulk') {
-      setNewItem({ ...newItem, packaging: 'Bulk', net_weight_kg: null, quantity: 0 });
+      setNewItem({ ...newItem, packaging: 'Bulk', uom: 'per_mt', net_weight_kg: null, quantity: 0 });
       return;
     }
     
@@ -233,9 +379,18 @@ export default function QuotationsPage() {
             }
           }
           
+          // Auto-set U.O.M based on packaging type
+          let defaultUom = 'per_mt'; // Default for bulk
+          if (packagingType === 'carton' || packagingType === 'drum' || packagingType === 'ibc') {
+            defaultUom = 'per_unit'; // For cartons, drums, IBC - price per unit
+          } else if (packagingType === 'flexi/iso' || packagingType === 'flexi' || packagingType === 'iso') {
+            defaultUom = 'per_liter'; // For Flexi/ISO - price per liter
+          }
+          
           setNewItem({
             ...newItem,
             packaging: packagingName,
+            uom: defaultUom,
             net_weight_kg: netWeight,
             quantity: autoQuantity,
             hscode: config.hscode,
@@ -251,6 +406,16 @@ export default function QuotationsPage() {
     
     // Fallback: Find the packaging object
     const packagingObj = packagingObjects.find(p => p.name === packagingName);
+    
+    // Auto-set U.O.M based on packaging name (heuristic)
+    let defaultUom = 'per_mt';
+    const packagingNameLower = packagingName.toLowerCase();
+    if (packagingNameLower.includes('carton') || packagingNameLower.includes('drum') || packagingNameLower.includes('pail') || packagingNameLower.includes('ibc')) {
+      defaultUom = 'per_unit';
+    } else if (packagingNameLower.includes('flexi') || packagingNameLower.includes('iso') || packagingNameLower.includes('tank')) {
+      defaultUom = 'per_liter';
+    }
+    
     if (packagingObj) {
       // Get netweights array or fallback to net_weight_kg
       const netWeights = packagingObj.net_weights || (packagingObj.net_weight_kg ? [packagingObj.net_weight_kg] : []);
@@ -260,12 +425,15 @@ export default function QuotationsPage() {
       
       setNewItem({ 
         ...newItem, 
-        packaging: packagingName, 
+        packaging: packagingName,
+        uom: defaultUom,
         net_weight_kg: autoNetWeight,
         availableNetWeights: netWeights // Store available netweights for dropdown
       });
     } else {
-      setNewItem({ ...newItem, packaging: packagingName, net_weight_kg: null, availableNetWeights: [] });
+      // Infer U.O.M from packaging if not set by config
+      const inferredUom = inferUOMFromPackaging(packagingName);
+      setNewItem({ ...newItem, packaging: packagingName, uom: inferredUom, net_weight_kg: null, availableNetWeights: [] });
     }
   };
 
@@ -274,27 +442,128 @@ export default function QuotationsPage() {
       toast.error('Please select a product and enter quantity');
       return;
     }
-    if (newItem.packaging !== 'Bulk' && !newItem.net_weight_kg) {
+    if (newItem.packaging !== 'Bulk' && !newItem.net_weight_kg && newItem.uom !== 'per_unit') {
       toast.error('Please enter net weight (kg) for packaged items');
       return;
     }
     
-    // Calculate total based on packaging type
+    // Validate container allocation for export orders
+    if (form.order_type === 'export' && form.container_count > 0) {
+      const requestedContainers = newItem.container_count_per_item || 0;
+      
+      if (requestedContainers <= 0) {
+        toast.error('Please enter number of containers for this item');
+        return;
+      }
+      
+      const alloc = calculateContainerAllocation();
+      if (alloc.remaining < requestedContainers) {
+        toast.error(`Only ${alloc.remaining} containers remaining. Cannot allocate ${requestedContainers} containers.`);
+        return;
+      }
+    }
+    
+    // Calculate total based on U.O.M (Unit of Measure)
+    // Infer U.O.M from packaging if not explicitly set
+    let uom = newItem.uom;
+    if (!uom || uom === 'per_mt') {
+      uom = inferUOMFromPackaging(newItem.packaging);
+    }
+    
     let total = 0;
     let weight_mt = 0;
-    if (newItem.packaging !== 'Bulk' && newItem.net_weight_kg) {
-      weight_mt = (newItem.net_weight_kg * newItem.quantity) / 1000;
-      total = weight_mt * newItem.unit_price;
-    } else {
+    
+    if (uom === 'per_unit') {
+      // For cartons, pails, drums, IBC: quantity × unit_price
+      total = newItem.quantity * newItem.unit_price;
+      // Calculate weight for container capacity checking
+      if (newItem.net_weight_kg) {
+        weight_mt = (newItem.net_weight_kg * newItem.quantity) / 1000;
+      } else {
+        weight_mt = 0;
+      }
+    } else if (uom === 'per_liter') {
+      // For liquid products: quantity (liters) × unit_price
+      total = newItem.quantity * newItem.unit_price;
+      // Approximate weight (1 liter ≈ 1 kg for most liquids)
+      weight_mt = newItem.quantity / 1000;
+    } else { // per_mt (default for bulk)
+      // For bulk: quantity (MT) × unit_price
       weight_mt = newItem.quantity;
       total = newItem.quantity * newItem.unit_price;
     }
     
     setForm({
       ...form,
-      items: [...form.items, { ...newItem, weight_mt, total }],
+      items: [...form.items, { 
+        ...newItem, 
+        weight_mt, 
+        total,
+        container_number: currentContainer 
+      }],
     });
-    setNewItem({ product_id: '', product_name: '', sku: '', quantity: 0, unit_price: 0, packaging: 'Bulk', net_weight_kg: null, availableNetWeights: [], palletized: false });
+    setNewItem({ 
+      product_id: '', 
+      product_name: '', 
+      sku: '', 
+      quantity: 0, 
+      unit_price: 0, 
+      uom: 'per_mt',
+      packaging: 'Bulk', 
+      net_weight_kg: null, 
+      availableNetWeights: [], 
+      palletized: false,
+      container_number: currentContainer,
+      container_count_per_item: 0,
+      brand: '',
+      color: '',
+      detailed_packing: '',
+      fcl_breakdown: '',
+      quantity_in_units: 0,
+      unit_type: 'CRTN',
+      item_country_of_origin: 'UAE',
+      packing_display: '',
+    });
+  };
+
+  // Calculate container allocation
+  const calculateContainerAllocation = () => {
+    const totalContainersUsed = form.items.reduce((sum, item) => {
+      return sum + (item.container_count_per_item || 0);
+    }, 0);
+    
+    const remainingContainers = (form.container_count || 0) - totalContainersUsed;
+    
+    return {
+      totalUsed: totalContainersUsed,
+      remaining: Math.max(0, remainingContainers),
+      total: form.container_count || 0
+    };
+  };
+
+  const containerAllocation = calculateContainerAllocation();
+
+  // Handle container count change and auto-generate packing_display
+  const handleContainerCountChange = (count) => {
+    const containerType = form.container_type || '20ft';
+    let containerTypeDisplay = '20 FCL';
+    
+    if (containerType === '40ft') {
+      containerTypeDisplay = '40 FCL';
+    } else if (containerType === '20ft') {
+      containerTypeDisplay = '20 FCL';
+    } else {
+      // For other types, use the container type name
+      containerTypeDisplay = containerType.toUpperCase().replace('_', ' ');
+    }
+    
+    const packingDisplay = count > 0 ? `${count}X ${containerTypeDisplay}` : '';
+    
+    setNewItem({
+      ...newItem,
+      container_count_per_item: count,
+      packing_display: packingDisplay
+    });
   };
 
   const removeItem = (index) => {
@@ -317,7 +586,33 @@ export default function QuotationsPage() {
   const subtotal = form.items.reduce((sum, i) => sum + i.total, 0);
   const vatAmount = form.order_type === 'local' && form.include_vat ? subtotal * VAT_RATE : 0;
   const grandTotal = subtotal + vatAmount;
-  const totalWeightMT = form.items.reduce((sum, i) => sum + (i.weight_mt || i.quantity), 0);
+  
+  // Calculate total weight in MT - only use weight_mt, never fallback to quantity
+  const totalWeightMT = form.items.reduce((sum, i) => {
+    // If weight_mt is already calculated, use it
+    if (i.weight_mt !== undefined && i.weight_mt !== null) {
+      return sum + i.weight_mt;
+    }
+    
+    // Calculate weight_mt if missing based on U.O.M
+    const uom = i.uom || inferUOMFromPackaging(i.packaging);
+    let calculatedWeight = 0;
+    
+    if (uom === 'per_unit' && i.net_weight_kg) {
+      calculatedWeight = (i.net_weight_kg * i.quantity) / 1000;
+    } else if (uom === 'per_liter') {
+      calculatedWeight = i.quantity / 1000;
+    } else { // per_mt
+      calculatedWeight = i.quantity;
+    }
+    
+    return sum + calculatedWeight;
+  }, 0);
+  
+  // Calculate additional freight (for CFR quotations)
+  const additionalFreight = (form.additional_freight_rate_per_fcl || 0) * (form.container_count || 1);
+  const cfrAmount = subtotal;
+  const totalReceivable = cfrAmount + additionalFreight;
 
   // Get max cargo capacity based on container type
   const getMaxContainerCapacity = () => {
@@ -355,6 +650,9 @@ export default function QuotationsPage() {
         vat_rate: form.order_type === 'local' && form.include_vat ? VAT_RATE : 0,
         total: grandTotal,
         total_weight_mt: totalWeightMT,
+        cfr_amount: cfrAmount,
+        additional_freight_amount: additionalFreight,
+        total_receivable: totalReceivable,
       };
       
       if (isEditMode && editingQuotation) {
@@ -370,7 +668,7 @@ export default function QuotationsPage() {
       setEditingQuotation(null);
       loadData();
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'Failed to save quotation');
+      toast.error(formatError(error) || 'Failed to save quotation');
     }
   };
 
@@ -396,11 +694,19 @@ export default function QuotationsPage() {
         country_of_destination: fullQuotation.country_of_destination || '',
         payment_terms: fullQuotation.payment_terms || 'Cash',
         validity_days: fullQuotation.validity_days || 30,
+        expected_delivery_date: fullQuotation.expected_delivery_date || '',
+        transport_mode: fullQuotation.transport_mode || 'ocean',
+        local_type: fullQuotation.local_type || null,
         notes: fullQuotation.notes || '',
         items: fullQuotation.items || [],
         required_documents: fullQuotation.required_documents || [],
         include_vat: fullQuotation.include_vat !== false,
         bank_id: fullQuotation.bank_id || '',
+        additional_freight_rate_per_fcl: fullQuotation.additional_freight_rate_per_fcl || 0,
+        additional_freight_currency: fullQuotation.additional_freight_currency || 'USD',
+        cfr_amount: fullQuotation.cfr_amount || 0,
+        additional_freight_amount: fullQuotation.additional_freight_amount || 0,
+        total_receivable: fullQuotation.total_receivable || 0,
       });
       
       setEditingQuotation(fullQuotation);
@@ -539,6 +845,7 @@ export default function QuotationsPage() {
       order_type: 'local',
       incoterm: '',
       container_type: '',
+      container_count: 1,
       port_of_loading: '',
       port_of_discharge: '',
       delivery_place: '',
@@ -546,12 +853,21 @@ export default function QuotationsPage() {
       country_of_destination: '',
       payment_terms: 'Cash',
       validity_days: 30,
+      expected_delivery_date: '',
       notes: '',
       items: [],
       required_documents: DOCUMENT_TYPES.filter(d => d.defaultChecked).map(d => d.id),
       include_vat: true,
       bank_id: '',
+      transport_mode: 'ocean',
+      local_type: null,
+      additional_freight_rate_per_fcl: 0,
+      additional_freight_currency: 'USD',
+      cfr_amount: 0,
+      additional_freight_amount: 0,
+      total_receivable: 0,
     });
+    setCurrentContainer(1);
   };
 
   const filteredQuotations = quotations.filter(q => 
@@ -625,7 +941,7 @@ export default function QuotationsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {PAYMENT_TERMS.map(t => (
+                      {paymentTerms.map(t => (
                         <SelectItem key={t} value={t}>{t}</SelectItem>
                       ))}
                     </SelectContent>
@@ -643,6 +959,15 @@ export default function QuotationsPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+                <div>
+                  <Label>Expected Delivery Date</Label>
+                  <Input
+                    type="date"
+                    value={form.expected_delivery_date}
+                    onChange={(e) => setForm({...form, expected_delivery_date: e.target.value})}
+                    data-testid="expected-delivery-date-input"
+                  />
                 </div>
                 <div>
                   <Label>Bank Account</Label>
@@ -676,7 +1001,19 @@ export default function QuotationsPage() {
                   <div className="grid grid-cols-4 gap-4">
                     <div>
                       <Label>Container Type</Label>
-                      <Select value={form.container_type} onValueChange={(v) => setForm({...form, container_type: v})}>
+                      <Select value={form.container_type} onValueChange={(v) => {
+                        setForm({...form, container_type: v});
+                        // Regenerate packing_display if container_count_per_item is set
+                        if (newItem.container_count_per_item > 0) {
+                          const containerTypeDisplay = v === '40ft' ? '40 FCL' : 
+                                                      v === '20ft' ? '20 FCL' : 
+                                                      v.toUpperCase().replace('_', ' ');
+                          setNewItem({
+                            ...newItem,
+                            packing_display: `${newItem.container_count_per_item}X ${containerTypeDisplay}`
+                          });
+                        }
+                      }}>
                         <SelectTrigger>
                           <SelectValue placeholder="Select container" />
                         </SelectTrigger>
@@ -695,7 +1032,14 @@ export default function QuotationsPage() {
                         type="number"
                         min={1}
                         value={form.container_count}
-                        onChange={(e) => setForm({...form, container_count: parseInt(e.target.value) || 1})}
+                        onChange={(e) => {
+                          const newCount = parseInt(e.target.value) || 1;
+                          setForm({...form, container_count: newCount});
+                          // Reset current container if it exceeds new count
+                          if (currentContainer > newCount) {
+                            setCurrentContainer(newCount);
+                          }
+                        }}
                         placeholder="1"
                       />
                       {form.container_type && (
@@ -732,18 +1076,79 @@ export default function QuotationsPage() {
                     </div>
                     <div>
                       <Label>Country of Destination</Label>
-                      <Select value={form.country_of_destination} onValueChange={(v) => setForm({...form, country_of_destination: v})}>
+                      <Input 
+                        value={form.country_of_destination} 
+                        onChange={(e) => setForm({...form, country_of_destination: e.target.value})}
+                        placeholder="Enter country name"
+                      />
+                    </div>
+                    <div>
+                      <Label>Transport Mode</Label>
+                      <Select value={form.transport_mode} onValueChange={(v) => setForm({...form, transport_mode: v})}>
                         <SelectTrigger>
-                          <SelectValue placeholder="Select country" />
+                          <SelectValue placeholder="Transport Mode" />
                         </SelectTrigger>
                         <SelectContent>
-                          {COUNTRIES.map(c => (
-                            <SelectItem key={c} value={c}>{c}</SelectItem>
-                          ))}
+                          <SelectItem value="ocean">Ocean</SelectItem>
+                          <SelectItem value="road">Road</SelectItem>
+                          <SelectItem value="air">Air</SelectItem>
                         </SelectContent>
                       </Select>
+                      {form.country_of_destination && (() => {
+                        const countryLower = form.country_of_destination.trim().toLowerCase();
+                        const gccCountries = ['Saudi Arabia', 'Bahrain', 'Kuwait', 'Oman', 'Qatar'];
+                        const isGCC = gccCountries.some(gcc => gcc.toLowerCase() === countryLower);
+                        return isGCC ? (
+                          <p className="text-xs text-muted-foreground mt-1">GCC country - Road transport recommended</p>
+                        ) : null;
+                      })()}
                     </div>
                   </div>
+                  
+                  {/* Additional Freight Section (for CFR) */}
+                  {form.incoterm === 'CFR' && (
+                    <div className="mt-4 pt-4 border-t border-cyan-500/30">
+                      <h4 className="font-medium text-sm mb-3 text-cyan-400 flex items-center gap-2">
+                        <DollarSign className="w-4 h-4" />
+                        Additional Freight Charges (CFR)
+                      </h4>
+                      <div className="grid grid-cols-3 gap-4">
+                        <div>
+                          <Label>Freight Rate per FCL</Label>
+                          <Input
+                            type="number"
+                            placeholder="e.g., 2175"
+                            value={form.additional_freight_rate_per_fcl || ''}
+                            onChange={(e) => setForm({...form, additional_freight_rate_per_fcl: parseFloat(e.target.value) || 0})}
+                          />
+                        </div>
+                        <div>
+                          <Label>Freight Currency</Label>
+                          <Select value={form.additional_freight_currency} onValueChange={(v) => setForm({...form, additional_freight_currency: v})}>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {CURRENCIES.map(c => (
+                                <SelectItem key={c} value={c}>{c}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div>
+                          <Label>Total Additional Freight</Label>
+                          <div className="flex items-center h-10 px-3 border border-border rounded-md bg-muted/30">
+                            <span className="font-mono text-sm">
+                              {formatCurrency((form.additional_freight_rate_per_fcl || 0) * (form.container_count || 1), form.additional_freight_currency)}
+                            </span>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            {form.container_count} FCL × {formatCurrency(form.additional_freight_rate_per_fcl || 0, form.additional_freight_currency)}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -775,6 +1180,20 @@ export default function QuotationsPage() {
                         onChange={(e) => setForm({...form, port_of_loading: e.target.value})}
                         placeholder="Loading location"
                       />
+                    </div>
+                    <div>
+                      <Label>Local Type</Label>
+                      <Select value={form.local_type || 'none'} onValueChange={(v) => setForm({...form, local_type: v === 'none' ? null : v})}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select type (optional)" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">None</SelectItem>
+                          <SelectItem value="direct_to_customer">Direct to Customer</SelectItem>
+                          <SelectItem value="bulk_to_plant">Bulk to Plant</SelectItem>
+                          <SelectItem value="packaged_to_plant">Packaged to Plant</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                     <div>
                       <Label>Point of Discharge</Label>
@@ -821,13 +1240,75 @@ export default function QuotationsPage() {
 
               {/* Items Section */}
               <div className="border-t border-border pt-4">
-                <h3 className="font-semibold mb-4">Items</h3>
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="font-semibold">Items by Container</h3>
+                  {form.order_type === 'export' && form.container_count > 1 && (
+                    <div className="flex gap-2 items-center">
+                      <Label className="text-sm">Current Container:</Label>
+                      <Select value={String(currentContainer)} onValueChange={(v) => setCurrentContainer(parseInt(v))}>
+                        <SelectTrigger className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Array.from({length: form.container_count}, (_, i) => i + 1).map(num => (
+                            <SelectItem key={num} value={String(num)}>Container {num}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                </div>
+                
+                {form.order_type === 'export' && (
+                  <>
+                    <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-lg p-3 mb-4">
+                      <p className="text-sm text-cyan-400">
+                        Adding items to <strong>Container {currentContainer}</strong> of {form.container_count}
+                      </p>
+                    </div>
+                    
+                    {/* Container Allocation Status */}
+                    {form.container_count > 0 && (
+                      <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-medium text-amber-400">Container Allocation</p>
+                            <p className="text-xs text-muted-foreground">
+                              Total: {containerAllocation.total} containers
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm">
+                              <span className="text-muted-foreground">Used:</span>{' '}
+                              <span className={containerAllocation.totalUsed > 0 ? 'text-amber-400 font-medium' : 'text-muted-foreground'}>
+                                {containerAllocation.totalUsed}
+                              </span>
+                            </p>
+                            <p className="text-sm">
+                              <span className="text-muted-foreground">Remaining:</span>{' '}
+                              <span className={containerAllocation.remaining > 0 ? 'text-green-400 font-medium' : 'text-red-400 font-medium'}>
+                                {containerAllocation.remaining}
+                              </span>
+                            </p>
+                          </div>
+                        </div>
+                        {containerAllocation.remaining === 0 && (
+                          <p className="text-xs text-amber-400 mt-2 flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3" />
+                            All containers have been allocated
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
                 
                 {/* Column Headers */}
-                <div className="grid grid-cols-8 gap-2 mb-2 text-xs text-muted-foreground font-medium">
+                <div className="grid grid-cols-9 gap-2 mb-2 text-xs text-muted-foreground font-medium">
                   <div className="col-span-2">Product</div>
                   <div>Quantity</div>
-                  <div>Price/MT</div>
+                  <div>U.O.M</div>
+                  <div>Unit Price</div>
                   <div>Packaging</div>
                   <div>Net Wt (kg)</div>
                   <div>Palletized</div>
@@ -835,7 +1316,7 @@ export default function QuotationsPage() {
                 </div>
                 
                 {/* Input Row */}
-                <div className="grid grid-cols-8 gap-2 mb-3">
+                <div className="grid grid-cols-9 gap-2 mb-3">
                   <div className="col-span-2">
                     <Select value={newItem.product_id} onValueChange={handleProductSelect}>
                       <SelectTrigger data-testid="product-select">
@@ -854,9 +1335,22 @@ export default function QuotationsPage() {
                     value={newItem.quantity || ''}
                     onChange={(e) => setNewItem({...newItem, quantity: parseFloat(e.target.value)})}
                   />
+                  <Select 
+                    value={newItem.uom || 'per_mt'} 
+                    onValueChange={(v) => setNewItem({...newItem, uom: v})}
+                  >
+                    <SelectTrigger className="text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="per_unit">Per Unit</SelectItem>
+                      <SelectItem value="per_liter">Per Liter</SelectItem>
+                      <SelectItem value="per_mt">Per MT</SelectItem>
+                    </SelectContent>
+                  </Select>
                   <Input
                     type="number"
-                    placeholder="Price/MT"
+                    placeholder={newItem.uom === 'per_unit' ? 'Price/Unit' : newItem.uom === 'per_liter' ? 'Price/Liter' : 'Price/MT'}
                     value={newItem.unit_price || ''}
                     onChange={(e) => setNewItem({...newItem, unit_price: parseFloat(e.target.value)})}
                   />
@@ -916,18 +1410,139 @@ export default function QuotationsPage() {
                     Net weight per unit (e.g., 200 kg per drum)
                   </p>
                 )}
+                
+                {/* Export Details Section (shown for export orders) */}
+                {form.order_type === 'export' && (
+                  <div className="border border-amber-500/30 bg-amber-500/5 rounded-lg p-4 mb-4">
+                    <h4 className="font-medium text-sm mb-3 text-amber-400">Export Details for Current Item</h4>
+                    <div className="grid grid-cols-4 gap-3">
+                      <div>
+                        <Label className="text-xs">Number of Containers *</Label>
+                        <Input
+                          type="number"
+                          placeholder="e.g., 5"
+                          value={newItem.container_count_per_item || ''}
+                          onChange={(e) => {
+                            const count = parseInt(e.target.value) || 0;
+                            handleContainerCountChange(count);
+                          }}
+                          className="text-sm"
+                          min="1"
+                          max={containerAllocation.remaining + (newItem.container_count_per_item || 0)}
+                        />
+                        {newItem.container_count_per_item > 0 && (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            {newItem.container_count_per_item} × {form.container_type || '20ft'} = {newItem.container_count_per_item * (CONTAINER_TYPES.find(c => c.value === form.container_type)?.max_mt || 28)} MT capacity
+                          </p>
+                        )}
+                        {containerAllocation.remaining < (newItem.container_count_per_item || 0) && (
+                          <p className="text-xs text-red-400 mt-1">
+                            Only {containerAllocation.remaining} containers available
+                          </p>
+                        )}
+                      </div>
+                      <div>
+                        <Label className="text-xs">Brand</Label>
+                        <Input
+                          placeholder="e.g., MOTRIX"
+                          value={newItem.brand}
+                          onChange={(e) => setNewItem({...newItem, brand: e.target.value})}
+                          className="text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Color</Label>
+                        <Input
+                          placeholder="e.g., BLUE"
+                          value={newItem.color}
+                          onChange={(e) => setNewItem({...newItem, color: e.target.value})}
+                          className="text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Quantity in Units</Label>
+                        <Input
+                          type="number"
+                          placeholder="e.g., 8000"
+                          value={newItem.quantity_in_units || ''}
+                          onChange={(e) => setNewItem({...newItem, quantity_in_units: parseFloat(e.target.value)})}
+                          className="text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Unit Type</Label>
+                        <Select value={newItem.unit_type} onValueChange={(v) => setNewItem({...newItem, unit_type: v})}>
+                          <SelectTrigger className="text-sm">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="CRTN">CARTONS (CRTN)</SelectItem>
+                            <SelectItem value="PAILS">PAILS</SelectItem>
+                            <SelectItem value="DRUMS">DRUMS</SelectItem>
+                            <SelectItem value="BAGS">BAGS</SelectItem>
+                            <SelectItem value="BOXES">BOXES</SelectItem>
+                            <SelectItem value="IBC">IBC</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="col-span-2">
+                        <Label className="text-xs">Detailed Packing</Label>
+                        <Input
+                          placeholder="e.g., PACKED IN 12X1 LTR CARTON"
+                          value={newItem.detailed_packing}
+                          onChange={(e) => setNewItem({...newItem, detailed_packing: e.target.value})}
+                          className="text-sm"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <Label className="text-xs">FCL Breakdown</Label>
+                        <Input
+                          placeholder="e.g., TOTAL 1600 CARTONS/ 1X20 FCL"
+                          value={newItem.fcl_breakdown}
+                          onChange={(e) => setNewItem({...newItem, fcl_breakdown: e.target.value})}
+                          className="text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Packing Display</Label>
+                        <Input
+                          placeholder="e.g., 5X 20 FCL"
+                          value={newItem.packing_display}
+                          onChange={(e) => setNewItem({...newItem, packing_display: e.target.value})}
+                          className="text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Country of Origin</Label>
+                        <Select value={newItem.item_country_of_origin} onValueChange={(v) => setNewItem({...newItem, item_country_of_origin: v})}>
+                          <SelectTrigger className="text-sm">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {COUNTRIES.map(c => (
+                              <SelectItem key={c} value={c}>{c}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                   {form.items.length > 0 && (
                     <div className="data-grid">
                       <table className="erp-table w-full">
                         <thead>
                           <tr>
+                            {form.order_type === 'export' && <th>Container</th>}
                             <th>Product</th>
-                            <th>SKU</th>
+                            {form.order_type === 'export' && <th>Brand</th>}
+                            {form.order_type === 'export' && <th>Color</th>}
                             <th>Qty</th>
+                            {form.order_type === 'export' && <th>Qty (Units)</th>}
+                            {form.order_type === 'export' && <th>Containers</th>}
                             <th>Packaging</th>
-                            <th>Net Wt (kg)</th>
-                            <th>Palletized</th>
+                            {form.order_type === 'export' && <th>Packing</th>}
                             <th>Weight (MT)</th>
                             <th>Price/MT</th>
                             <th>Total</th>
@@ -935,20 +1550,49 @@ export default function QuotationsPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {form.items.map((item, idx) => (
+                          {form.items.sort((a, b) => (a.container_number || 1) - (b.container_number || 1)).map((item, idx) => (
                             <tr key={idx}>
-                              <td>{item.product_name}</td>
-                              <td>{item.sku}</td>
-                              <td>{item.quantity}</td>
-                              <td>{item.packaging}</td>
-                              <td>{item.net_weight_kg || '-'}</td>
-                              <td className="text-center">
-                                {item.palletized ? (
-                                  <Check className="w-4 h-4 text-green-400 mx-auto" />
-                                ) : (
-                                  <X className="w-4 h-4 text-muted-foreground mx-auto" />
+                              {form.order_type === 'export' && (
+                                <td className="text-center">
+                                  <Badge variant="outline" className="bg-cyan-500/20 text-cyan-400">
+                                    #{item.container_number || 1}
+                                  </Badge>
+                                </td>
+                              )}
+                              <td>
+                                <div>{item.product_name}</div>
+                                {form.order_type === 'export' && item.detailed_packing && (
+                                  <div className="text-xs text-muted-foreground mt-1">{item.detailed_packing}</div>
                                 )}
                               </td>
+                              {form.order_type === 'export' && <td>{item.brand || '-'}</td>}
+                              {form.order_type === 'export' && <td>{item.color || '-'}</td>}
+                              <td>{item.quantity}</td>
+                              {form.order_type === 'export' && (
+                                <td>
+                                  {item.quantity_in_units ? `${item.quantity_in_units} ${item.unit_type}` : '-'}
+                                </td>
+                              )}
+                              {form.order_type === 'export' && (
+                                <td>
+                                  {item.container_count_per_item > 0 ? (
+                                    <Badge variant="outline" className="bg-cyan-500/20 text-cyan-400">
+                                      {item.container_count_per_item} × {form.container_type || '20ft'}
+                                    </Badge>
+                                  ) : (
+                                    <span className="text-muted-foreground text-xs">-</span>
+                                  )}
+                                </td>
+                              )}
+                              <td>
+                                <div>{item.packaging}</div>
+                                {form.order_type === 'export' && item.packing_display && (
+                                  <div className="text-xs text-amber-400 mt-1">{item.packing_display}</div>
+                                )}
+                              </td>
+                              {form.order_type === 'export' && (
+                                <td className="text-xs">{item.fcl_breakdown || '-'}</td>
+                              )}
                               <td className="font-mono">{item.weight_mt?.toFixed(3) || item.quantity}</td>
                               <td>{formatCurrency(item.unit_price, form.currency)}</td>
                               <td className="font-bold">{formatCurrency(item.total, form.currency)}</td>
@@ -973,7 +1617,7 @@ export default function QuotationsPage() {
                           </div>
                           <div className="text-right space-y-1">
                             <div className="flex justify-between gap-8">
-                              <span className="text-sm text-muted-foreground">Subtotal:</span>
+                              <span className="text-sm text-muted-foreground">{form.order_type === 'export' && form.incoterm === 'CFR' ? 'CFR Amount (Product):' : 'Subtotal:'}</span>
                               <span className="font-mono">{formatCurrency(subtotal, form.currency)}</span>
                             </div>
                             {form.order_type === 'local' && form.include_vat && (
@@ -982,10 +1626,24 @@ export default function QuotationsPage() {
                                 <span className="font-mono">{formatCurrency(vatAmount, form.currency)}</span>
                               </div>
                             )}
-                            <div className="flex justify-between gap-8 border-t pt-1">
-                              <span className="font-medium">Grand Total:</span>
-                              <span className="text-xl font-bold font-mono">{formatCurrency(grandTotal, form.currency)}</span>
-                            </div>
+                            {form.order_type === 'export' && form.incoterm === 'CFR' && form.additional_freight_rate_per_fcl > 0 && (
+                              <>
+                                <div className="flex justify-between gap-8">
+                                  <span className="text-sm text-muted-foreground">Additional Freight ({form.container_count} FCL × {formatCurrency(form.additional_freight_rate_per_fcl, form.additional_freight_currency)}):</span>
+                                  <span className="font-mono">{formatCurrency(additionalFreight, form.additional_freight_currency)}</span>
+                                </div>
+                                <div className="flex justify-between gap-8 border-t pt-1">
+                                  <span className="font-medium">Total Receivable (CFR + Freight):</span>
+                                  <span className="text-xl font-bold font-mono">{formatCurrency(totalReceivable, form.currency)}</span>
+                                </div>
+                              </>
+                            )}
+                            {!(form.order_type === 'export' && form.incoterm === 'CFR' && form.additional_freight_rate_per_fcl > 0) && (
+                              <div className="flex justify-between gap-8 border-t pt-1">
+                                <span className="font-medium">Grand Total:</span>
+                                <span className="text-xl font-bold font-mono">{formatCurrency(grandTotal, form.currency)}</span>
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1088,6 +1746,8 @@ export default function QuotationsPage() {
                 <th>Type</th>
                 <th>Country of Destination</th>
                 <th>Total</th>
+                <th>Cost Status</th>
+                <th>Margin</th>
                 <th>Status</th>
                 <th>Created</th>
                 <th>Actions</th>
@@ -1115,9 +1775,36 @@ export default function QuotationsPage() {
                   </td>
                   <td className="font-mono">{formatCurrency(q.total, q.currency)}</td>
                   <td>
+                    {q.cost_confirmed ? (
+                      <Badge className="bg-green-500/20 text-green-400 border-green-500/30">
+                        <Check className="w-3 h-3 mr-1 inline" />
+                        Confirmed
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
+                        Pending
+                      </Badge>
+                    )}
+                  </td>
+                  <td>
+                    {q.margin_amount !== undefined && q.margin_amount !== null ? (
+                      <Badge variant={q.margin_amount >= 0 ? 'default' : 'destructive'} className="font-mono text-xs">
+                        {q.margin_amount >= 0 ? '+' : ''}{formatCurrency(q.margin_amount, q.currency)}
+                        {q.margin_percentage !== undefined && q.margin_percentage !== null && (
+                          <span className="ml-1">({q.margin_percentage.toFixed(1)}%)</span>
+                        )}
+                      </Badge>
+                    ) : (
+                      <span className="text-muted-foreground text-xs">-</span>
+                    )}
+                  </td>
+                  <td>
                     <Badge className={getStatusColor(q.status)}>
                       {q.status?.toUpperCase()}
                     </Badge>
+                    {q.costing_rejection_reason && (
+                      <p className="text-xs text-red-400 mt-1">{q.costing_rejection_reason}</p>
+                    )}
                   </td>
                   <td>{formatDate(q.created_at)}</td>
                   <td>
@@ -1142,10 +1829,11 @@ export default function QuotationsPage() {
                             variant="ghost" 
                             size="icon" 
                             onClick={() => handleApprove(q.id)}
-                            disabled={approving === q.id}
+                            disabled={approving === q.id || !q.cost_confirmed}
+                            title={!q.cost_confirmed ? "Costing must be confirmed before approval" : "Approve"}
                             data-testid={`approve-btn-${q.pfi_number}`}
                           >
-                            <Check className={cn("w-4 h-4 text-green-500", approving === q.id && "animate-spin")} />
+                            <Check className={cn("w-4 h-4 text-green-500", approving === q.id && "animate-spin", !q.cost_confirmed && "opacity-50")} />
                           </Button>
                           <Button variant="ghost" size="icon" onClick={() => handleReject(q.id)}>
                             <X className="w-4 h-4 text-red-500" />
@@ -1240,39 +1928,254 @@ export default function QuotationsPage() {
                 </div>
               </div>
 
-              <div className="data-grid">
-                <table className="erp-table w-full">
-                  <thead>
-                    <tr>
-                      <th>Product</th>
-                      <th>Qty</th>
-                      <th>Packaging</th>
-                      <th>Weight (MT)</th>
-                      <th>Price/MT</th>
-                      <th>Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {selectedQuotation.items?.map((item, idx) => (
-                      <tr key={idx}>
-                        <td>{item.product_name}</td>
-                        <td>{item.quantity}</td>
-                        <td>{item.packaging}</td>
-                        <td className="font-mono">{item.weight_mt?.toFixed(3) || item.quantity}</td>
-                        <td>{formatCurrency(item.unit_price, selectedQuotation.currency)}</td>
-                        <td className="font-bold">{formatCurrency(item.total, selectedQuotation.currency)}</td>
+              {/* Items by Container for Export Orders */}
+              {selectedQuotation.order_type === 'export' && selectedQuotation.container_count > 1 ? (
+                <>
+                  {Array.from({length: selectedQuotation.container_count}, (_, i) => i + 1).map(containerNum => {
+                    const containerItems = selectedQuotation.items?.filter(item => (item.container_number || 1) === containerNum) || [];
+                    if (containerItems.length === 0) return null;
+                    
+                    return (
+                      <div key={containerNum} className="mb-4">
+                        <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-t-lg px-4 py-2">
+                          <h4 className="font-medium text-cyan-400">Container {containerNum}</h4>
+                        </div>
+                        <div className="data-grid rounded-t-none">
+                          <table className="erp-table w-full">
+                            <thead>
+                              <tr>
+                                <th>S.No</th>
+                                <th>Description of Goods</th>
+                                <th>Container/Tank</th>
+                                <th>Qty</th>
+                                <th>{(() => {
+                                  const firstItem = containerItems[0];
+                                  let uom = firstItem?.uom || 'per_mt';
+                                  
+                                  // If U.O.M is not set, try to infer from packaging
+                                  if (!firstItem?.uom || uom === 'per_mt') {
+                                    const packaging = (firstItem?.packaging || '').toLowerCase();
+                                    const packagingType = (firstItem?.packaging_type || '').toLowerCase();
+                                    
+                                    if (['drum', 'carton', 'pail', 'ibc', 'bag', 'box'].some(keyword => packaging.includes(keyword))) {
+                                      uom = 'per_unit';
+                                    } else if (['drum', 'carton', 'pail', 'ibc'].some(keyword => packagingType.includes(keyword))) {
+                                      uom = 'per_unit';
+                                    } else if (['flexi', 'iso', 'tank'].some(keyword => packaging.includes(keyword))) {
+                                      uom = 'per_liter';
+                                    } else if (packaging === 'bulk' || packagingType === 'bulk') {
+                                      uom = 'per_mt';
+                                    }
+                                  }
+                                  
+                                  if (uom === 'per_unit') return 'Unit Price Per Unit';
+                                  if (uom === 'per_liter') return 'Unit Price Per Liter';
+                                  return 'Unit Price Per MT';
+                                })()}</th>
+                                <th>Grand Total</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {containerItems.map((item, idx) => {
+                                // Get U.O.M from item, or infer from packaging type
+                                let uom = item.uom || 'per_mt';
+                                
+                                // If U.O.M is not set or is per_mt, try to infer from packaging
+                                if (!item.uom || uom === 'per_mt') {
+                                  const packaging = (item.packaging || '').toLowerCase();
+                                  const packagingType = (item.packaging_type || '').toLowerCase();
+                                  
+                                  // Infer U.O.M from packaging
+                                  if (['drum', 'carton', 'pail', 'ibc', 'bag', 'box'].some(keyword => packaging.includes(keyword))) {
+                                    uom = 'per_unit';
+                                  } else if (['drum', 'carton', 'pail', 'ibc'].some(keyword => packagingType.includes(keyword))) {
+                                    uom = 'per_unit';
+                                  } else if (['flexi', 'iso', 'tank'].some(keyword => packaging.includes(keyword))) {
+                                    uom = 'per_liter';
+                                  } else if (packaging === 'bulk' || packagingType === 'bulk') {
+                                    uom = 'per_mt';
+                                  }
+                                }
+                                
+                                // Format quantity based on U.O.M
+                                let qtyDisplay = '';
+                                if (uom === 'per_unit') {
+                                  qtyDisplay = `${parseInt(item.quantity || 0).toLocaleString()} ${item.unit_type || ''}`;
+                                } else if (uom === 'per_liter') {
+                                  qtyDisplay = `${(item.quantity || 0).toLocaleString()} L`;
+                                } else {
+                                  qtyDisplay = `${item.weight_mt?.toFixed(3) || item.quantity} MT`;
+                                }
+                                
+                                // Get container display
+                                const containerCount = item.container_count_per_item || 0;
+                                const containerType = selectedQuotation.container_type || '20ft';
+                                const containerDisplay = containerCount > 0 
+                                  ? `${containerCount} x ${containerType}` 
+                                  : (item.packing_display || '—');
+                                
+                                return (
+                                  <tr key={idx}>
+                                    <td className="text-center">{idx + 1}</td>
+                                    <td>
+                                      <div className="font-medium">{item.product_name}</div>
+                                      {item.packaging && (
+                                        <div className="text-xs text-muted-foreground mt-1"><b>Packing:</b> {item.packaging}</div>
+                                      )}
+                                      {item.net_weight_kg && (
+                                        <div className="text-xs text-muted-foreground"><b>Net weight:</b> {item.net_weight_kg} kg</div>
+                                      )}
+                                      {item.item_country_of_origin && (
+                                        <div className="text-xs text-muted-foreground"><b>Country of origin:</b> {item.item_country_of_origin}</div>
+                                      )}
+                                      {item.detailed_packing && (
+                                        <div className="text-xs text-muted-foreground mt-1">{item.detailed_packing}</div>
+                                      )}
+                                      {item.fcl_breakdown && (
+                                        <div className="text-xs text-muted-foreground mt-1">{item.fcl_breakdown}</div>
+                                      )}
+                                      {item.brand && (
+                                        <div className="text-xs mt-1">BRAND: {item.brand}</div>
+                                      )}
+                                      {item.color && (
+                                        <div className="text-xs">COLOR: {item.color}</div>
+                                      )}
+                                    </td>
+                                    <td>{containerDisplay}</td>
+                                    <td>{qtyDisplay}</td>
+                                    <td>{formatCurrency(item.unit_price, selectedQuotation.currency)}</td>
+                                    <td className="font-bold">{formatCurrency(item.total, selectedQuotation.currency)}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              ) : (
+                <div className="data-grid">
+                  <table className="erp-table w-full">
+                    <thead>
+                      <tr>
+                        <th>Description of Goods</th>
+                        {selectedQuotation.order_type === 'export' && <th>Container/Tank</th>}
+                        <th>Qty</th>
+                        <th>{(() => {
+                          const firstItem = selectedQuotation.items?.[0];
+                          let uom = firstItem?.uom || 'per_mt';
+                          
+                          // If U.O.M is not set, try to infer from packaging
+                          if (!firstItem?.uom || uom === 'per_mt') {
+                            const packaging = (firstItem?.packaging || '').toLowerCase();
+                            const packagingType = (firstItem?.packaging_type || '').toLowerCase();
+                            
+                            if (['drum', 'carton', 'pail', 'ibc', 'bag', 'box'].some(keyword => packaging.includes(keyword))) {
+                              uom = 'per_unit';
+                            } else if (['drum', 'carton', 'pail', 'ibc'].some(keyword => packagingType.includes(keyword))) {
+                              uom = 'per_unit';
+                            } else if (['flexi', 'iso', 'tank'].some(keyword => packaging.includes(keyword))) {
+                              uom = 'per_liter';
+                            } else if (packaging === 'bulk' || packagingType === 'bulk') {
+                              uom = 'per_mt';
+                            }
+                          }
+                          
+                          if (uom === 'per_unit') return 'Unit Price Per Unit';
+                          if (uom === 'per_liter') return 'Unit Price Per Liter';
+                          return 'Unit Price';
+                        })()}</th>
+                        <th>Grand Total</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {selectedQuotation.items?.map((item, idx) => {
+                        // Get U.O.M from item, or infer from packaging type
+                        let uom = item.uom || 'per_mt';
+                        
+                        // If U.O.M is not set or is per_mt, try to infer from packaging
+                        if (!item.uom || uom === 'per_mt') {
+                          const packaging = (item.packaging || '').toLowerCase();
+                          const packagingType = (item.packaging_type || '').toLowerCase();
+                          
+                          // Infer U.O.M from packaging
+                          if (['drum', 'carton', 'pail', 'ibc', 'bag', 'box'].some(keyword => packaging.includes(keyword))) {
+                            uom = 'per_unit';
+                          } else if (['drum', 'carton', 'pail', 'ibc'].some(keyword => packagingType.includes(keyword))) {
+                            uom = 'per_unit';
+                          } else if (['flexi', 'iso', 'tank'].some(keyword => packaging.includes(keyword))) {
+                            uom = 'per_liter';
+                          } else if (packaging === 'bulk' || packagingType === 'bulk') {
+                            uom = 'per_mt';
+                          }
+                        }
+                        
+                        // Format quantity based on U.O.M
+                        let qtyDisplay = '';
+                        if (uom === 'per_unit') {
+                          qtyDisplay = parseInt(item.quantity || 0).toLocaleString();
+                        } else if (uom === 'per_liter') {
+                          qtyDisplay = (item.quantity || 0).toLocaleString();
+                        } else {
+                          qtyDisplay = `${item.weight_mt?.toFixed(3) || item.quantity} MT`;
+                        }
+                        
+                        // Get container display for export orders
+                        let containerDisplay = '—';
+                        if (selectedQuotation.order_type === 'export') {
+                          const containerCount = item.container_count_per_item || 0;
+                          const containerType = selectedQuotation.container_type || '20ft';
+                          if (containerCount > 0) {
+                            containerDisplay = `${containerCount} x ${containerType}`;
+                          } else {
+                            containerDisplay = item.packing_display || '—';
+                          }
+                        }
+                        
+                        return (
+                          <tr key={idx}>
+                            <td>
+                              <div className="font-medium">{item.product_name}</div>
+                              {item.packaging && (
+                                <div className="text-xs text-muted-foreground mt-1"><b>Packing:</b> {item.packaging}</div>
+                              )}
+                              {item.net_weight_kg && (
+                                <div className="text-xs text-muted-foreground"><b>Net weight:</b> {item.net_weight_kg} kg</div>
+                              )}
+                              {item.item_country_of_origin && (
+                                <div className="text-xs text-muted-foreground"><b>Country of origin:</b> {item.item_country_of_origin}</div>
+                              )}
+                            </td>
+                            {selectedQuotation.order_type === 'export' && <td>{containerDisplay}</td>}
+                            <td>{qtyDisplay}</td>
+                            <td>{formatCurrency(item.unit_price, selectedQuotation.currency)}</td>
+                            <td className="font-bold">{formatCurrency(item.total, selectedQuotation.currency)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
 
               <div className="text-right space-y-1 p-4 bg-muted/20 rounded">
-                <div>Subtotal: <span className="font-mono">{formatCurrency(selectedQuotation.subtotal, selectedQuotation.currency)}</span></div>
+                <div>{selectedQuotation.order_type === 'export' && selectedQuotation.incoterm === 'CFR' ? 'CFR Amount:' : 'Subtotal:'} <span className="font-mono">{formatCurrency(selectedQuotation.cfr_amount || selectedQuotation.subtotal, selectedQuotation.currency)}</span></div>
                 {selectedQuotation.vat_amount > 0 && (
                   <div>VAT (5%): <span className="font-mono">{formatCurrency(selectedQuotation.vat_amount, selectedQuotation.currency)}</span></div>
                 )}
-                <div className="text-lg font-bold">Total: <span className="font-mono">{formatCurrency(selectedQuotation.total, selectedQuotation.currency)}</span></div>
+                {selectedQuotation.order_type === 'export' && selectedQuotation.incoterm === 'CFR' && selectedQuotation.additional_freight_amount > 0 && (
+                  <>
+                    <div className="text-xs text-muted-foreground border-t pt-1">
+                      Additional Freight: {selectedQuotation.container_count} FCL × {formatCurrency(selectedQuotation.additional_freight_rate_per_fcl || 0, selectedQuotation.additional_freight_currency)} = <span className="font-mono">{formatCurrency(selectedQuotation.additional_freight_amount, selectedQuotation.additional_freight_currency)}</span>
+                    </div>
+                    <div className="text-lg font-bold border-t pt-1">Total Receivable: <span className="font-mono">{formatCurrency(selectedQuotation.total_receivable || selectedQuotation.total, selectedQuotation.currency)}</span></div>
+                  </>
+                )}
+                {!(selectedQuotation.order_type === 'export' && selectedQuotation.incoterm === 'CFR' && selectedQuotation.additional_freight_amount > 0) && (
+                  <div className="text-lg font-bold">Total: <span className="font-mono">{formatCurrency(selectedQuotation.total, selectedQuotation.currency)}</span></div>
+                )}
               </div>
 
               {selectedQuotation.required_documents?.length > 0 && (

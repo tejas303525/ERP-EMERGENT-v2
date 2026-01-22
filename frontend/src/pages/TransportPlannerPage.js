@@ -17,7 +17,8 @@ import {
 } from 'recharts';
 
 const TransportPlannerPage = () => {
-  const [activeTab, setActiveTab] = useState('inward_exw');
+  const [activeTab, setActiveTab] = useState('inward_ddp');
+  const [inwardDDP, setInwardDDP] = useState([]);
   const [inwardEXW, setInwardEXW] = useState([]);
   const [inwardImport, setInwardImport] = useState([]);
   const [dispatch, setDispatch] = useState([]);
@@ -53,9 +54,25 @@ const TransportPlannerPage = () => {
         api.get('/purchase-orders', { params: { status: 'APPROVED' } }).catch(() => ({ data: [] }))
       ]);
       
-      // Get finance-approved POs that need transport booking (EXW)
+      // Get finance-approved POs that need transport booking (DDP and EXW)
       // Only show POs that are APPROVED (finance approved) and don't have transport booked yet
       const existingInward = inwardRes.data || [];
+      
+      // Filter DDP POs
+      const approvedDDPPOs = (posRes.data || []).filter(po => {
+        // Must be finance approved
+        if (po.status !== 'APPROVED') return false;
+        // Must be DDP incoterm
+        if (po.incoterm !== 'DDP') return false;
+        // Must not already have transport booked
+        const hasTransport = existingInward.some(t => t.po_id === po.id && t.transport_number);
+        if (hasTransport) return false;
+        // Must not have transport_booked flag set
+        if (po.transport_booked || po.transport_number) return false;
+        return true;
+      });
+      
+      // Filter EXW POs
       const approvedPOs = (posRes.data || []).filter(po => {
         // Must be finance approved
         if (po.status !== 'APPROVED') return false;
@@ -68,6 +85,18 @@ const TransportPlannerPage = () => {
         if (po.transport_booked || po.transport_number) return false;
         return true;
       });
+      
+      // Set inward DDP items - only POs that need booking
+      setInwardDDP([
+        ...approvedDDPPOs.map(po => ({
+          ...po,
+          type: 'PO',
+          needs_booking: true,
+          status: 'NEEDS_TRANSPORT'
+        })),
+        // Also include existing booked transports for display
+        ...existingInward.filter(t => (t.source === 'PO_DDP' || t.incoterm === 'DDP') && t.transport_number)
+      ]);
       
       // Set inward EXW items - only POs that need booking
       setInwardEXW([
@@ -168,6 +197,7 @@ const TransportPlannerPage = () => {
   };
 
   // Stats
+  const ddpNeedsBooking = inwardDDP.filter(t => t.needs_booking).length;
   const exwNeedsBooking = inwardEXW.filter(t => t.needs_booking).length;
   const importPending = inwardImport.filter(t => t.status === 'PENDING').length;
   const dispatchNeedsBooking = dispatch.filter(t => t.needs_booking).length;
@@ -207,7 +237,11 @@ const TransportPlannerPage = () => {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-5 gap-4 mb-6">
+      <div className="grid grid-cols-6 gap-4 mb-6">
+        <div className="glass p-4 rounded-lg border border-emerald-500/30">
+          <p className="text-sm text-muted-foreground">DDP Needs Booking</p>
+          <p className="text-2xl font-bold text-emerald-400">{ddpNeedsBooking}</p>
+        </div>
         <div className="glass p-4 rounded-lg border border-blue-500/30">
           <p className="text-sm text-muted-foreground">EXW Needs Booking</p>
           <p className="text-2xl font-bold text-blue-400">{exwNeedsBooking}</p>
@@ -232,6 +266,19 @@ const TransportPlannerPage = () => {
 
       {/* Tabs */}
       <div className="flex gap-2 mb-6 flex-wrap">
+        <Button
+          variant={activeTab === 'inward_ddp' ? 'default' : 'outline'}
+          onClick={() => setActiveTab('inward_ddp')}
+          className={ddpNeedsBooking > 0 ? 'border-emerald-500/50' : ''}
+        >
+          <ArrowDownToLine className="w-4 h-4 mr-2" />
+          Inward (DDP)
+          {ddpNeedsBooking > 0 && (
+            <span className="ml-2 px-1.5 py-0.5 text-xs rounded bg-emerald-500/20 text-emerald-400">
+              {ddpNeedsBooking}
+            </span>
+          )}
+        </Button>
         <Button
           variant={activeTab === 'inward_exw' ? 'default' : 'outline'}
           onClick={() => setActiveTab('inward_exw')}
@@ -286,6 +333,14 @@ const TransportPlannerPage = () => {
         </div>
       ) : (
         <>
+          {activeTab === 'inward_ddp' && (
+            <InwardDDPPlannerTab
+              items={inwardDDP}
+              suppliers={suppliers}
+              onRefresh={loadData}
+              onBookTransport={(item) => openBookingModal('INWARD_DDP', item)}
+            />
+          )}
           {activeTab === 'inward_exw' && (
             <InwardEXWPlannerTab
               items={inwardEXW}
@@ -329,6 +384,237 @@ const TransportPlannerPage = () => {
             loadData();
           }}
         />
+      )}
+    </div>
+  );
+};
+
+// ==================== INWARD DDP PLANNER TAB ====================
+const InwardDDPPlannerTab = ({ items, suppliers, onRefresh, onBookTransport }) => {
+  const [selectedItem, setSelectedItem] = useState(null);
+  const needsBooking = items.filter(i => i.needs_booking);
+  const booked = items.filter(i => !i.needs_booking && i.transport_number);
+
+  const handleBookClick = (item) => {
+    setSelectedItem(item);
+    onBookTransport(item);
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Needs Booking Section */}
+      <div className="glass rounded-lg border border-border">
+        <div className="p-4 border-b border-border flex justify-between items-center">
+          <div>
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <ArrowDownToLine className="w-5 h-5 text-emerald-400" />
+              DDP POs - Needs Transport Booking
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Approved POs with DDP incoterm requiring transport arrangement
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={onRefresh}>
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Refresh
+            </Button>
+          </div>
+        </div>
+
+        {needsBooking.length === 0 ? (
+          <div className="p-8 text-center">
+            <Check className="w-12 h-12 text-green-500 mx-auto mb-4" />
+            <p className="text-green-400 font-medium">All transports booked</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-muted/30">
+                <tr>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO Number</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Item</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Qty</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {needsBooking.map((item) => {
+                  // Get lines from PO - should always be present now
+                  const lines = item.lines || [];
+                  
+                  // If no lines, show a single row with "No items"
+                  if (lines.length === 0) {
+                    return (
+                      <tr key={item.id} className="border-b border-border/50 hover:bg-muted/10">
+                        <td className="p-3 font-mono font-medium">{item.po_number}</td>
+                        <td className="p-3">{item.supplier_name}</td>
+                        <td className="p-3 text-sm text-muted-foreground">No items</td>
+                        <td className="p-3 text-muted-foreground">-</td>
+                        <td className="p-3 text-muted-foreground">-</td>
+                        <td className="p-3">
+                          <Badge className="bg-amber-500/20 text-amber-400">
+                            Needs Transport
+                          </Badge>
+                        </td>
+                        <td className="p-3">
+                          <Button size="sm" onClick={() => handleBookClick(item)}>
+                            <Plus className="w-4 h-4 mr-1" />
+                            Book
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  }
+                  
+                  // Show one row per line item
+                  return lines.map((line, lineIdx) => (
+                    <tr key={`${item.id}-${lineIdx}`} className="border-b border-border/50 hover:bg-muted/10">
+                      {lineIdx === 0 && (
+                        <>
+                          <td className="p-3 font-mono font-medium" rowSpan={lines.length}>{item.po_number}</td>
+                          <td className="p-3" rowSpan={lines.length}>{item.supplier_name}</td>
+                        </>
+                      )}
+                      <td className="p-3 text-sm">{line.item_name || 'Unknown'}</td>
+                      <td className="p-3">{line.qty || 0} {line.uom || 'KG'}</td>
+                      <td className="p-3">
+                        {line.required_by ? (
+                          <span className="text-cyan-400">
+                            {new Date(line.required_by).toLocaleDateString()}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
+                      {lineIdx === 0 && (
+                        <>
+                          <td className="p-3" rowSpan={lines.length}>
+                            <Badge className="bg-amber-500/20 text-amber-400">
+                              Needs Transport
+                            </Badge>
+                          </td>
+                          <td className="p-3" rowSpan={lines.length}>
+                            <Button size="sm" onClick={() => handleBookClick(item)}>
+                              <Plus className="w-4 h-4 mr-1" />
+                              Book
+                            </Button>
+                          </td>
+                        </>
+                      )}
+                    </tr>
+                  ));
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Booked Transports */}
+      {booked.length > 0 && (
+        <div className="glass rounded-lg border border-border">
+          <div className="p-4 border-b border-border">
+            <h2 className="text-lg font-semibold">Booked Transports</h2>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-muted/30">
+                <tr>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Transport #</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO Number</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Item</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Qty</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">ETA</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {booked.map((item) => {
+                  // Get lines from PO - should always be present now
+                  const lines = item.lines || [];
+                  
+                  // If no lines, show a single row with "No items"
+                  if (lines.length === 0) {
+                    return (
+                      <tr key={item.id} className="border-b border-border/50 hover:bg-muted/10">
+                        <td className="p-3 font-mono font-medium">{item.transport_number}</td>
+                        <td className="p-3">{item.po_number}</td>
+                        <td className="p-3">{item.supplier_name}</td>
+                        <td className="p-3 text-sm text-muted-foreground">No items</td>
+                        <td className="p-3 text-muted-foreground">-</td>
+                        <td className="p-3 text-muted-foreground">-</td>
+                        <td className="p-3">
+                          {item.eta ? (
+                            <span className="text-cyan-400 flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              {new Date(item.eta).toLocaleDateString()}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">-</span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <Badge className="bg-green-500/20 text-green-400">
+                            {item.status}
+                          </Badge>
+                        </td>
+                      </tr>
+                    );
+                  }
+                  
+                  // Show one row per line item
+                  return lines.map((line, lineIdx) => (
+                    <tr key={`${item.id}-${lineIdx}`} className="border-b border-border/50 hover:bg-muted/10">
+                      {lineIdx === 0 && (
+                        <>
+                          <td className="p-3 font-mono font-medium" rowSpan={lines.length}>{item.transport_number}</td>
+                          <td className="p-3" rowSpan={lines.length}>{item.po_number}</td>
+                          <td className="p-3" rowSpan={lines.length}>{item.supplier_name}</td>
+                        </>
+                      )}
+                      <td className="p-3 text-sm">{line.item_name || 'Unknown'}</td>
+                      <td className="p-3">{line.qty || 0} {line.uom || 'KG'}</td>
+                      <td className="p-3">
+                        {line.required_by ? (
+                          <span className="text-cyan-400">
+                            {new Date(line.required_by).toLocaleDateString()}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
+                      {lineIdx === 0 && (
+                        <>
+                          <td className="p-3" rowSpan={lines.length}>
+                            {item.eta ? (
+                              <span className="text-cyan-400 flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                {new Date(item.eta).toLocaleDateString()}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </td>
+                          <td className="p-3" rowSpan={lines.length}>
+                            <Badge className="bg-green-500/20 text-green-400">
+                              {item.status}
+                            </Badge>
+                          </td>
+                        </>
+                      )}
+                    </tr>
+                  ));
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -567,7 +853,14 @@ const InwardEXWPlannerTab = ({ items, suppliers, onRefresh, onBookTransport }) =
 
 // ==================== INWARD IMPORT PLANNER TAB ====================
 const InwardImportPlannerTab = ({ imports, onRefresh, onBookTransport }) => {
-  const needsBooking = imports.filter(imp => !imp.transport_number && !imp.transport_booked && imp.status !== 'COMPLETED');
+  // Imports need booking if they don't have transport_number or transport_booked flag
+  // Allow all statuses except COMPLETED (PENDING, IN_TRANSIT, AT_PORT, CLEARED can all be booked)
+  const needsBooking = imports.filter(imp => {
+    if (imp.status === 'COMPLETED') return false;
+    if (imp.transport_number) return false;
+    if (imp.transport_booked) return false;
+    return true;
+  });
   const booked = imports.filter(imp => imp.transport_number || imp.transport_booked);
 
   return (
@@ -943,6 +1236,7 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Total MT</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Booked MT</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Balance MT</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Expected Delivery Date</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Customer</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Action</th>
@@ -954,6 +1248,9 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                   const balanceQty = item.balance_quantity || 0;
                   const quantityBooked = item.quantity_booked || 0;
                   const isFullyBooked = balanceQty === 0 && quantityBooked > 0;
+                  
+                  // Get expected delivery date from job order or quotation
+                  const expectedDeliveryDate = item.delivery_date || item.expected_delivery_date || item.quotation?.expected_delivery_date;
                   
                   return (
                     <tr key={item.id} className="border-b border-border/50 hover:bg-muted/10">
@@ -971,6 +1268,15 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                         <span className={balanceQty > 0 ? 'text-amber-400 font-semibold' : 'text-green-400'}>
                           {balanceQty.toFixed(2)} MT
                         </span>
+                      </td>
+                      <td className="p-3">
+                        {expectedDeliveryDate ? (
+                          <span className="text-cyan-400">
+                            {new Date(expectedDeliveryDate).toLocaleDateString()}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
                       </td>
                       <td className="p-3">{item.customer_name || '-'}</td>
                       <td className="p-3">
@@ -1022,6 +1328,7 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Total MT</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Booked MT</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Balance MT</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Expected Delivery Date</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
                 </tr>
               </thead>
@@ -1030,6 +1337,8 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                   const unit = item.unit || item.packaging || 'drums';
                   const quantityBooked = item.quantity_booked || 0;
                   const balanceQty = item.balance_quantity || 0;
+                  // Get expected delivery date from job order or quotation
+                  const expectedDeliveryDate = item.delivery_date || item.expected_delivery_date || item.quotation?.expected_delivery_date;
                   return (
                     <tr key={item.id} className="border-b border-border/50 hover:bg-muted/10">
                       <td className="p-3 font-mono font-medium">{item.job_number}</td>
@@ -1039,6 +1348,15 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
                       </td>
                       <td className="p-3 text-green-400">{quantityBooked.toFixed(2)} MT</td>
                       <td className="p-3 text-green-400 font-semibold">{balanceQty.toFixed(2)} MT</td>
+                      <td className="p-3">
+                        {expectedDeliveryDate ? (
+                          <span className="text-cyan-400">
+                            {new Date(expectedDeliveryDate).toLocaleDateString()}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
                       <td className="p-3">
                         <Badge className="bg-green-500/20 text-green-400">
                           Ready for Dispatch
@@ -1113,27 +1431,45 @@ const TransportBookingModal = ({ type, item, onClose, onBooked }) => {
 
       let endpoint, payload;
       
-      if (type === 'INWARD_EXW') {
+      if (type === 'INWARD_DDP') {
         endpoint = '/transport/inward/book';
         payload = {
           po_id: item.id,
           transporter: form.transporter_name,
+          vehicle_type: form.vehicle_type,
           vehicle_number: form.vehicle_number,
           driver_name: form.driver_name,
           driver_phone: form.driver_contact,
           pickup_date: formatDate(form.scheduled_date),
-          eta: formatDate(form.eta)
+          eta: formatDate(form.eta),
+          incoterm: 'DDP',
+          transport_charges: form.transport_charges ? parseFloat(form.transport_charges) : null
+        };
+      } else if (type === 'INWARD_EXW') {
+        endpoint = '/transport/inward/book';
+        payload = {
+          po_id: item.id,
+          transporter: form.transporter_name,
+          vehicle_type: form.vehicle_type,
+          vehicle_number: form.vehicle_number,
+          driver_name: form.driver_name,
+          driver_phone: form.driver_contact,
+          pickup_date: formatDate(form.scheduled_date),
+          eta: formatDate(form.eta),
+          transport_charges: form.transport_charges ? parseFloat(form.transport_charges) : null
         };
       } else if (type === 'INWARD_IMPORT') {
         endpoint = '/transport/inward/book-import';
         payload = {
           import_id: item.id,
           transporter: form.transporter_name,
+          vehicle_type: form.vehicle_type,
           vehicle_number: form.vehicle_number,
           driver_name: form.driver_name,
           driver_phone: form.driver_contact,
           pickup_date: formatDate(form.scheduled_date),
-          eta: formatDate(form.eta)
+          eta: formatDate(form.eta),
+          transport_charges: form.transport_charges ? parseFloat(form.transport_charges) : null
         };
       } else {
         if (!form.quantity || form.quantity <= 0) {
@@ -1154,7 +1490,8 @@ const TransportBookingModal = ({ type, item, onClose, onBooked }) => {
           scheduled_date: formatDate(form.scheduled_date),
           delivery_date: formatDate(form.eta),
           notes: form.notes,
-          transport_type: 'LOCAL'
+          transport_type: 'LOCAL',
+          transport_charges: form.transport_charges ? parseFloat(form.transport_charges) : null
         };
       }
       
@@ -1202,7 +1539,7 @@ const TransportBookingModal = ({ type, item, onClose, onBooked }) => {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Truck className="w-5 h-5 text-indigo-500" />
-            Book Transport - {type === 'INWARD_EXW' ? 'Inward (EXW)' : type === 'INWARD_IMPORT' ? 'Inward (Import)' : 'Dispatch'}
+            Book Transport - {type === 'INWARD_DDP' ? 'Inward (DDP)' : type === 'INWARD_EXW' ? 'Inward (EXW)' : type === 'INWARD_IMPORT' ? 'Inward (Import)' : 'Dispatch'}
           </DialogTitle>
         </DialogHeader>
 
@@ -1211,10 +1548,10 @@ const TransportBookingModal = ({ type, item, onClose, onBooked }) => {
           <div className="glass rounded-lg p-4 border border-border">
             <h3 className="font-semibold mb-3 flex items-center gap-2">
               <Package className="w-4 h-4" />
-              {type === 'INWARD_EXW' ? 'Purchase Order Details' : type === 'INWARD_IMPORT' ? 'Import Shipment Details' : 'Job Order Details'}
+              {type === 'INWARD_DDP' || type === 'INWARD_EXW' ? 'Purchase Order Details' : type === 'INWARD_IMPORT' ? 'Import Shipment Details' : 'Job Order Details'}
             </h3>
             <div className="grid grid-cols-2 gap-4">
-              {type === 'INWARD_EXW' ? (
+              {(type === 'INWARD_DDP' || type === 'INWARD_EXW') ? (
                 <>
                   <div>
                     <Label className="text-muted-foreground text-xs">PO Number</Label>
@@ -1226,7 +1563,9 @@ const TransportBookingModal = ({ type, item, onClose, onBooked }) => {
                   </div>
                   <div>
                     <Label className="text-muted-foreground text-xs">Incoterm</Label>
-                    <Badge className="bg-blue-500/20 text-blue-400">{item.incoterm || 'EXW'}</Badge>
+                    <Badge className={type === 'INWARD_DDP' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-blue-500/20 text-blue-400'}>
+                      {item.incoterm || (type === 'INWARD_DDP' ? 'DDP' : 'EXW')}
+                    </Badge>
                   </div>
                   <div className="col-span-2">
                     <Label className="text-muted-foreground text-xs">Products</Label>

@@ -5,12 +5,14 @@ import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { 
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import {
   Map, ArrowDownToLine, ArrowUpFromLine, Ship, Truck, Calendar,
   Plus, RefreshCw, Check, X, Building, Clock, Package
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 
 const TransportPlannerPage = () => {
   const [activeTab, setActiveTab] = useState('inward_exw');
@@ -453,7 +455,7 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
   // Separate job orders from transport records
   const jobOrders = items.filter(i => i.type === 'JO' || i.job_number);
   const transportRecords = items.filter(i => i.transport_number && !i.job_number);
-  
+
   // Group transport records by job_order_id to calculate quantities
   const transportByJobId = {};
   transportRecords.forEach(t => {
@@ -465,20 +467,20 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
       transportByJobId[jobId].push(t);
     }
   });
-  
+
   // Calculate quantity booked and balance quantity for each job order
   const itemsWithQuantities = jobOrders.map(item => {
     const jobTransports = transportByJobId[item.id] || [];
-    
+
     // Calculate total quantity booked from all transport bookings
     const quantityBooked = jobTransports.reduce((sum, t) => sum + (t.quantity || 0), 0);
-    
+
     // Get job order total quantity
     const totalQuantity = item.quantity || 0;
-    
+
     // Calculate balance quantity
     const balanceQuantity = totalQuantity - quantityBooked;
-    
+
     return {
       ...item,
       quantity_booked: quantityBooked,
@@ -489,17 +491,76 @@ const DispatchPlannerTab = ({ items, onRefresh, onBookTransport }) => {
 
   // Filter: Show items that need booking OR have balance quantity > 0
   // Items remain on the page until balance quantity = 0
-  const needsBooking = itemsWithQuantities.filter(i => 
+  const needsBooking = itemsWithQuantities.filter(i =>
     i.needs_booking || (i.balance_quantity && i.balance_quantity > 0)
   );
-  
+
   // Only show fully dispatched items (balance = 0) - these can change status to dispatched
-  const fullyDispatched = itemsWithQuantities.filter(i => 
+  const fullyDispatched = itemsWithQuantities.filter(i =>
     i.balance_quantity === 0 && i.quantity_booked > 0
   );
 
+  // Calculate pie chart data - cumulative balance quantities by product
+  const COLORS = ['#8884d8', '#82ca9d', '#ffc658', '#ff7c7c', '#8dd1e1', '#d084d0', '#ffb347', '#87ceeb'];
+
+  const pieChartData = needsBooking.reduce((acc, item) => {
+    const productName = item.product_name || 'Unknown Product';
+    const balanceQty = item.balance_quantity || 0;
+
+    if (balanceQty > 0) {
+      const existing = acc.find(p => p.name === productName);
+      if (existing) {
+        existing.value += balanceQty;
+      } else {
+        acc.push({
+          name: productName,
+          value: balanceQty
+        });
+      }
+    }
+    return acc;
+  }, []);
+
   return (
     <div className="space-y-6">
+      {/* Dispatch Analytics Pie Chart */}
+      {pieChartData.length > 0 && (
+        <Card className="glass">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Package className="w-5 h-5 text-amber-400" />
+              Products Yet to be Dispatched
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={pieChartData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(1)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {pieChartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value) => [value, 'Quantity']} />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="mt-4 text-sm text-muted-foreground text-center">
+              Total pending quantity: {pieChartData.reduce((sum, item) => sum + item.value, 0).toFixed(2)} units
+            </div>
+          </CardContent>
+        </Card>
+      )}
       {/* Needs Booking Section */}
       <div className="glass rounded-lg border border-border">
         <div className="p-4 border-b border-border flex justify-between items-center">

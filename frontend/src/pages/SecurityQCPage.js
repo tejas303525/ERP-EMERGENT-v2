@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -9,7 +9,7 @@ import { Card, CardContent } from '../components/ui/card';
 import { 
   Shield, ArrowDownToLine, ArrowUpFromLine, Scale, Check, X, 
   AlertTriangle, ClipboardCheck, FileCheck, Truck, Package,
-  RefreshCw, Eye, FileText, Download, Bell
+  RefreshCw, Eye, FileText, Download, Bell, CheckCircle
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
@@ -22,10 +22,13 @@ const SecurityQCPage = () => {
   const [loading, setLoading] = useState(false);
   const [showChecklistModal, setShowChecklistModal] = useState(false);
   const [showViewModal, setShowViewModal] = useState(false);
+  const [showVehicleModal, setShowVehicleModal] = useState(false);
   const [selectedTransport, setSelectedTransport] = useState(null);
   const [checklistType, setChecklistType] = useState('INWARD');
   const [dismissedNotifications, setDismissedNotifications] = useState(new Set());
   const [vehicleBookingNotifications, setVehicleBookingNotifications] = useState([]);
+  const [qcInspections, setQcInspections] = useState([]);
+  const [allTransports, setAllTransports] = useState([]); // Store all transports including completed
 
   useEffect(() => {
     loadData();
@@ -62,17 +65,74 @@ const SecurityQCPage = () => {
     setDismissedNotifications(prev => new Set([...prev, key]));
   };
 
+  // Helper function to get the correct URL for a delivery document
+  const getDeliveryDocumentUrl = async (doc) => {
+    if (!doc) return null;
+    if (doc.startsWith('http')) {
+      return doc;
+    }
+
+    const token = localStorage.getItem('erp_token');
+    const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+
+    // Check if this looks like a generated Delivery Note PDF (e.g., "DeliveryNote_DO-000043.pdf")
+    const deliveryNoteMatch = doc.match(/^DeliveryNote_(DO-\d+)\.pdf$/i);
+    if (deliveryNoteMatch) {
+      // Extract DO number from filename
+      const doNumber = deliveryNoteMatch[1];
+      try {
+        // Fetch delivery orders to find the one with this DO number
+        const response = await api.get('/delivery-orders');
+        const deliveryOrders = response.data || [];
+        const deliveryOrder = deliveryOrders.find(item => item.do_number === doNumber);
+
+        if (deliveryOrder && deliveryOrder.id) {
+          // Use PDF generation endpoint
+          return `${backendUrl}/api/pdf/delivery-note/${deliveryOrder.id}?token=${token}`;
+        }
+      } catch (error) {
+        console.error('Failed to fetch delivery order:', error);
+      }
+    }
+
+    // Fallback to file endpoint
+    return `${backendUrl}/api/files/${doc}?token=${token}`;
+  };
+
   const loadData = async () => {
     setLoading(true);
     try {
-      const [inwardRes, outwardRes, dashboardRes] = await Promise.all([
+      const [inwardRes, outwardRes, dashboardRes, inspectionsRes] = await Promise.all([
         api.get('/security/inward'),
         api.get('/security/outward'),
-        api.get('/security/dashboard')
+        api.get('/security/dashboard'),
+        api.get('/qc/inspections').catch(() => ({ data: [] })) // Load QC inspections
       ]);
-      setInwardTransports(inwardRes.data || []);
-      setOutwardTransports(outwardRes.data || []);
+      
+      // Store all transports (including completed) for inspection status alerts
+      const allInward = inwardRes.data || [];
+      const allOutward = outwardRes.data || [];
+      setAllTransports([...allInward, ...allOutward]);
+      
+      // Filter out completed security status items and sort chronologically by delivery date
+      const inwardFiltered = allInward
+        .filter(t => !t.security_checklist || t.security_checklist?.status !== 'COMPLETED')
+        .sort((a, b) => {
+          const dateA = new Date(a.eta || a.delivery_date || a.created_at || 0);
+          const dateB = new Date(b.eta || b.delivery_date || b.created_at || 0);
+          return dateA - dateB; // Ascending order (earliest first)
+        });
+      const outwardFiltered = allOutward
+        .filter(t => !t.security_checklist || t.security_checklist?.status !== 'COMPLETED')
+        .sort((a, b) => {
+          const dateA = new Date(a.eta || a.delivery_date || a.created_at || 0);
+          const dateB = new Date(b.eta || b.delivery_date || b.created_at || 0);
+          return dateA - dateB; // Ascending order (earliest first)
+        });
+      setInwardTransports(inwardFiltered);
+      setOutwardTransports(outwardFiltered);
       setPendingChecklists(dashboardRes.data?.checklists || []);
+      setQcInspections(inspectionsRes.data || []); // Store inspections
       // Reload vehicle booking notifications when data refreshes
       loadVehicleBookingNotifications();
     } catch (error) {
@@ -89,14 +149,58 @@ const SecurityQCPage = () => {
     setShowChecklistModal(true);
   };
 
-  // Stats
-  const inwardPending = inwardTransports.filter(t => !t.security_checklist || t.security_checklist?.status !== 'COMPLETED').length;
-  const outwardPending = outwardTransports.filter(t => !t.security_checklist || t.security_checklist?.status !== 'COMPLETED').length;
+  // Stats - transports are already filtered, so just count them
+  const inwardPending = inwardTransports.length;
+  const outwardPending = outwardTransports.length;
 
   // Filter notifications by dismissed status
   const activeNotifications = vehicleBookingNotifications.filter(
     n => !dismissedNotifications.has(n.key)
   );
+
+  // Get all transports with completed security checklists that need inspection status display
+  const inspectionStatusAlerts = useMemo(() => {
+    const alerts = [];
+    
+    // Helper function to get inspection status
+    const getInspectionStatus = (transport) => {
+      if (!transport.security_checklist || transport.security_checklist.status !== 'COMPLETED') {
+        return null;
+      }
+      
+      // Find QC inspection for this transport
+      const inspection = qcInspections.find(ins => 
+        ins.ref_id === transport.id || 
+        ins.transport_id === transport.id ||
+        ins.ref_number === transport.transport_number
+      );
+      
+      if (!inspection) {
+        return { status: 'NOT_DONE', inspection: null };
+      }
+      
+      return {
+        status: inspection.status === 'PASSED' || inspection.status === 'FAILED' ? 'DONE' : 'IN_PROGRESS',
+        inspection: inspection
+      };
+    };
+    
+    // Check all transports (including completed ones) for inspection status
+    allTransports.forEach(transport => {
+      const inspectionStatus = getInspectionStatus(transport);
+      if (inspectionStatus && transport.security_checklist?.status === 'COMPLETED') {
+        // Only show if inspection is done or not done (not in progress)
+        if (inspectionStatus.status === 'DONE' || inspectionStatus.status === 'NOT_DONE') {
+          alerts.push({
+            transport,
+            inspectionStatus
+          });
+        }
+      }
+    });
+    
+    return alerts;
+  }, [allTransports, qcInspections]);
 
   return (
     <div className="p-6 max-w-[1800px] mx-auto" data-testid="security-qc-page">
@@ -164,6 +268,91 @@ const SecurityQCPage = () => {
               </CardContent>
             </Card>
           ))}
+        </div>
+      )}
+
+      {/* Inspection Status Alerts */}
+      {inspectionStatusAlerts.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {inspectionStatusAlerts.map((alert, idx) => {
+            const { transport, inspectionStatus } = alert;
+            const isDone = inspectionStatus.status === 'DONE';
+            const jobNumber = transport.job_number || transport.job_numbers?.[0] || transport.do_number || transport.po_number || '-';
+            const productName = transport.product_name || transport.products_summary || transport.product_names?.[0] || transport.po_items?.[0]?.product_name || transport.po_items?.[0]?.item_name || '-';
+            const deliveryNote = transport.delivery_note_number || transport.delivery_order_number || '-';
+            const alertKey = `inspection-${transport.id}-${idx}`;
+            
+            // Skip if dismissed
+            if (dismissedNotifications.has(alertKey)) {
+              return null;
+            }
+            
+            return (
+              <Card 
+                key={alertKey} 
+                className={isDone ? 'bg-green-500/10 border-green-500/30' : 'bg-amber-500/10 border-amber-500/30'}
+              >
+                <CardContent className="p-4">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start gap-3 flex-1">
+                      {isDone ? (
+                        <CheckCircle className="w-5 h-5 text-green-400 mt-0.5" />
+                      ) : (
+                        <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5" />
+                      )}
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <p className={`font-semibold ${isDone ? 'text-green-400' : 'text-amber-400'}`}>
+                            QC Inspection Status
+                          </p>
+                          <Badge className={isDone ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'}>
+                            {inspectionStatus.status === 'DONE' ? 'Done' : inspectionStatus.status === 'IN_PROGRESS' ? 'In Progress' : 'Not Done'}
+                          </Badge>
+                        </div>
+                        <div className="text-sm text-muted-foreground space-y-1 grid grid-cols-2 gap-2">
+                          <div>
+                            <span className="text-muted-foreground">Job Order:</span>
+                            <span className="ml-2 font-mono text-amber-400">{jobNumber}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Product:</span>
+                            <span className="ml-2">{productName}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Delivery Note:</span>
+                            <span className="ml-2 font-mono text-blue-400">{deliveryNote}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Inspection Status:</span>
+                            <span className={`ml-2 font-medium ${isDone ? 'text-green-400' : 'text-amber-400'}`}>
+                              {inspectionStatus.inspection?.status || 'Not Started'}
+                            </span>
+                          </div>
+                        </div>
+                        {inspectionStatus.inspection && (
+                          <p className={`text-sm mt-2 font-medium ${isDone ? 'text-green-400' : 'text-amber-400'}`}>
+                            {isDone 
+                              ? `✓ Inspection ${inspectionStatus.inspection.status} - ${inspectionStatus.inspection.qc_number || ''}`
+                              : '⚠ Inspection pending or in progress'}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setDismissedNotifications(prev => new Set([...prev, alertKey]));
+                      }}
+                      className="ml-2"
+                    >
+                      <X className="w-4 h-4" />
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       )}
 
@@ -238,6 +427,14 @@ const SecurityQCPage = () => {
           <FileText className="w-4 h-4 mr-2" />
           RFQ Window
         </Button>
+        <Button
+          variant={activeTab === 'delivery_docs' ? 'default' : 'outline'}
+          onClick={() => setActiveTab('delivery_docs')}
+          data-testid="tab-delivery-docs"
+        >
+          <FileText className="w-4 h-4 mr-2" />
+          Delivery Notes & Orders
+        </Button>
       </div>
 
       {loading ? (
@@ -256,7 +453,12 @@ const SecurityQCPage = () => {
                 setChecklistType('INWARD');
                 setShowViewModal(true);
               }}
+              onViewVehicle={(t) => {
+                setSelectedTransport(t);
+                setShowVehicleModal(true);
+              }}
               onRefresh={loadData}
+              getDeliveryDocumentUrl={getDeliveryDocumentUrl}
             />
           )}
 
@@ -271,12 +473,28 @@ const SecurityQCPage = () => {
                 setShowViewModal(true);
               }}
               onRefresh={loadData}
+              getDeliveryDocumentUrl={getDeliveryDocumentUrl}
             />
           )}
 
           {/* RFQ Window Tab */}
           {activeTab === 'rfq' && (
             <RFQWindowTab />
+          )}
+
+          {/* Delivery Notes & Orders Tab */}
+          {activeTab === 'delivery_docs' && (
+            <DeliveryDocsTab
+              inwardTransports={inwardTransports}
+              outwardTransports={outwardTransports}
+              onViewDetails={(t) => {
+                setSelectedTransport(t);
+                setChecklistType(t.po_number ? 'INWARD' : 'OUTWARD');
+                setShowViewModal(true);
+              }}
+              onRefresh={loadData}
+              getDeliveryDocumentUrl={getDeliveryDocumentUrl}
+            />
           )}
         </>
       )}
@@ -309,12 +527,24 @@ const SecurityQCPage = () => {
           }}
         />
       )}
+
+      {/* Vehicle Info Modal */}
+      {showVehicleModal && selectedTransport && (
+        <VehicleInfoModal
+          transport={selectedTransport}
+          onClose={() => {
+            setShowVehicleModal(false);
+            setSelectedTransport(null);
+          }}
+          getDeliveryDocumentUrl={getDeliveryDocumentUrl}
+        />
+      )}
     </div>
   );
 };
 
 // ==================== INWARD TRANSPORT TAB ====================
-const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRefresh }) => {
+const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onViewVehicle, onRefresh, getDeliveryDocumentUrl }) => {
   return (
     <div className="space-y-4">
       <div className="glass rounded-lg border border-border">
@@ -344,12 +574,14 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRefr
             <table className="w-full">
               <thead className="bg-muted/30">
                 <tr>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Transport #</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO / Ref</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">pO / Ref</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Incoterm</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle Type</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Driver Name</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Note</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Security Status</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
                 </tr>
@@ -362,18 +594,60 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRefr
                   
                   return (
                     <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
-                      <td className="p-3 font-mono font-medium">{transport.transport_number}</td>
-                      <td className="p-3 text-blue-400">{transport.po_number || '-'}</td>
+                      <td className="p-3">
+                        {transport.delivery_date ? (
+                          <span className="text-cyan-400 font-medium">
+                            {new Date(transport.delivery_date).toLocaleDateString()}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
+                      <td className="p-3 text-blue-400">{transport.po_number || transport.transport_number || '-'}</td>
                       <td className="p-3 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.product_name || i.item_name).join(', ') || '-'}>
                         {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.product_name || i.item_name).join(', ') || '-'}
                       </td>
                       <td className="p-3">{transport.supplier_name || '-'}</td>
-                      <td className="p-3">
-                        <Badge className="bg-cyan-500/20 text-cyan-400">
-                          {transport.incoterm || 'EXW'}
-                        </Badge>
-                      </td>
                       <td className="p-3">{transport.vehicle_number || '-'}</td>
+                      <td className="p-3">
+                        {transport.vehicle_type ? (
+                          <Badge variant="outline" className="text-xs">
+                            {transport.vehicle_type}
+                          </Badge>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
+                      <td className="p-3">{transport.driver_name || '-'}</td>
+                      <td className="p-3">
+                        {transport.delivery_note_number || transport.delivery_note_document ? (
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline" className="text-xs">
+                              {transport.delivery_note_number || '-'}
+                            </Badge>
+                            {transport.delivery_note_document && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={async () => {
+                                  const doc = transport.delivery_note_document;
+                                  if (doc) {
+                                    const url = await getDeliveryDocumentUrl(doc);
+                                    if (url) {
+                                      window.open(url, '_blank');
+                                    }
+                                  }
+                                }}
+                                title="View Delivery Note"
+                              >
+                                <FileText className="w-3 h-3" />
+                              </Button>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
                       <td className="p-3">
                         {isComplete ? (
                           <Badge className="bg-green-500/20 text-green-400">
@@ -393,16 +667,17 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRefr
                       </td>
                       <td className="p-3">
                         <div className="flex gap-1">
+                          <Button 
+                            size="sm" 
+                            variant="ghost"
+                            onClick={() => onViewVehicle(transport)}
+                            title="View Vehicle Information"
+                          >
+                            <Eye className="w-4 h-4 mr-1" />
+                            View
+                          </Button>
                           {isComplete && (
                             <>
-                              <Button 
-                                size="sm" 
-                                variant="outline"
-                                onClick={() => onViewDetails(transport)}
-                              >
-                                <Eye className="w-4 h-4 mr-1" />
-                                View Details
-                              </Button>
                               {checklist?.gross_weight && checklist?.tare_weight && (
                                 <Button 
                                   size="sm" 
@@ -443,7 +718,7 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRefr
 };
 
 // ==================== OUTWARD TRANSPORT TAB ====================
-const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRefresh }) => {
+const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRefresh, getDeliveryDocumentUrl }) => {
   return (
     <div className="space-y-4">
       <div className="glass rounded-lg border border-border">
@@ -473,12 +748,13 @@ const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRef
             <table className="w-full">
               <thead className="bg-muted/30">
                 <tr>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Transport #</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Job / DO</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Customer</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Type</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Container #</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Order</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Security Status</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
                 </tr>
@@ -491,7 +767,15 @@ const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRef
                   
                   return (
                     <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
-                      <td className="p-3 font-mono font-medium">{transport.transport_number}</td>
+                      <td className="p-3">
+                        {transport.delivery_date ? (
+                          <span className="text-cyan-400 font-medium">
+                            {new Date(transport.delivery_date).toLocaleDateString()}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
                       <td className="p-3 text-amber-400">
                         {transport.job_numbers?.join(', ') || transport.do_number || '-'}
                       </td>
@@ -505,6 +789,37 @@ const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRef
                         </Badge>
                       </td>
                       <td className="p-3 font-mono text-sm">{transport.container_number || '-'}</td>
+                      <td className="p-3">
+                        {transport.delivery_order_number || transport.delivery_order_document ? (
+                          <div className="flex items-center gap-2">
+                            {transport.delivery_order_number && (
+                              <Badge variant="outline" className="text-xs text-amber-400">
+                                {transport.delivery_order_number}
+                              </Badge>
+                            )}
+                            {transport.delivery_order_document && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={async () => {
+                                  const doc = transport.delivery_order_document;
+                                  if (doc) {
+                                    const url = await getDeliveryDocumentUrl(doc);
+                                    if (url) {
+                                      window.open(url, '_blank');
+                                    }
+                                  }
+                                }}
+                                title="View Delivery Order PDF"
+                              >
+                                <FileText className="w-3 h-3" />
+                              </Button>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
                       <td className="p-3">
                         {isComplete ? (
                           <Badge className="bg-green-500/20 text-green-400">
@@ -980,6 +1295,283 @@ const SecurityChecklistModal = ({ transport, checklistType, onClose, onComplete 
   );
 };
 
+// ==================== VEHICLE INFO MODAL ====================
+const VehicleInfoModal = ({ transport, onClose, getDeliveryDocumentUrl }) => {
+  const [viewingDocument, setViewingDocument] = useState(null);
+  const [documentUrl, setDocumentUrl] = useState(null);
+
+  const openDocument = async (doc, deliveryOrderNumber = null) => {
+    if (!doc) return;
+    const url = await getDeliveryDocumentUrl(doc);
+    if (url) {
+      setDocumentUrl(url);
+      setViewingDocument(true);
+    }
+  };
+
+  const closeDocumentViewer = () => {
+    setViewingDocument(false);
+    setDocumentUrl(null);
+  };
+
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Truck className="w-5 h-5 text-blue-500" />
+            Vehicle Information - {transport.transport_number || transport.po_number || 'N/A'}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-6 py-4">
+          {/* Transport Basic Info */}
+          <div className="glass rounded-lg p-4 border border-border">
+            <h3 className="font-semibold mb-3 flex items-center gap-2">
+              <Package className="w-4 h-4" />
+              Transport Information
+            </h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label className="text-muted-foreground text-xs">Transport Number</Label>
+                <p className="font-mono font-medium">{transport.transport_number || '-'}</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground text-xs">PO / Reference</Label>
+                <p className="text-blue-400 font-mono">{transport.po_number || transport.import_number || '-'}</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground text-xs">Supplier</Label>
+                <p className="font-medium">{transport.supplier_name || '-'}</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground text-xs">Products</Label>
+                <p className="text-sm">
+                  {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.product_name || i.item_name).join(', ') || '-'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Vehicle & Driver Information */}
+          <div className="glass rounded-lg p-4 border border-border">
+            <h3 className="font-semibold mb-3 flex items-center gap-2">
+              <Truck className="w-4 h-4" />
+              Vehicle & Driver Details
+            </h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label className="text-muted-foreground text-xs">Vehicle Number</Label>
+                <p className="font-mono font-medium">{transport.vehicle_number || 'Not assigned'}</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground text-xs">Vehicle Type</Label>
+                <p className="font-medium capitalize">
+                  {transport.vehicle_type ? transport.vehicle_type.replace('_', ' ') : '-'}
+                </p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground text-xs">Driver Name</Label>
+                <p className="font-medium">{transport.driver_name || '-'}</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground text-xs">Driver Contact</Label>
+                <p className="font-mono">
+                  {transport.driver_contact || transport.driver_phone || '-'}
+                </p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground text-xs">Transporter Company</Label>
+                <p className="font-medium">{transport.transporter_name || transport.transporter || '-'}</p>
+              </div>
+              {transport.container_number && (
+                <div>
+                  <Label className="text-muted-foreground text-xs">Container Number</Label>
+                  <p className="font-mono font-medium text-green-400">{transport.container_number}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Delivery Note Information */}
+          {(transport.delivery_note_number || transport.delivery_note_document) && (
+            <div className="glass rounded-lg p-4 border border-border">
+              <h3 className="font-semibold mb-3 flex items-center gap-2">
+                <FileText className="w-4 h-4" />
+                Delivery Note Information
+              </h3>
+              <div className="space-y-3">
+                {transport.delivery_note_number && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Delivery Note Number</Label>
+                    <p className="font-mono font-medium text-blue-400">{transport.delivery_note_number}</p>
+                  </div>
+                )}
+                {transport.delivery_note_document && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Attached Document</Label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <FileText className="w-4 h-4 text-blue-400" />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openDocument(transport.delivery_note_document)}
+                      >
+                        <Eye className="w-4 h-4 mr-2" />
+                        View PDF Document
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={async () => {
+                          const url = await getDeliveryDocumentUrl(transport.delivery_note_document);
+                          if (url) {
+                            window.open(url, '_blank');
+                          }
+                        }}
+                        title="Open in new tab"
+                      >
+                        <Download className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Additional Transport Documents */}
+          {(transport.delivery_order_number || transport.delivery_order_document) && (
+            <div className="glass rounded-lg p-4 border border-border">
+              <h3 className="font-semibold mb-3 flex items-center gap-2">
+                <FileText className="w-4 h-4" />
+                Delivery Order Information
+              </h3>
+              <div className="space-y-3">
+                {transport.delivery_order_number && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Delivery Order Number</Label>
+                    <p className="font-mono font-medium text-amber-400">{transport.delivery_order_number}</p>
+                  </div>
+                )}
+                {transport.delivery_order_document && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Attached Document</Label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <FileText className="w-4 h-4 text-amber-400" />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openDocument(transport.delivery_order_document)}
+                      >
+                        <Eye className="w-4 h-4 mr-2" />
+                        View PDF Document
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={async () => {
+                          const url = await getDeliveryDocumentUrl(transport.delivery_order_document);
+                          if (url) {
+                            window.open(url, '_blank');
+                          }
+                        }}
+                        title="Open in new tab"
+                      >
+                        <Download className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Timeline Information */}
+          {(transport.scheduled_date || transport.delivery_date || transport.pickup_date || transport.created_at) && (
+            <div className="glass rounded-lg p-4 border border-border">
+              <h3 className="font-semibold mb-3 flex items-center gap-2">
+                <Package className="w-4 h-4" />
+                Timeline
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                {transport.scheduled_date && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Scheduled Date</Label>
+                    <p className="font-medium">{new Date(transport.scheduled_date).toLocaleString()}</p>
+                  </div>
+                )}
+                {transport.pickup_date && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Pickup Date</Label>
+                    <p className="font-medium">{new Date(transport.pickup_date).toLocaleString()}</p>
+                  </div>
+                )}
+                {transport.delivery_date && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Expected Delivery</Label>
+                    <p className="font-medium">{new Date(transport.delivery_date).toLocaleString()}</p>
+                  </div>
+                )}
+                {transport.created_at && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Created At</Label>
+                    <p className="text-sm text-muted-foreground">
+                      {new Date(transport.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 mt-4">
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </DialogContent>
+
+      {/* PDF Document Viewer Modal */}
+      {viewingDocument && documentUrl && (
+        <Dialog open={viewingDocument} onOpenChange={closeDocumentViewer}>
+          <DialogContent className="max-w-5xl max-h-[95vh] overflow-hidden flex flex-col">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-blue-500" />
+                Document Viewer
+              </DialogTitle>
+            </DialogHeader>
+            <div className="flex-1 overflow-hidden border border-border rounded-lg bg-muted/20">
+              <iframe
+                src={documentUrl}
+                className="w-full h-full min-h-[600px]"
+                title="PDF Document Viewer"
+                style={{ border: 'none' }}
+              />
+            </div>
+            <div className="flex justify-between items-center pt-4 border-t">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  window.open(documentUrl, '_blank');
+                }}
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Open in New Tab
+              </Button>
+              <Button variant="outline" onClick={closeDocumentViewer}>
+                Close Viewer
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+    </Dialog>
+  );
+};
+
 // ==================== SECURITY CHECKLIST VIEW MODAL (READ-ONLY) ====================
 const SecurityChecklistViewModal = ({ transport, checklistType, onClose }) => {
   const checklist = transport.security_checklist;
@@ -1170,6 +1762,164 @@ const SecurityChecklistViewModal = ({ transport, checklistType, onClose }) => {
         </div>
       </DialogContent>
     </Dialog>
+  );
+};
+
+// ==================== DELIVERY DOCS TAB ====================
+const DeliveryDocsTab = ({ inwardTransports, outwardTransports, onViewDetails, onRefresh, getDeliveryDocumentUrl }) => {
+  const allDocsWithDates = useMemo(() => {
+    const docs = [];
+
+    // Add inward transports with delivery notes
+    inwardTransports.forEach(t => {
+      if (t.delivery_note_number || t.delivery_note_document) {
+        docs.push({
+          ...t,
+          docType: 'DELIVERY_NOTE',
+          docNumber: t.delivery_note_number,
+          docDocument: t.delivery_note_document,
+          direction: 'inward',
+          expectedDate: t.delivery_date || t.eta || t.scheduled_date || t.created_at
+        });
+      }
+    });
+
+    // Add outward transports with delivery orders
+    outwardTransports.forEach(t => {
+      if (t.delivery_order_number || t.delivery_order_document) {
+        docs.push({
+          ...t,
+          docType: 'DELIVERY_ORDER',
+          docNumber: t.delivery_order_number,
+          docDocument: t.delivery_order_document,
+          direction: 'outward',
+          expectedDate: t.delivery_date || t.scheduled_date || t.created_at
+        });
+      }
+    });
+
+    // Sort by expected date (FIFO - earliest first)
+    return docs.sort((a, b) => {
+      const dateA = new Date(a.expectedDate || 0);
+      const dateB = new Date(b.expectedDate || 0);
+      return dateA - dateB;
+    });
+  }, [inwardTransports, outwardTransports]);
+
+  const formatDate = (dateString) => {
+    if (!dateString) return '-';
+    return new Date(dateString).toLocaleDateString();
+  };
+
+  return (
+    <div className="glass rounded-lg border border-border">
+      <div className="p-4 border-b border-border flex justify-between items-center">
+        <div>
+          <h2 className="text-lg font-semibold flex items-center gap-2">
+            <FileText className="w-5 h-5 text-blue-400" />
+            Delivery Notes & Orders
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Sorted by Expected Delivery Date (FIFO)
+          </p>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="px-3 py-1 rounded text-sm bg-blue-500/20 text-blue-400">
+            {allDocsWithDates.length} Documents
+          </span>
+          <Button variant="outline" size="sm" onClick={onRefresh}>
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      {allDocsWithDates.length === 0 ? (
+        <div className="p-12 text-center">
+          <FileText className="w-12 h-12 mx-auto mb-4 opacity-30 text-muted-foreground" />
+          <p className="text-muted-foreground">No delivery notes or orders found</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead className="bg-muted/30">
+              <tr>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Direction</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Document Type</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Document #</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Transport #</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Reference</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Party</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Expected Date</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {allDocsWithDates.map((transport) => (
+                <tr key={`${transport.docType}-${transport.id}`} className="border-b border-border/50 hover:bg-muted/10">
+                  <td className="p-3">
+                    <div className="flex items-center gap-2">
+                      {transport.direction === 'inward' ? (
+                        <ArrowDownToLine className="w-4 h-4 text-blue-400" />
+                      ) : (
+                        <ArrowUpFromLine className="w-4 h-4 text-amber-400" />
+                      )}
+                      <span className="text-sm font-medium capitalize">{transport.direction}</span>
+                    </div>
+                  </td>
+                  <td className="p-3">
+                    <Badge className={transport.docType === 'DELIVERY_NOTE' ? "bg-blue-500/20 text-blue-400" : "bg-amber-500/20 text-amber-400"}>
+                      {transport.docType.replace('_', ' ')}
+                    </Badge>
+                  </td>
+                  <td className="p-3">
+                    <span className="font-mono font-medium">{transport.docNumber || '-'}</span>
+                  </td>
+                  <td className="p-3">
+                    <span className="font-mono text-sm">{transport.transport_number || transport.import_number || '-'}</span>
+                  </td>
+                  <td className="p-3">
+                    <span className="text-sm">{transport.po_number || transport.job_number || transport.job_numbers?.join(', ') || transport.import_number || '-'}</span>
+                  </td>
+                  <td className="p-3">
+                    <span className="text-sm">{transport.supplier_name || transport.customer_name || '-'}</span>
+                  </td>
+                  <td className="p-3">
+                    <span className="text-sm font-medium text-green-400">
+                      {formatDate(transport.expectedDate)}
+                    </span>
+                  </td>
+                  <td className="p-3">
+                    <div className="flex gap-1">
+                      <Button size="sm" variant="outline" onClick={() => onViewDetails(transport)}>
+                        <Eye className="w-4 h-4" />
+                      </Button>
+                      {transport.docDocument && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            const doc = transport.docDocument;
+                            if (doc) {
+                              const url = await getDeliveryDocumentUrl(doc);
+                              if (url) {
+                                window.open(url, '_blank');
+                              }
+                            }
+                          }}
+                        >
+                          <FileText className="w-4 h-4" />
+                        </Button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 };
 

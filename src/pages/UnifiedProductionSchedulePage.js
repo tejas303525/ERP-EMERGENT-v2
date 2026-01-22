@@ -63,7 +63,7 @@ const UnifiedProductionSchedulePage = () => {
       <div className="mb-6">
         <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
           <Factory className="w-8 h-8 text-indigo-500" />
-          Production Schedule
+          Production Dashboard (Schedule and Planning)
         </h1>
         <p className="text-muted-foreground mt-1">
           What needs to be produced • {DRUMS_PER_DAY} drums/day capacity

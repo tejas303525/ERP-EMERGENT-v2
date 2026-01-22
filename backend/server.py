@@ -27,6 +27,10 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+# File upload directory
+UPLOAD_DIR = ROOT_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -214,10 +218,23 @@ class QuotationItem(BaseModel):
     sku: Optional[str] = None  # Make optional for backwards compatibility
     quantity: float
     unit_price: float
+    uom: Optional[str] = "per_mt"  # Unit of Measure: "per_unit", "per_liter", "per_mt"
     packaging: str = "Bulk"
     net_weight_kg: Optional[float] = None  # Net weight per unit for packaging
     weight_mt: Optional[float] = None  # Total weight in MT
     total: float = 0
+    # Container grouping and export details
+    container_number: Optional[int] = None  # Which container this item belongs to (1, 2, 3, etc.)
+    container_count_per_item: Optional[int] = None  # Number of containers allocated to this item (e.g., 5, 12)
+    brand: Optional[str] = None  # Product brand (e.g., "MOTRIX", "WILL BE ANNOUNCED LATER")
+    color: Optional[str] = None  # Product color (e.g., "RED WITH BLACK CAP", "BLUE")
+    detailed_packing: Optional[str] = None  # Detailed packing description (e.g., "PACKED IN 12X1 LTR CARTON")
+    fcl_breakdown: Optional[str] = None  # FCL breakdown (e.g., "TOTAL 1600 CARTONS/ 1X20 FCL")
+    quantity_in_units: Optional[float] = None  # Quantity in units (e.g., 8000 cartons, 15960 pails)
+    unit_type: Optional[str] = None  # Unit type (e.g., "CRTN" for cartons, "PAILS", "DRUMS")
+    item_country_of_origin: Optional[str] = None  # Country of origin for this specific item
+    packing_display: Optional[str] = None  # Packing display format (e.g., "5X 20 FCL", "12X 20 FCL")
+    palletized: Optional[bool] = None  # Whether the item is palletized
 
 class QuotationCreate(BaseModel):
     customer_id: str
@@ -227,6 +244,7 @@ class QuotationCreate(BaseModel):
     order_type: str = "local"  # local or export
     incoterm: Optional[str] = None  # CFR, FOB, CIF, EXW, DDP
     container_type: Optional[str] = None  # 20ft, 40ft, iso_tank, bulk_tanker_45, etc.
+    container_count: int = 1  # Total number of containers
     port_of_loading: Optional[str] = None
     port_of_discharge: Optional[str] = None
     delivery_place: Optional[str] = None
@@ -234,6 +252,7 @@ class QuotationCreate(BaseModel):
     country_of_destination: Optional[str] = None
     payment_terms: str = "Cash"  # LC, CAD, Cash, TT, Net 30
     validity_days: int = 30
+    expected_delivery_date: Optional[str] = None  # Expected delivery date for production scheduling
     notes: Optional[str] = None
     required_documents: List[str] = []  # List of document type IDs
     include_vat: bool = True
@@ -241,6 +260,14 @@ class QuotationCreate(BaseModel):
     vat_amount: float = 0.0
     total_weight_mt: float = 0.0
     bank_id: Optional[str] = None  # Selected bank account ID
+    transport_mode: Optional[str] = None  # "ocean", "road", "air"
+    local_type: Optional[str] = None  # "direct_to_customer", "bulk_to_plant", "packaged_to_plant"
+    # Additional freight charges (for CFR quotations)
+    additional_freight_rate_per_fcl: Optional[float] = None  # Freight rate per FCL (e.g., 2175)
+    additional_freight_currency: str = "USD"  # Currency for additional freight
+    cfr_amount: Optional[float] = None  # CFR product amount (before additional freight)
+    additional_freight_amount: Optional[float] = None  # Additional freight (rate × FCL count)
+    total_receivable: Optional[float] = None  # CFR amount + additional freight
 
 # Product Packaging Configuration Model
 class ProductPackagingConfigCreate(BaseModel):
@@ -294,6 +321,12 @@ class Quotation(QuotationCreate):
     rejection_reason: Optional[str] = None  # Reason for rejection
     rejected_by: Optional[str] = None
     rejected_at: Optional[str] = None
+    # Costing fields
+    costing_id: Optional[str] = None  # Reference to costing_calculations
+    cost_confirmed: bool = False
+    margin_amount: Optional[float] = None  # Cached from costing
+    margin_percentage: Optional[float] = None  # Cached from costing
+    costing_rejection_reason: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 # Sales Order (SPA) Model
@@ -398,6 +431,11 @@ class JobOrder(JobOrderCreate):
     material_shortages: List[Dict] = []
     incoterm: Optional[str] = None  # EXW, FOB, DDP, CFR for routing
     country_of_destination: Optional[str] = None  # Country of destination from quotation
+    # Costing fields
+    costing_id: Optional[str] = None  # Reference to costing_calculations
+    cost_confirmed: bool = False
+    margin_amount: Optional[float] = None  # Cached from costing
+    margin_percentage: Optional[float] = None  # Cached from costing
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class JobOrderReschedule(BaseModel):
@@ -421,6 +459,101 @@ class JobOrderReschedule(BaseModel):
     schedule_date: Optional[str] = None  # Scheduled production date/time
     schedule_shift: Optional[str] = None  # Scheduled shift (Day/Night)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+# Costing & Margin Validation Models
+class CostingCalculationCreate(BaseModel):
+    reference_type: str  # "QUOTATION" or "JOB_ORDER"
+    reference_id: str
+    costing_type: str  # "EXPORT_CONTAINERIZED", "EXPORT_BULK", "LOCAL_DISPATCH"
+    raw_material_cost: float = 0.0
+    raw_material_cost_source: str = "INVENTORY_AVG"  # "INVENTORY_AVG", "LATEST_PO", "MANUAL"
+    raw_material_source: Optional[str] = "SYSTEM"  # "SYSTEM" or "MANUAL" - whether to calculate from system or enter manually
+    packaging_cost: float = 0.0
+    packaging_cost_source: Optional[str] = None  # "LATEST_PO", "MANUAL"
+    packaging_type: Optional[str] = None  # "BULK" or "DRUM" - affects packaging cost calculation
+    inland_transport_cost: float = 0.0
+    thc_cost: float = 0.0
+    isps_cost: float = 0.0
+    documentation_cost: float = 0.0
+    bl_cost: float = 0.0
+    ocean_freight_cost: float = 0.0
+    ocean_freight_entered_by: Optional[str] = None
+    port_charges: float = 0.0
+    local_transport_cost: float = 0.0
+    container_count: int = 1
+    is_dg: bool = False  # Dangerous goods flag
+    incoterm_type: Optional[str] = None  # "EXW" or "DELIVERED" - for display and future calculation logic
+
+class CostingCalculation(CostingCalculationCreate):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    cost_confirmed: bool = False
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    total_cost: float = 0.0
+    selling_price: float = 0.0
+    margin_amount: float = 0.0
+    margin_percentage: float = 0.0
+    unit_cost: float = 0.0
+    unit_margin: float = 0.0
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_by: str = ""
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_by: str = ""
+
+# Transport Master Model
+class TransportRouteCreate(BaseModel):
+    route_name: str
+    origin: str
+    destination: str
+    vehicle_type: str
+    rate: float
+    currency: str = "USD"
+    effective_date: str
+    is_active: bool = True
+    auto_update_from_bookings: bool = False  # If True, automatically update rate from booking charges
+
+class TransportRoute(TransportRouteCreate):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+# Fixed Charges Master Model
+class FixedChargeCreate(BaseModel):
+    charge_type: str  # "THC", "ISPS", "DOCUMENTATION", "BL_FEES", etc.
+    charge_name: str
+    amount: float
+    currency: str = "USD"
+    effective_date: str
+    is_active: bool = True
+    container_type: Optional[str] = None  # "20ft", "40ft", None for all
+    is_dg: Optional[bool] = None  # true for DG, false for non-DG, None for both
+    applicable_to: Optional[str] = None  # "export", "local", "both"
+
+class FixedCharge(FixedChargeCreate):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+# Production Log Model
+class ProductionLogCreate(BaseModel):
+    job_order_id: str
+    job_number: str
+    product_id: str
+    product_name: str
+    production_date: str
+    required_qty: float
+    quantity_produced: float
+    batch_number: str
+
+class ProductionLog(ProductionLogCreate):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_by: str = ""
 
 # GRN Model (Goods Received Note)
 class GRNItem(BaseModel):
@@ -473,7 +606,8 @@ class DeliveryOrder(DeliveryOrderCreate):
 
 # Shipping Booking Model
 class ShippingBookingCreate(BaseModel):
-    job_order_ids: List[str]
+    job_order_ids: List[str] = []  # Empty for PO imports
+    po_ids: List[str] = []  # PO IDs for import bookings
     shipping_line: Optional[str] = None
     container_type: str = "20ft"  # 20ft, 40ft, 40ft_hc
     container_count: int = 1
@@ -484,6 +618,20 @@ class ShippingBookingCreate(BaseModel):
     is_dg: bool = False  # Dangerous Goods
     dg_class: Optional[str] = None
     notes: Optional[str] = None
+    # CRO fields (for FOB - customer provides these upfront)
+    cro_number: Optional[str] = None
+    vessel_name: Optional[str] = None
+    vessel_date: Optional[str] = None  # Vessel departure date
+    cutoff_date: Optional[str] = None  # Container cutoff at port
+    gate_cutoff: Optional[str] = None  # Gate cutoff time
+    vgm_cutoff: Optional[str] = None  # VGM submission cutoff
+    freight_rate: Optional[float] = None
+    freight_currency: str = "USD"
+    freight_charges: Optional[float] = None  # Total freight charges
+    pull_out_date: Optional[str] = None  # Container pull out date
+    si_cutoff: Optional[str] = None  # SI (Shipping Instructions) cutoff
+    gate_in_date: Optional[str] = None  # Gate in date at port
+    booking_source: str = "SELLER"  # "SELLER" or "CUSTOMER" (FOB)
 
 class ShippingBookingUpdate(BaseModel):
     cro_number: Optional[str] = None
@@ -518,6 +666,10 @@ class ShippingBooking(ShippingBookingCreate):
     gate_in_date: Optional[str] = None  # Gate in date
     pickup_date: Optional[str] = None  # Auto-calculated: cutoff - 3 days
     status: str = "pending"  # pending, cro_received, transport_scheduled, loaded, shipped
+    ref_type: Optional[str] = None  # "PO_IMPORT" for PO imports, None for exports
+    po_id: Optional[str] = None  # Single PO ID (for backward compatibility)
+    po_number: Optional[str] = None  # Enriched from PO
+    supplier_name: Optional[str] = None  # Enriched from PO
     created_by: str = ""
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -754,7 +906,7 @@ async def ensure_dispatch_routing(job_id: str, job: dict) -> bool:
         return False
     
     try:
-        # For EXPORT orders (FOB, CFR, CIF, CIP) - Create shipping booking
+        # For EXPORT orders (FOB, CFR, CIF, CIP)
         # Check incoterm first (priority over order_type) since incoterm is more specific
         if incoterm in ["FOB", "CFR", "CIF", "CIP"]:
             # Check if shipping booking already exists for this job
@@ -764,39 +916,84 @@ async def ensure_dispatch_routing(job_id: str, job: dict) -> bool:
             )
             
             if not existing_booking:
-                quotation = await db.quotations.find_one({"id": so.get("quotation_id")}, {"_id": 0}) if so else None
-                booking_number = await generate_sequence("SHP", "shipping_bookings")
-                shipping_booking = {
-                    "id": str(uuid.uuid4()),
-                    "booking_number": booking_number,
-                    "job_order_ids": [job_id],
-                    "customer_name": customer_name,
-                    "port_of_loading": quotation.get("port_of_loading", "") if quotation else "",
-                    "port_of_discharge": quotation.get("port_of_discharge", "") if quotation else "",
-                    "incoterm": incoterm,
-                    "status": "PENDING",
-                    "created_at": datetime.now(timezone.utc).isoformat()
-                }
-                await db.shipping_bookings.insert_one(shipping_booking)
+                # For FOB: Customer is responsible for booking shipping
+                # Don't auto-create booking - wait for customer to provide CRO details
+                if incoterm == "FOB":
+                    quotation = await db.quotations.find_one({"id": so.get("quotation_id")}, {"_id": 0}) if so else None
+                    
+                    # Mark job as awaiting customer booking
+                    await db.job_orders.update_one(
+                        {"id": job_id},
+                        {"$set": {
+                            "shipping_booking_required": True,
+                            "shipping_booking_status": "AWAITING_CUSTOMER"
+                        }}
+                    )
+                    
+                    # Create notification - Customer booking required
+                    await create_notification(
+                        event_type="CUSTOMER_BOOKING_REQUIRED",
+                        title=f"📧 Customer Shipping Booking Required: {job.get('job_number')}",
+                        message=f"Job {job.get('job_number')} (FOB incoterm) requires customer to book shipping and provide CRO details. Awaiting customer booking information.",
+                        link="/shipping",
+                        ref_type="JOB",
+                        ref_id=job_id,
+                        target_roles=["admin", "shipping", "export"],
+                        notification_type="info"
+                    )
+                    return True
                 
-                # Update job order with shipping reference
-                await db.job_orders.update_one(
-                    {"id": job_id},
-                    {"$set": {"shipping_booking_id": shipping_booking["id"]}}
-                )
-                
-                # Create notification - Ship booking required (pop-up priority)
-                await create_notification(
-                    event_type="SHIP_BOOKING_REQUIRED",
-                    title=f"🚢 Ship Booking Required: {job.get('job_number')}",
-                    message=f"URGENT: Job {job.get('job_number')} requires shipping booking for export to {customer_name}. Please create booking immediately.",
-                    link="/shipping",
-                    ref_type="JOB",
-                    ref_id=job_id,
-                    target_roles=["admin", "shipping", "export"],
-                    notification_type="warning"
-                )
-                return True
+                # For CFR, CIF, CIP: Seller handles booking (existing behavior)
+                else:
+                    # CHECK: Don't create duplicate booking if one already exists
+                    existing_booking = await db.shipping_bookings.find_one({
+                        "job_order_ids": job_id,
+                        "status": {"$nin": ["cancelled", "deleted"]}  # Exclude cancelled bookings
+                    }, {"_id": 0, "id": 1, "booking_number": 1})
+                    
+                    if existing_booking:
+                        # Booking already exists, just update job order reference if needed
+                        await db.job_orders.update_one(
+                            {"id": job_id},
+                            {"$set": {"shipping_booking_id": existing_booking["id"]}}
+                        )
+                        # Don't create notification - booking already exists
+                        return True  # Don't create duplicate
+                    
+                    # Only create if no existing booking
+                    quotation = await db.quotations.find_one({"id": so.get("quotation_id")}, {"_id": 0}) if so else None
+                    booking_number = await generate_sequence("SHP", "shipping_bookings")
+                    shipping_booking = {
+                        "id": str(uuid.uuid4()),
+                        "booking_number": booking_number,
+                        "job_order_ids": [job_id],
+                        "customer_name": customer_name,
+                        "port_of_loading": quotation.get("port_of_loading", "") if quotation else "",
+                        "port_of_discharge": quotation.get("port_of_discharge", "") if quotation else "",
+                        "incoterm": incoterm,
+                        "status": "PENDING",
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    }
+                    await db.shipping_bookings.insert_one(shipping_booking)
+                    
+                    # Update job order with shipping reference
+                    await db.job_orders.update_one(
+                        {"id": job_id},
+                        {"$set": {"shipping_booking_id": shipping_booking["id"]}}
+                    )
+                    
+                    # Create notification - Ship booking required (pop-up priority)
+                    await create_notification(
+                        event_type="SHIP_BOOKING_REQUIRED",
+                        title=f"🚢 Ship Booking Required: {job.get('job_number')}",
+                        message=f"URGENT: Job {job.get('job_number')} requires shipping booking for export to {customer_name}. Please create booking immediately.",
+                        link="/shipping",
+                        ref_type="JOB",
+                        ref_id=job_id,
+                        target_roles=["admin", "shipping", "export"],
+                        notification_type="warning"
+                    )
+                    return True
         
         # For LOCAL orders (EXW, DDP, DAP) - Mark as ready for transport booking
         # DO NOT auto-create transport record - must be booked through Transport Planner first
@@ -1071,22 +1268,48 @@ async def create_quotation(data: QuotationCreate, current_user: dict = Depends(g
     for item in data.items:
         item_dict = item.model_dump()
         
-        # Calculate total based on packaging type
-        # For packaged items: (net_weight_kg * qty) / 1000 = MT, then MT * unit_price
-        # For Bulk: qty (assumed MT) * unit_price
-        if item.packaging != "Bulk" and item.net_weight_kg:
-            weight_mt = (item.net_weight_kg * item.quantity) / 1000
-            item_total = weight_mt * item.unit_price
-            item_dict["weight_mt"] = weight_mt
-        else:
-            # Bulk: quantity is in MT
+        # Calculate total based on U.O.M (Unit of Measure)
+        uom = item.uom or "per_mt"  # Default to per_mt for backward compatibility
+        
+        # If U.O.M is not set, infer from packaging
+        if not item.uom or uom == "per_mt":
+            packaging = str(item.packaging or "").lower()
+            packaging_type = str(getattr(item, 'packaging_type', None) or "").lower()
+            
+            if any(keyword in packaging for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
+                uom = "per_unit"
+            elif any(keyword in packaging_type for keyword in ["drum", "carton", "pail", "ibc"]):
+                uom = "per_unit"
+            elif any(keyword in packaging for keyword in ["flexi", "iso", "tank"]):
+                uom = "per_liter"
+            elif packaging == "bulk" or packaging_type == "bulk":
+                uom = "per_mt"
+        
+        if uom == "per_unit":
+            # For cartons, pails, drums, IBC: quantity × unit_price
+            item_total = item.quantity * item.unit_price
+            # Calculate weight for container capacity checking
+            if item.net_weight_kg:
+                weight_mt = (item.net_weight_kg * item.quantity) / 1000
+            else:
+                weight_mt = 0
+        elif uom == "per_liter":
+            # For liquid products: quantity (liters) × unit_price
+            item_total = item.quantity * item.unit_price
+            # Approximate weight (1 liter ≈ 1 kg for most liquids)
+            weight_mt = item.quantity / 1000
+        else:  # per_mt (default for bulk)
+            # For bulk: quantity (MT) × unit_price
             weight_mt = item.quantity
             item_total = item.quantity * item.unit_price
-            item_dict["weight_mt"] = weight_mt
         
+        item_dict["weight_mt"] = weight_mt
         item_dict["total"] = item_total
         items_with_total.append(item_dict)
         subtotal += item_total
+    
+    # Calculate total weight in MT (sum of all item weights)
+    total_weight_mt = sum(item.get("weight_mt", 0) for item in items_with_total)
     
     # Calculate VAT if applicable
     vat_amount = 0
@@ -1098,7 +1321,7 @@ async def create_quotation(data: QuotationCreate, current_user: dict = Depends(g
     grand_total = subtotal + vat_amount
     
     # Auto-set mode_of_transport based on order_type
-    quotation_data = data.model_dump(exclude={"items", "vat_amount", "vat_rate", "subtotal", "total"})
+    quotation_data = data.model_dump(exclude={"items", "vat_amount", "vat_rate", "subtotal", "total", "total_weight_mt"})
     if not quotation_data.get("mode_of_transport"):
         if data.order_type == "export":
             quotation_data["mode_of_transport"] = "SEA"
@@ -1111,6 +1334,7 @@ async def create_quotation(data: QuotationCreate, current_user: dict = Depends(g
         pfi_number=pfi_number,
         subtotal=subtotal,
         vat_amount=vat_amount,
+        total_weight_mt=total_weight_mt,
         vat_rate=vat_rate,
         total=grand_total,
         created_by=current_user["id"]
@@ -1139,6 +1363,22 @@ async def get_quotations_pending_finance_approval(current_user: dict = Depends(g
             {"finance_approved": False}
         ]
     }, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    
+    # Enrich quotations with costing data
+    for quotation in quotations:
+        costing = await db.costing_calculations.find_one({
+            "reference_type": "QUOTATION",
+            "reference_id": quotation.get("id")
+        }, {"_id": 0})
+        
+        if costing:
+            quotation["cost_confirmed"] = costing.get("cost_confirmed", False)
+            quotation["margin"] = costing.get("margin_amount", 0)
+            quotation["margin_percentage"] = costing.get("margin_percentage", 0)
+        else:
+            quotation["cost_confirmed"] = False
+            quotation["margin"] = None
+            quotation["margin_percentage"] = None
     
     return quotations
 
@@ -1192,18 +1432,49 @@ async def update_quotation(quotation_id: str, data: QuotationCreate, current_use
     for item in data.items:
         item_dict = item.model_dump()
         
-        if item.packaging != "Bulk" and item.net_weight_kg:
-            weight_mt = (item.net_weight_kg * item.quantity) / 1000
-            item_total = weight_mt * item.unit_price
-            item_dict["weight_mt"] = weight_mt
-        else:
+        # Calculate total based on U.O.M (Unit of Measure)
+        uom = item.uom or "per_mt"  # Default to per_mt for backward compatibility
+        
+        # If U.O.M is not set, infer from packaging
+        if not item.uom or uom == "per_mt":
+            packaging = str(item.packaging or "").lower()
+            packaging_type = str(getattr(item, 'packaging_type', None) or "").lower()
+            
+            if any(keyword in packaging for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
+                uom = "per_unit"
+            elif any(keyword in packaging_type for keyword in ["drum", "carton", "pail", "ibc"]):
+                uom = "per_unit"
+            elif any(keyword in packaging for keyword in ["flexi", "iso", "tank"]):
+                uom = "per_liter"
+            elif packaging == "bulk" or packaging_type == "bulk":
+                uom = "per_mt"
+        
+        if uom == "per_unit":
+            # For cartons, pails, drums, IBC: quantity × unit_price
+            item_total = item.quantity * item.unit_price
+            # Calculate weight for container capacity checking
+            if item.net_weight_kg:
+                weight_mt = (item.net_weight_kg * item.quantity) / 1000
+            else:
+                weight_mt = 0
+        elif uom == "per_liter":
+            # For liquid products: quantity (liters) × unit_price
+            item_total = item.quantity * item.unit_price
+            # Approximate weight (1 liter ≈ 1 kg for most liquids)
+            weight_mt = item.quantity / 1000
+        else:  # per_mt (default for bulk)
+            # For bulk: quantity (MT) × unit_price
             weight_mt = item.quantity
             item_total = item.quantity * item.unit_price
-            item_dict["weight_mt"] = weight_mt
         
+        item_dict["weight_mt"] = weight_mt
         item_dict["total"] = item_total
+        item_dict["uom"] = uom  # Ensure U.O.M is stored in item
         items_with_total.append(item_dict)
         subtotal += item_total
+    
+    # Calculate total_weight_mt from all items
+    total_weight_mt = sum(item.get("weight_mt", 0) for item in items_with_total)
     
     # Calculate VAT if applicable
     vat_amount = 0
@@ -1215,7 +1486,7 @@ async def update_quotation(quotation_id: str, data: QuotationCreate, current_use
     grand_total = subtotal + vat_amount
     
     # If this is a rejected quotation being edited, generate REV number
-    update_data = data.model_dump(exclude={"items", "vat_amount", "vat_rate", "subtotal", "total"})
+    update_data = data.model_dump(exclude={"items", "vat_amount", "vat_rate", "subtotal", "total", "total_weight_mt"})
     
     # Auto-set mode_of_transport based on order_type if not provided
     if not update_data.get("mode_of_transport"):
@@ -1229,6 +1500,7 @@ async def update_quotation(quotation_id: str, data: QuotationCreate, current_use
     update_data["vat_amount"] = vat_amount
     update_data["vat_rate"] = vat_rate
     update_data["total"] = grand_total
+    update_data["total_weight_mt"] = total_weight_mt
     
     # Generate REV number if editing a rejected quotation
     if existing_quotation.get("status") == "rejected":
@@ -1270,6 +1542,43 @@ async def approve_quotation(quotation_id: str, current_user: dict = Depends(get_
     if current_user["role"] not in ["admin", "finance"]:
         raise HTTPException(status_code=403, detail="Only finance can approve quotations")
     
+    # Get quotation first to check costing
+    quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
+    if not quotation:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+    
+    # COSTING VALIDATION: Check if costing is confirmed
+    if not quotation.get("cost_confirmed", False):
+        raise HTTPException(
+            status_code=400,
+            detail="Costing must be confirmed before approval. Please click 'Check Cost' and confirm the costing."
+        )
+    
+    # COSTING VALIDATION: Check margin
+    costing = await db.costing_calculations.find_one({
+        "reference_id": quotation_id,
+        "reference_type": "QUOTATION"
+    }, {"_id": 0})
+    
+    if costing:
+        margin_amount = costing.get("margin_amount", 0)
+        if margin_amount < 0:
+            # Auto-reject with negative margin
+            await db.quotations.update_one(
+                {"id": quotation_id},
+                {"$set": {
+                    "status": "rejected",
+                    "costing_rejection_reason": f"Negative margin: {margin_amount:.2f}. Approval blocked by system.",
+                    "rejected_by": "system",
+                    "rejected_at": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval blocked: Negative margin of {margin_amount:.2f}. Quotation has been automatically rejected."
+            )
+    
+    # Proceed with approval
     result = await db.quotations.update_one(
         {"id": quotation_id, "status": "pending"},
         {"$set": {
@@ -1281,7 +1590,7 @@ async def approve_quotation(quotation_id: str, current_user: dict = Depends(get_
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Quotation not found or already processed")
     
-    # Get quotation details
+    # Get quotation details (refresh after update)
     quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
     if quotation:
         # Send email notification and create in-app notification
@@ -1328,6 +1637,8 @@ async def check_material_availability_for_quotation(quotation: dict) -> dict:
     
     for item in items:
         product_id = item.get("product_id")
+        # Use weight_mt from quotation item (correct value in MT) instead of quantity (number of units)
+        weight_mt = item.get("weight_mt", 0)
         quantity = item.get("quantity", 0)
         packaging = item.get("packaging", "Bulk")
         # Preserve net_weight_kg from quotation - only default to 200 if not provided and not Bulk
@@ -1335,11 +1646,16 @@ async def check_material_availability_for_quotation(quotation: dict) -> dict:
         if net_weight_kg is None and packaging != "Bulk":
             net_weight_kg = 200  # Default only when needed
         
-        # Calculate total KG needed
-        if packaging != "Bulk":
+        # Calculate total KG needed - prioritize weight_mt (correct value)
+        if weight_mt > 0:
+            # Use weight_mt from quotation item (e.g., 14.8 MT = 14,800 KG)
+            total_kg = weight_mt * 1000
+        elif packaging != "Bulk":
+            # Fallback: calculate from quantity and net_weight_kg if weight_mt not available
             total_kg = quantity * (net_weight_kg or 200)
         else:
-            total_kg = quantity * 1000  # Assume quantity is in MT for bulk
+            # Fallback: assume quantity is in MT for bulk
+            total_kg = quantity * 1000
         
         # Get active product BOM
         product_bom = await db.product_boms.find_one({
@@ -1455,19 +1771,26 @@ async def check_material_availability_for_quotation(quotation: dict) -> dict:
 @api_router.put("/quotations/{quotation_id}/reject")
 async def reject_quotation(
     quotation_id: str, 
-    rejection_reason: Optional[str] = Query(None),
+    rejection_reason: str = Query(..., description="Rejection reason is required"),
     current_user: dict = Depends(get_current_user)
 ):
     if current_user["role"] not in ["admin", "finance"]:
         raise HTTPException(status_code=403, detail="Only finance can reject quotations")
     
+    if not rejection_reason or not rejection_reason.strip():
+        raise HTTPException(status_code=400, detail="Rejection reason is required")
+    
+    # Get quotation to find creator
+    quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
+    if not quotation:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+    
     update_data = {
         "status": "rejected",
         "rejected_by": current_user["id"],
-        "rejected_at": datetime.now(timezone.utc).isoformat()
+        "rejected_at": datetime.now(timezone.utc).isoformat(),
+        "rejection_reason": rejection_reason.strip()
     }
-    if rejection_reason:
-        update_data["rejection_reason"] = rejection_reason
     
     result = await db.quotations.update_one(
         {"id": quotation_id, "status": "pending"},
@@ -1475,7 +1798,22 @@ async def reject_quotation(
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Quotation not found or already processed")
-    return {"message": "Quotation rejected"}
+    
+    # Create notification for PFI creator
+    creator_id = quotation.get("created_by")
+    if creator_id:
+        await create_notification(
+            event_type="QUOTATION_REJECTED",
+            title=f"Quotation {quotation.get('pfi_number', '')} Rejected",
+            message=f"Your quotation has been rejected. Reason: {rejection_reason.strip()}",
+            link="/quotations",
+            ref_type="QUOTATION",
+            ref_id=quotation_id,
+            target_user_id=creator_id,
+            notification_type="warning"
+        )
+    
+    return {"message": "Quotation rejected", "rejection_reason": rejection_reason.strip()}
 
 @api_router.put("/quotations/{quotation_id}/revise")
 async def revise_quotation(quotation_id: str, current_user: dict = Depends(get_current_user)):
@@ -1616,6 +1954,9 @@ async def create_sales_order(data: SalesOrderCreate, current_user: dict = Depend
     
     spa_number = await generate_sequence("SPA", "sales_orders")
     
+    # Use quotation's expected_delivery_date if not provided in sales order
+    expected_delivery_date = data.expected_delivery_date or quotation.get("expected_delivery_date")
+    
     sales_order = SalesOrder(
         quotation_id=data.quotation_id,
         spa_number=spa_number,
@@ -1626,7 +1967,7 @@ async def create_sales_order(data: SalesOrderCreate, current_user: dict = Depend
         total=quotation["total"],
         total_weight_mt=quotation.get("total_weight_mt", 0.0),
         balance=quotation["total"],
-        expected_delivery_date=data.expected_delivery_date,
+        expected_delivery_date=expected_delivery_date,
         notes=data.notes,
         country_of_destination=country_of_destination
     )
@@ -1788,11 +2129,11 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
             if product_type == "TRADED":
                 # For trading products: only check finished product availability
                 if finished_product_stock >= item.quantity:
-                    item_status = "ready_for_dispatch"
+                    item_status = "ready_for_dispatch"  # Auto go to dispatch if available
                     item_needs_procurement = False
                 else:
                     # Need to procure the finished product itself
-                    item_status = "pending"
+                    item_status = "procurement"  # Changed: trading products go to procurement if material not available
                     item_needs_procurement = True
                     shortage = item.quantity - finished_product_stock
                     item_procurement_reasons.append(
@@ -1811,18 +2152,22 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                     })
             else:
                 # Manufacturing products: check finished product and BOM
-                # REQUIREMENT 5: Check if finished product is available in stock
-                # If available, set status to ready_for_dispatch automatically
-                # BUT still check raw materials for procurement needs
+                # Manufacturing products should automatically go to procurement if materials not available
+                # Then after procurement, go to production or dispatch
+                item_status = "procurement"  # Default for manufacturing - will be updated if materials available
                 if finished_product_stock >= item.quantity:
-                    item_status = "ready_for_dispatch"
-                    # Don't set item_needs_procurement = False here - let raw material check determine it
-                    # Finished product is available, but we still need to check raw materials
+                    # Finished product available - check raw materials
+                    # If raw materials are available, can go to ready_for_dispatch
+                    # If raw materials are not available, need procurement first
+                    item_status = "ready_for_dispatch"  # Will be changed to procurement if raw materials insufficient
                 else:
-                    # Check finished product stock
-                    if finished_product_stock < item.quantity:
-                        item_procurement_reasons.append(f"Stock ({finished_product_stock}) < required ({item.quantity})")
-                        item_needs_procurement = True
+                    # Finished product not available - need to produce it
+                    # Check if raw materials are available for production
+                    # If raw materials available, will go to in_production after procurement
+                    # If raw materials not available, will go to procurement first
+                    item_status = "procurement"  # Manufacturing products go to procurement if materials not available
+                    item_procurement_reasons.append(f"Stock ({finished_product_stock}) < required ({item.quantity})")
+                    item_needs_procurement = True
                 
                 # Check BOM for raw materials (ALWAYS check, even if finished product is available)
                 product_bom = await db.product_boms.find_one({
@@ -1836,12 +2181,33 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                     }, {"_id": 0}).to_list(100)
                     
                     item_packaging = item.packaging or "Bulk"
-                    if item_packaging != "Bulk":
-                        # Preserve net_weight_kg from quotation, only default to 200 if not provided
+                    
+                    # Get U.O.M from item or infer from packaging
+                    uom = item.uom if hasattr(item, 'uom') else None
+                    if not uom or uom == "per_mt":
+                        packaging_lower = item_packaging.lower()
+                        if any(keyword in packaging_lower for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
+                            uom = "per_unit"
+                        elif any(keyword in packaging_lower for keyword in ["flexi", "iso", "tank"]):
+                            uom = "per_liter"
+                        elif packaging_lower == "bulk":
+                            uom = "per_mt"
+                        else:
+                            uom = uom or "per_mt"  # Keep existing or default
+                    
+                    # Calculate finished_kg - prioritize weight_mt (correct value) over quantity calculations
+                    if item.weight_mt and item.weight_mt > 0:
+                        # Use weight_mt from quotation/sales order item (e.g., 14.8 MT = 14,800 KG)
+                        finished_kg = item.weight_mt * 1000
+                    elif uom == "per_unit":
+                        # Fallback: For cartons, drums, pails: quantity is number of units
                         net_weight = item.net_weight_kg if item.net_weight_kg is not None else 200
                         finished_kg = item.quantity * net_weight
-                    else:
-                        # Bulk: quantity is in MT, convert to KG
+                    elif uom == "per_liter":
+                        # Fallback: For liters: 1 liter ≈ 1 kg
+                        finished_kg = item.quantity
+                    else:  # per_mt
+                        # Fallback: For bulk: quantity is in MT, convert to KG
                         finished_kg = item.quantity * 1000
                     
                     for bom_item in bom_items:
@@ -1869,6 +2235,9 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                             
                             if available_raw < required_raw_qty:
                                 item_needs_procurement = True
+                                # For manufacturing products, if raw materials insufficient, set status to procurement
+                                if product_type != "TRADED":
+                                    item_status = "procurement"  # Manufacturing products go to procurement
                                 shortage = required_raw_qty - available_raw
                                 item_procurement_reasons.append(
                                     f"{material_item.get('name', 'Unknown')}: "
@@ -1907,9 +2276,20 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                 # Ensure item_needs_procurement is set if there are shortages
                 if not item_needs_procurement:
                     item_needs_procurement = True
+                # For manufacturing products, if there are material shortages, status should be procurement
+                if product_type != "TRADED":
+                    item_status = "procurement"
             elif item_needs_procurement:
                 any_needs_procurement = True
                 all_material_shortages_combined.extend(item_material_shortages)
+            
+            # Final status determination for manufacturing products
+            # If no material shortages and finished product available, go to ready_for_dispatch
+            if product_type != "TRADED":
+                if not item_needs_procurement and finished_product_stock >= item.quantity:
+                    item_status = "ready_for_dispatch"
+                elif item_needs_procurement:
+                    item_status = "procurement"
             
             # Create separate job order document for this product
             # Preserve net_weight_kg from quotation (only default to 200 if not provided and not Bulk)
@@ -2002,11 +2382,11 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
     if product_type == "TRADED":
         # For trading products: only check finished product availability
         if finished_product_stock >= required_quantity:
-            job_status = "ready_for_dispatch"
+            job_status = "ready_for_dispatch"  # Auto go to dispatch if available
             needs_procurement = False
         else:
             # Need to procure the finished product itself
-            job_status = "pending"
+            job_status = "procurement"  # Changed: trading products go to procurement if material not available
             needs_procurement = True
             shortage = required_quantity - finished_product_stock
             procurement_reason.append(
@@ -2025,11 +2405,12 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
             })
     else:
         # Manufacturing products: check finished product and BOM
-        # REQUIREMENT 5: Check if finished product is available in stock
-        # If available, set status to ready_for_dispatch automatically
+        # Manufacturing products should automatically go to procurement if materials not available
+        job_status = "procurement"  # Default for manufacturing - will be updated if materials available
         if finished_product_stock >= required_quantity:
-            job_status = "ready_for_dispatch"
-            needs_procurement = False
+            # Finished product available - check raw materials
+            # If raw materials are available, can go to ready_for_dispatch
+            job_status = "ready_for_dispatch"  # Will be changed to procurement if raw materials insufficient
         
         # STEP 2: Always check raw materials from BOM (even if finished product is available)
         # This ensures we can produce more if needed and identify procurement needs
@@ -2049,12 +2430,30 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
         packaging = data.packaging or "Bulk"
         net_weight_kg = data.net_weight_kg if hasattr(data, 'net_weight_kg') and data.net_weight_kg is not None else None
         
-        if packaging != "Bulk":
-            # Use provided net_weight_kg or default to 200
+        # Get U.O.M from data or infer from packaging
+        uom = data.uom if hasattr(data, 'uom') and data.uom else None
+        if not uom or uom == "per_mt":
+            packaging_lower = packaging.lower()
+            if any(keyword in packaging_lower for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
+                uom = "per_unit"
+            elif any(keyword in packaging_lower for keyword in ["flexi", "iso", "tank"]):
+                uom = "per_liter"
+            elif packaging_lower == "bulk":
+                uom = "per_mt"
+            else:
+                uom = uom or "per_mt"  # Keep existing or default
+        
+        # Calculate finished_kg based on U.O.M
+        if uom == "per_unit":
+            # For cartons, drums, pails: quantity is number of units
             net_weight = net_weight_kg if net_weight_kg is not None else 200
             finished_kg = required_quantity * net_weight
-        else:
-            finished_kg = required_quantity * 1000  # Bulk: quantity is in MT, convert to KG
+        elif uom == "per_liter":
+            # For liters: 1 liter ≈ 1 kg
+            finished_kg = required_quantity
+        else:  # per_mt
+            # For bulk: quantity is in MT, convert to KG
+            finished_kg = required_quantity * 1000
         
         for bom_item in bom_items:
             material_id = bom_item.get("material_item_id")
@@ -2073,6 +2472,8 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                 
                 if available_raw < required_raw_qty:
                     raw_materials_insufficient = True
+                    # For manufacturing products, if raw materials insufficient, set status to procurement
+                    job_status = "procurement"  # Manufacturing products go to procurement
                     shortage = required_raw_qty - available_raw
                     procurement_reason.append(
                         f"Raw material {material_item.get('name', 'Unknown')} "
@@ -2116,10 +2517,16 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
         if finished_product_stock < required_quantity:
             procurement_reason.insert(0, f"Finished product stock ({finished_product_stock}) < required ({required_quantity})")
             needs_procurement = True
+            job_status = "procurement"  # Manufacturing products go to procurement
         elif raw_materials_insufficient:
             # Finished product is available, but raw materials are not - need procurement for raw materials
             procurement_reason.insert(0, f"Finished product available ({finished_product_stock} >= {required_quantity}), but raw materials insufficient")
             needs_procurement = True
+            job_status = "procurement"  # Manufacturing products go to procurement
+        elif finished_product_stock >= required_quantity and not raw_materials_insufficient:
+            # Both finished product and raw materials available
+            job_status = "ready_for_dispatch"
+            needs_procurement = False
     
     # Get customer_name from sales order (which comes from quotation)
     customer_name = order.get("customer_name", "")
@@ -2304,7 +2711,12 @@ async def get_job_order(job_id: str, current_user: dict = Depends(get_current_us
 
 @api_router.post("/job-orders/{job_id}/check-availability", response_model=dict)
 async def check_job_order_availability(job_id: str, current_user: dict = Depends(get_current_user)):
-    """Re-check material availability for a job order and update status if materials are now available"""
+    """
+    Re-check availability for a job order with priority:
+    1. Check finished product stock first
+    2. If not available, check raw materials from BOM
+    3. Update status accordingly (ready_for_dispatch, pending, or procurement)
+    """
     from inventory_service import InventoryService
     
     job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
@@ -2313,18 +2725,76 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
     
     inventory_service = InventoryService(db)
     
+    # Get job details
+    product_id = job.get("product_id")
+    quantity = job.get("quantity", 0)
+    packaging = job.get("packaging", "Bulk")
+    net_weight_kg = job.get("net_weight_kg")
+    material_shortages = job.get("material_shortages", [])
+    
+    # Calculate required quantity in MT/KG
+    if packaging != "Bulk" and net_weight_kg:
+        required_mt = (quantity * net_weight_kg) / 1000
+    elif packaging == "Bulk":
+        required_mt = quantity  # Already in MT
+    else:
+        # Default calculation if net_weight_kg missing
+        required_mt = (quantity * 200) / 1000 if packaging != "Bulk" else quantity
+    
+    # STEP 1: Check finished product stock first
+    finished_product_available = False
+    if product_id:
+        finished_avail = await inventory_service.get_finished_product_availability(product_id)
+        finished_stock = finished_avail.get("available", 0)
+        # Convert stock to MT for comparison (assuming stock is in same unit as requirement)
+        # For finished products, check if we have enough stock
+        if finished_stock >= required_mt:
+            finished_product_available = True
+    
+    # If finished product is available, no need for production or procurement
+    if finished_product_available:
+        # Update job to ready_for_dispatch
+        await db.job_orders.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": "ready_for_dispatch",
+                "procurement_status": "complete",
+                "material_shortages": [],
+                "procurement_required": False
+            }}
+        )
+        
+        # Auto-route to transport
+        await ensure_dispatch_routing(job_id, job)
+        
+        # Create notification
+        await create_notification(
+            event_type="JOB_READY",
+            title=f"Job Ready: {job.get('job_number')}",
+            message=f"Finished product available in stock. Job {job.get('job_number')} ({job.get('product_name')}) is ready for dispatch.",
+            link="/transport-planner",
+            ref_type="JOB",
+            ref_id=job_id,
+            target_roles=["admin", "transport"],
+            notification_type="success"
+        )
+        
+        return {
+            "job_id": job_id,
+            "job_number": job.get("job_number"),
+            "status": "finished_product_available",
+            "new_status": "ready_for_dispatch",
+            "message": f"Finished product is available in stock. Job status updated to ready_for_dispatch. No production needed."
+        }
+    
+    # STEP 2: Finished product not available - check raw materials from BOM
     # Check if all materials are now available
     all_materials_available = True
     all_raw_materials_available = True
-    material_shortages = job.get("material_shortages", [])
     updated_shortages = []
     
     # If no shortages listed, check BOM requirements
     if not material_shortages:
-        product_id = job.get("product_id")
-        quantity = job.get("quantity", 0)
-        packaging = job.get("packaging", "Bulk")
-        net_weight_kg = job.get("net_weight_kg")
         if net_weight_kg is None and packaging != "Bulk":
             net_weight_kg = 200  # Default only when needed
         
@@ -2370,7 +2840,8 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
                             "required_qty": required_qty,
                             "available": available,
                             "shortage": shortage,
-                            "item_type": item_type
+                            "item_type": item_type,
+                            "uom": bom_item.get("uom", "KG")
                         })
     else:
         # Check each existing shortage
@@ -2396,7 +2867,8 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
                     "required_qty": required_qty,
                     "available": available,
                     "shortage": shortage_qty,
-                    "item_type": item_type
+                    "item_type": item_type,
+                    "uom": shortage.get("uom", "KG")
                 })
             # If available, don't add to updated_shortages (material is now available)
     
@@ -2420,14 +2892,14 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
             if product and product.get("type") == "TRADED":
                 is_trading_product = True
     
-    # Update job if all materials are now available
+    # Update job if all materials are now available (raw materials check)
     if all_materials_available and needs_procurement_update:
         # For trading products: set to ready_for_dispatch (no production needed)
         # For manufacturing products: set to pending (needs production scheduling)
         if is_trading_product:
             new_status = "ready_for_dispatch"
         else:
-            new_status = "pending"
+            new_status = "pending"  # Raw materials available - needs production
         
         # Update job status
         await db.job_orders.update_one(
@@ -2450,7 +2922,7 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
             notification_link = "/transport-planner"
             target_roles = ["admin", "transport"]
         else:
-            notification_message = f"Materials procured. Job {job.get('job_number')} ({job.get('product_name')}) is ready for production scheduling."
+            notification_message = f"Raw materials available. Job {job.get('job_number')} ({job.get('product_name')}) is ready for production scheduling."
             notification_link = "/production-schedule"
             target_roles = ["admin", "production"]
         
@@ -2470,7 +2942,7 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
             "job_number": job.get("job_number"),
             "status": "materials_available",
             "new_status": new_status,
-            "message": f"All materials are now available. Job status updated to {new_status}."
+            "message": f"Raw materials are available. Job status updated to {new_status}. Production needed."
         }
     elif len(updated_shortages) < len(material_shortages):
         # Some materials became available but not all
@@ -2927,7 +3399,7 @@ async def migrate_dispatch_routing():
             local_transport_created += 1
             processed += 1
         
-        # For EXPORT orders (FOB, CFR, CIF) - Create shipping booking
+        # For EXPORT orders (FOB, CFR, CIF) - Handle based on incoterm
         elif order_type == "export" and incoterm in ["FOB", "CFR", "CIF", "CIP"]:
             # Check if shipping booking already exists for this job
             existing_booking = await db.shipping_bookings.find_one(
@@ -2936,29 +3408,41 @@ async def migrate_dispatch_routing():
             )
             
             if not existing_booking:
-                # Create shipping booking
-                booking_number = await generate_sequence("SHP", "shipping_bookings")
-                shipping_booking = {
-                    "id": str(uuid.uuid4()),
-                    "booking_number": booking_number,
-                    "job_order_ids": [job_id],
-                    "customer_name": customer_name,
-                    "port_of_loading": quotation.get("port_of_loading", ""),
-                    "port_of_discharge": quotation.get("port_of_discharge", ""),
-                    "incoterm": incoterm,
-                    "status": "pending",
-                    "created_at": datetime.now(timezone.utc).isoformat()
-                }
-                await db.shipping_bookings.insert_one(shipping_booking)
-                
-                # Update job order
-                await db.job_orders.update_one(
-                    {"id": job_id},
-                    {"$set": {"shipping_booking_id": shipping_booking["id"], "booking_number": booking_number}}
-                )
-                
-                export_bookings_created += 1
-                processed += 1
+                # For FOB: Mark as awaiting customer booking (don't create booking)
+                if incoterm == "FOB":
+                    await db.job_orders.update_one(
+                        {"id": job_id},
+                        {"$set": {
+                            "shipping_booking_required": True,
+                            "shipping_booking_status": "AWAITING_CUSTOMER"
+                        }}
+                    )
+                    processed += 1
+                else:
+                    # For CFR, CIF, CIP: Create shipping booking (seller books)
+                    booking_number = await generate_sequence("SHP", "shipping_bookings")
+                    shipping_booking = {
+                        "id": str(uuid.uuid4()),
+                        "booking_number": booking_number,
+                        "job_order_ids": [job_id],
+                        "customer_name": customer_name,
+                        "port_of_loading": quotation.get("port_of_loading", "") if quotation else "",
+                        "port_of_discharge": quotation.get("port_of_discharge", "") if quotation else "",
+                        "incoterm": incoterm,
+                        "status": "pending",
+                        "booking_source": "SELLER",
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    }
+                    await db.shipping_bookings.insert_one(shipping_booking)
+                    
+                    # Update job order
+                    await db.job_orders.update_one(
+                        {"id": job_id},
+                        {"$set": {"shipping_booking_id": shipping_booking["id"], "booking_number": booking_number}}
+                    )
+                    
+                    export_bookings_created += 1
+                    processed += 1
     
     return {
         "success": True,
@@ -3625,39 +4109,315 @@ async def get_delivery_orders(current_user: dict = Depends(get_current_user)):
 
 # ==================== SHIPPING ROUTES ====================
 
+async def auto_create_transport_from_cro(booking_id: str, cro_data, booking_dict: dict, job_numbers: list, customer_name: str, current_user_id: str):
+    """Helper function to create transport schedules and dispatch schedules from CRO data"""
+    existing_schedule = await db.transport_schedules.find_one({"shipping_booking_id": booking_id})
+    
+    if existing_schedule:
+        return existing_schedule  # Already created
+    
+    # Get product names from jobs
+    product_names = []
+    for job_id in booking_dict.get("job_order_ids", []):
+        job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
+        if job:
+            if job.get("product_name"):
+                product_names.append(job["product_name"])
+            elif job.get("items") and len(job["items"]) > 0:
+                product_name_list = [
+                    item.get("product_name") 
+                    for item in job["items"] 
+                    if item.get("product_name")
+                ]
+                if product_name_list:
+                    product_names.extend(product_name_list)
+    
+    # Extract CRO data - handle both Pydantic models and dicts
+    if hasattr(cro_data, 'cutoff_date'):
+        cutoff_date_str = cro_data.cutoff_date
+        cro_number = cro_data.cro_number
+        vessel_name = cro_data.vessel_name
+        vessel_date = cro_data.vessel_date
+    else:
+        cutoff_date_str = cro_data.get('cutoff_date', '')
+        cro_number = cro_data.get('cro_number', '')
+        vessel_name = cro_data.get('vessel_name', '')
+        vessel_date = cro_data.get('vessel_date', '')
+    
+    # Create transport schedule
+    schedule_number = await generate_sequence("TRN", "transport_schedules")
+    try:
+        date_str = cutoff_date_str.split('T')[0] if 'T' in cutoff_date_str else cutoff_date_str
+        pickup_date = (datetime.fromisoformat(date_str) - timedelta(days=3)).strftime("%Y-%m-%d")
+    except (ValueError, AttributeError) as e:
+        logging.error(f"Failed to parse cutoff_date for transport schedule: {e}")
+        return None
+    
+    transport_schedule = TransportSchedule(
+        shipping_booking_id=booking_id,
+        transporter=None,
+        vehicle_type="Container Chassis",
+        pickup_date=pickup_date,
+        pickup_location="Factory",
+        schedule_number=schedule_number,
+        booking_number=booking_dict["booking_number"],
+        cro_number=cro_number,
+        vessel_name=vessel_name,
+        vessel_date=vessel_date,
+        cutoff_date=cutoff_date_str,
+        container_type=booking_dict["container_type"],
+        container_count=booking_dict["container_count"],
+        port_of_loading=booking_dict["port_of_loading"],
+        job_numbers=job_numbers,
+        product_names=product_names,
+        auto_generated=True,
+        created_by=current_user_id
+    )
+    await db.transport_schedules.insert_one(transport_schedule.model_dump())
+    
+    # Create dispatch schedule for security
+    dispatch_schedule = DispatchSchedule(
+        transport_schedule_id=transport_schedule.id,
+        schedule_number=schedule_number,
+        booking_number=booking_dict["booking_number"],
+        job_numbers=job_numbers,
+        product_names=product_names,
+        container_type=booking_dict["container_type"],
+        container_count=booking_dict["container_count"],
+        pickup_date=pickup_date,
+        expected_arrival=pickup_date,
+        vessel_date=vessel_date or "",
+        cutoff_date=cutoff_date_str
+    )
+    await db.dispatch_schedules.insert_one(dispatch_schedule.model_dump())
+    
+    # Update booking status
+    await db.shipping_bookings.update_one({"id": booking_id}, {"$set": {"status": "transport_scheduled"}})
+    
+    # Create transport_outward record for Transport Window
+    transport_out_number = await generate_sequence("TOUT", "transport_outward")
+    transport_outward = {
+        "id": str(uuid.uuid4()),
+        "transport_number": transport_out_number,
+        "shipping_booking_id": booking_id,
+        "booking_number": booking_dict["booking_number"],
+        "cro_number": cro_number,
+        "job_numbers": job_numbers,
+        "customer_name": customer_name,
+        "transport_type": "CONTAINER",
+        "container_number": None,
+        "container_type": booking_dict.get("container_type"),
+        "destination": booking_dict.get("port_of_discharge"),
+        "dispatch_date": None,
+        "delivery_date": None,
+        "status": "PENDING",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.transport_outward.insert_one(transport_outward)
+    
+    return transport_schedule
+
 @api_router.post("/shipping-bookings", response_model=ShippingBooking)
 async def create_shipping_booking(data: ShippingBookingCreate, current_user: dict = Depends(get_current_user)):
     if current_user["role"] not in ["admin", "shipping"]:
         raise HTTPException(status_code=403, detail="Only shipping can create bookings")
     
+    # ========== VALIDATION: Check for duplicate PO bookings ==========
+    if data.po_ids and len(data.po_ids) > 0:
+        for po_id in data.po_ids:
+            # Verify PO exists
+            po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+            if not po:
+                raise HTTPException(status_code=404, detail=f"Purchase Order {po_id} not found")
+            
+            # Verify PO is APPROVED
+            if po.get("status") != "APPROVED":
+                po_number = po.get("po_number", po_id)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"PO {po_number} is not APPROVED. Current status: {po.get('status')}. Only APPROVED POs can have shipping bookings."
+                )
+            
+            # Check if PO already has an active booking
+            po_number = po.get("po_number", "")
+            # Build query conditions
+            query_conditions = [
+                {"po_id": po_id},
+                {"po_ids": {"$in": [po_id]}}  # Check if po_id is in the po_ids array
+            ]
+            # Only add po_number check if po_number exists and is not empty
+            if po_number:
+                query_conditions.append({"po_number": po_number})
+            
+            existing_booking = await db.shipping_bookings.find_one({
+                "$or": query_conditions,
+                "status": {"$nin": ["cancelled", "deleted"]}  # Exclude cancelled bookings
+            }, {"_id": 0, "booking_number": 1, "id": 1, "status": 1, "po_id": 1, "po_ids": 1, "po_number": 1})
+            
+            if existing_booking:
+                po_number = po.get("po_number", po_id)
+                existing_booking_num = existing_booking.get("booking_number", existing_booking.get("id", "Unknown"))
+                existing_status = existing_booking.get("status", "unknown")
+                # Determine which field matched
+                matched_field = "unknown"
+                if existing_booking.get("po_id") == po_id:
+                    matched_field = "po_id"
+                elif existing_booking.get("po_ids") and po_id in existing_booking.get("po_ids", []):
+                    matched_field = "po_ids array"
+                elif existing_booking.get("po_number") == po_number:
+                    matched_field = "po_number"
+                
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"PO {po_number} (ID: {po_id}) already has an active shipping booking: {existing_booking_num} (status: {existing_status}, matched by: {matched_field}). Please use the existing booking or cancel it first."
+                )
+    
+    # ========== VALIDATION: Check for duplicate job order bookings ==========
+    if data.job_order_ids and len(data.job_order_ids) > 0:
+        for job_id in data.job_order_ids:
+            # Verify job order exists
+            job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
+            if not job:
+                raise HTTPException(status_code=404, detail=f"Job Order {job_id} not found")
+            
+            # Check if job order already has an active booking
+            existing_booking = await db.shipping_bookings.find_one({
+                "job_order_ids": job_id,
+                "status": {"$nin": ["cancelled", "deleted"]}  # Exclude cancelled bookings
+            }, {"_id": 0, "booking_number": 1, "id": 1, "status": 1})
+            
+            if existing_booking:
+                job_number = job.get("job_number", job_id)
+                existing_booking_num = existing_booking.get("booking_number", existing_booking.get("id", "Unknown"))
+                existing_status = existing_booking.get("status", "unknown")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Job Order {job_number} already has an active shipping booking: {existing_booking_num} (status: {existing_status}). Please use the existing booking or cancel it first."
+                )
+    
     booking_number = await generate_sequence("SHP", "shipping_bookings")
-    booking = ShippingBooking(**data.model_dump(), booking_number=booking_number, created_by=current_user["id"])
-    await db.shipping_bookings.insert_one(booking.model_dump())
+    booking_data = data.model_dump()
+    
+    # Detect PO import bookings (when po_ids is provided and job_order_ids is empty)
+    is_po_import = len(data.po_ids) > 0 and len(data.job_order_ids) == 0
+    
+    if is_po_import:
+        # Set ref_type for PO imports
+        booking_data["ref_type"] = "PO_IMPORT"
+        # Get first PO ID (for backward compatibility with po_id field)
+        if data.po_ids and len(data.po_ids) > 0:
+            booking_data["po_id"] = data.po_ids[0]
+            # Enrich with PO details
+            po = await db.purchase_orders.find_one({"id": data.po_ids[0]}, {"_id": 0})
+            if po:
+                booking_data["po_number"] = po.get("po_number", "")
+                booking_data["supplier_name"] = po.get("supplier_name", "")
+                booking_data["incoterm"] = po.get("incoterm", "FOB")
+    
+    # Determine status based on whether CRO is provided upfront (FOB customer booking)
+    is_customer_booking = data.booking_source == "CUSTOMER" or (data.cro_number and data.cutoff_date)
+    
+    if is_customer_booking and data.cro_number and data.cutoff_date:
+        # Customer provided CRO upfront (FOB) - set status to cro_received
+        booking_data["status"] = "cro_received"
+        # Calculate pickup date (3 days before cutoff)
+        try:
+            date_str = data.cutoff_date.split('T')[0] if 'T' in data.cutoff_date else data.cutoff_date
+            cutoff = datetime.fromisoformat(date_str)
+            pickup = cutoff - timedelta(days=3)
+            booking_data["pickup_date"] = pickup.strftime("%Y-%m-%d")
+        except (ValueError, AttributeError):
+            pass
+    else:
+        # Seller booking (CFR/CIF) - pending until CRO received
+        booking_data["status"] = "pending"
+    
+    booking = ShippingBooking(**booking_data, booking_number=booking_number, created_by=current_user["id"])
+    booking_dict = booking.model_dump()
+    await db.shipping_bookings.insert_one(booking_dict)
+    
+    # For PO imports with CRO already provided, create import record immediately
+    if is_po_import and data.cro_number:
+        po_id = data.po_ids[0] if data.po_ids else None
+        if po_id:
+            # Check if import record already exists
+            existing_import = await db.imports.find_one({"po_id": po_id}, {"_id": 0})
+            if not existing_import:
+                import_number = await generate_sequence("IMP", "imports")
+                po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+                checklist_list = get_default_import_checklist()
+                incoterm = booking_data.get("incoterm") or (po.get("incoterm", "FOB") if po else "FOB")
+                
+                import_record = {
+                    "id": str(uuid.uuid4()),
+                    "import_number": import_number,
+                    "po_id": po_id,
+                    "po_number": po.get("po_number", "") if po else booking_data.get("po_number", ""),
+                    "supplier_name": booking_data.get("supplier_name", "") or (po.get("supplier_name", "") if po else ""),
+                    "incoterm": incoterm,
+                    "status": "PENDING_DOCS",
+                    "shipping_booking_id": booking.id,
+                    "document_checklist": checklist_list,
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+                await db.imports.insert_one(import_record)
+    
+    # Update job orders with shipping booking reference and clear awaiting status
+    for job_id in data.job_order_ids:
+        await db.job_orders.update_one(
+            {"id": job_id},
+            {
+                "$set": {
+                    "shipping_booking_id": booking.id,
+                    "shipping_booking_status": None,
+                    "shipping_booking_required": False
+                }
+            }
+        )
     
     # Get job order details for notification
     job_numbers = []
     customer_name = "Customer"
+    incoterm = None
     for job_id in data.job_order_ids:
         job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
         if job:
             job_numbers.append(job.get("job_number", ""))
+            if not incoterm:
+                incoterm = job.get("incoterm", "").upper()
             # Get customer name from sales order
             if not customer_name or customer_name == "Customer":
                 so = await db.sales_orders.find_one({"id": job.get("sales_order_id")}, {"_id": 0})
                 if so:
                     customer_name = so.get("customer_name", "Customer")
     
-    # Create notification when booking is created
-    await create_notification(
-        event_type="SHIPPING_BOOKING_CREATED",
-        title=f"Shipping Booking Created: {booking_number}",
-        message=f"New shipping booking {booking_number} created for {len(data.job_order_ids)} job order(s) ({', '.join(job_numbers[:3])}{'...' if len(job_numbers) > 3 else ''}). CRO details needed from shipping line.",
-        link="/shipping",
-        ref_type="SHIPPING_BOOKING",
-        ref_id=booking.id,
-        target_roles=["admin", "shipping", "export"],
-        notification_type="info"
-    )
+        # Create notification based on booking source
+        if is_customer_booking:
+            await create_notification(
+                event_type="SHIPPING_BOOKING_CREATED",
+                title=f"Shipping Booking Created from Customer CRO: {booking_number}",
+                message=f"Shipping booking {booking_number} created from customer-provided CRO for {len(data.job_order_ids)} job order(s) ({', '.join(job_numbers[:3])}{'...' if len(job_numbers) > 3 else ''}). Please add CRO details to complete booking.",
+                link="/shipping",
+                ref_type="SHIPPING_BOOKING",
+                ref_id=booking.id,
+                target_roles=["admin", "shipping", "export"],
+                notification_type="success"
+            )
+            
+            # REMOVED: Auto-creation of transport schedule on booking creation
+            # Transport schedules should only be created when CRO is updated via update_cro endpoint
+            # This prevents premature transport creation before all details are confirmed
+    else:
+        await create_notification(
+            event_type="SHIPPING_BOOKING_CREATED",
+            title=f"Shipping Booking Created: {booking_number}",
+            message=f"New shipping booking {booking_number} created for {len(data.job_order_ids)} job order(s) ({', '.join(job_numbers[:3])}{'...' if len(job_numbers) > 3 else ''}). CRO details needed from shipping line.",
+            link="/shipping",
+            ref_type="SHIPPING_BOOKING",
+            ref_id=booking.id,
+            target_roles=["admin", "shipping", "export"],
+            notification_type="info"
+        )
     
     return booking
 
@@ -3668,6 +4428,54 @@ async def get_shipping_bookings(status: Optional[str] = None, current_user: dict
         query["status"] = status
     bookings = await db.shipping_bookings.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return bookings
+
+@api_router.post("/shipping-bookings/cleanup-orphaned")
+async def cleanup_orphaned_bookings(current_user: dict = Depends(get_current_user)):
+    """Clean up bookings that reference non-existent POs or job orders"""
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can cleanup bookings")
+    
+    all_bookings = await db.shipping_bookings.find({}, {"_id": 0}).to_list(1000)
+    orphaned = []
+    
+    for booking in all_bookings:
+        issues = []
+        
+        # Check PO references
+        if booking.get("po_id") or booking.get("po_ids"):
+            po_ids = []
+            if booking.get("po_id"):
+                po_ids.append(booking.get("po_id"))
+            if booking.get("po_ids") and isinstance(booking.get("po_ids"), list):
+                po_ids.extend(booking.get("po_ids"))
+            
+            for po_id in po_ids:
+                if po_id:
+                    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+                    if not po:
+                        issues.append(f"PO {po_id} not found")
+        
+        # Check job order references
+        if booking.get("job_order_ids") and isinstance(booking.get("job_order_ids"), list):
+            for job_id in booking.get("job_order_ids", []):
+                if job_id:
+                    job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
+                    if not job:
+                        issues.append(f"Job Order {job_id} not found")
+        
+        if issues:
+            orphaned.append({
+                "booking_number": booking.get("booking_number", "Unknown"),
+                "booking_id": booking.get("id"),
+                "status": booking.get("status", "unknown"),
+                "issues": issues
+            })
+    
+    return {
+        "orphaned_count": len(orphaned),
+        "orphaned_bookings": orphaned,
+        "message": f"Found {len(orphaned)} booking(s) with orphaned references"
+    }
 
 @api_router.get("/shipping-bookings/{booking_id}")
 async def get_shipping_booking(booking_id: str, current_user: dict = Depends(get_current_user)):
@@ -3703,12 +4511,34 @@ async def update_shipping_cro(booking_id: str, data: ShippingBookingUpdate, curr
             update_data[k] = v
     
     # Calculate pickup date (3 days before cutoff)
-    if data.cutoff_date:
-        cutoff = datetime.fromisoformat(data.cutoff_date)
-        pickup = cutoff - timedelta(days=3)
-        update_data["pickup_date"] = pickup.strftime("%Y-%m-%d")
+    # Use cutoff_date from update data, or fall back to existing booking cutoff_date
+    cutoff_date_to_use = data.cutoff_date or booking.get("cutoff_date")
+    if cutoff_date_to_use:
+        try:
+            # Handle date format - remove timezone if present for ISO format
+            date_str = cutoff_date_to_use.split('T')[0] if 'T' in cutoff_date_to_use else cutoff_date_to_use
+            cutoff = datetime.fromisoformat(date_str)
+            pickup = cutoff - timedelta(days=3)
+            update_data["pickup_date"] = pickup.strftime("%Y-%m-%d")
+        except (ValueError, AttributeError) as e:
+            # Log error but don't fail the update if date parsing fails
+            logging.warning(f"Failed to parse cutoff_date '{cutoff_date_to_use}': {e}")
+    
+    # CRITICAL: Detect PO import BEFORE updating booking - check ref_type OR if booking has po_id/po_ids but no job_order_ids
+    # This must be done BEFORE any updates to ensure correct detection and prevent transport schedule creation
+    is_po_import = booking.get("ref_type") == "PO_IMPORT" or (
+        (booking.get("po_id") or (booking.get("po_ids") and len(booking.get("po_ids")) > 0)) 
+        and (not booking.get("job_order_ids") or len(booking.get("job_order_ids")) == 0)
+    )
+    
+    # If booking doesn't have ref_type but is detected as PO import, update it
+    if is_po_import and not booking.get("ref_type"):
+        update_data["ref_type"] = "PO_IMPORT"
+        booking["ref_type"] = "PO_IMPORT"
     
     # Update status to cro_received if CRO number provided
+    # IMPORTANT: For PO imports, status should stay as "cro_received" and NOT change to "transport_scheduled"
+    # Transport schedules are ONLY for export bookings (job orders), NOT for PO imports
     if data.cro_number and booking.get("status") == "pending":
         update_data["status"] = "cro_received"
     
@@ -3721,49 +4551,65 @@ async def update_shipping_cro(booking_id: str, data: ShippingBookingUpdate, curr
     if hasattr(data, 'gate_in_date') and data.gate_in_date is not None:
         update_data["gate_in_date"] = data.gate_in_date
     
+    # Update booking with all changes (including ref_type if needed)
     await db.shipping_bookings.update_one({"id": booking_id}, {"$set": update_data})
     
-    # Auto-generate transport schedule if CRO received and cutoff set
-    if data.cro_number and data.cutoff_date:
-        existing_schedule = await db.transport_schedules.find_one({"shipping_booking_id": booking_id})
+    # CRITICAL: If this is a PO import that was incorrectly set to "transport_scheduled", fix it
+    # Also clean up any incorrectly created transport schedules
+    if is_po_import:
+        # Get transport schedule IDs before deleting them (for cleaning up dispatch schedules)
+        transport_schedules = await db.transport_schedules.find({"shipping_booking_id": booking_id}, {"_id": 0, "id": 1}).to_list(100)
+        transport_schedule_ids = [s["id"] for s in transport_schedules]
         
-        if not existing_schedule:
-            # Get job order details
+        # Ensure status is NOT "transport_scheduled" for PO imports
+        if booking.get("status") == "transport_scheduled" or update_data.get("status") == "transport_scheduled":
+            await db.shipping_bookings.update_one(
+                {"id": booking_id},
+                {"$set": {"status": "cro_received"}}
+            )
+            booking["status"] = "cro_received"
+        
+        # Delete any incorrectly created transport schedules for this PO import booking
+        if transport_schedule_ids:
+            await db.transport_schedules.delete_many({"shipping_booking_id": booking_id})
+            # Delete associated dispatch schedules
+            await db.dispatch_schedules.delete_many({"transport_schedule_id": {"$in": transport_schedule_ids}})
+        
+        # Also delete transport_outward records that were incorrectly created
+        await db.transport_outward.delete_many({"shipping_booking_id": booking_id})
+    
+    # IMPORTANT: For PO imports, status should remain "cro_received" and NOT change to "transport_scheduled"
+    # Transport schedules are ONLY for export bookings (job orders), NOT for PO imports
+    # PO imports should only create import records, not transport schedules
+    
+    # CRITICAL: Only create transport schedules for EXPORT bookings (job orders), NOT for PO imports
+    # PO imports should NOT create transport schedules - they only create import records
+    if data.cro_number and data.cutoff_date and not is_po_import:
+        # Verify this is actually an export booking (has job_order_ids)
+        if booking.get("job_order_ids") and len(booking.get("job_order_ids")) > 0:
+            # Get job order details for notifications (export bookings only)
             job_numbers = []
-            product_names = []
+            customer_name = ""
             for job_id in booking.get("job_order_ids", []):
                 job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
                 if job:
-                    job_numbers.append(job["job_number"])
-                    product_names.append(job["product_name"])
+                    if job.get("job_number"):
+                        job_numbers.append(job["job_number"])
+                    if not customer_name:
+                        so = await db.sales_orders.find_one({"id": job.get("sales_order_id")}, {"_id": 0})
+                        if so:
+                            customer_name = so.get("customer_name", "")
             
-            # Create transport schedule
-            schedule_number = await generate_sequence("TRN", "transport_schedules")
-            pickup_date = (datetime.fromisoformat(data.cutoff_date) - timedelta(days=3)).strftime("%Y-%m-%d")
+            # Use helper function to create transport/dispatch schedules (for export bookings ONLY)
+            transport_schedule_obj = await auto_create_transport_from_cro(booking_id, data, booking, job_numbers, customer_name, current_user["id"])
+        else:
+            transport_schedule_obj = None
+        
+        # Create notifications (only for export bookings with transport schedules)
+        if transport_schedule_obj:
+            schedule_num = transport_schedule_obj.schedule_number
+            pickup_date = transport_schedule_obj.pickup_date
             
-            transport_schedule = TransportSchedule(
-                shipping_booking_id=booking_id,
-                transporter=None,
-                vehicle_type="Container Chassis",
-                pickup_date=pickup_date,
-                pickup_location="Factory",
-                schedule_number=schedule_number,
-                booking_number=booking["booking_number"],
-                cro_number=data.cro_number,
-                vessel_name=data.vessel_name,
-                vessel_date=data.vessel_date,
-                cutoff_date=data.cutoff_date,
-                container_type=booking["container_type"],
-                container_count=booking["container_count"],
-                port_of_loading=booking["port_of_loading"],
-                job_numbers=job_numbers,
-                product_names=product_names,
-                auto_generated=True,
-                created_by=current_user["id"]
-            )
-            await db.transport_schedules.insert_one(transport_schedule.model_dump())
-            
-            # Create notification for CRO received
             await create_notification(
                 event_type="CRO_RECEIVED",
                 title=f"CRO Received: {data.cro_number}",
@@ -3775,84 +4621,135 @@ async def update_shipping_cro(booking_id: str, data: ShippingBookingUpdate, curr
                 notification_type="success"
             )
             
-            # Create notification for transport booking required
             await create_notification(
                 event_type="TRANSPORT_BOOKING_REQUIRED",
-                title=f"Transport Booking Required: {schedule_number}",
+                title=f"Transport Booking Required: {schedule_num}",
                 message=f"CRO {data.cro_number} received. Transport booking required for pickup on {pickup_date}. Please assign transporter and vehicle via Transport Planner.",
                 link="/transport-planner",
                 ref_type="TRANSPORT_SCHEDULE",
-                ref_id=transport_schedule.id,
+                ref_id=transport_schedule_obj.id,
                 target_roles=["admin", "transport", "dispatch"],
                 notification_type="info"
             )
             
-            # Create dispatch schedule for security
-            dispatch_schedule = DispatchSchedule(
-                transport_schedule_id=transport_schedule.id,
-                schedule_number=schedule_number,
-                booking_number=booking["booking_number"],
-                job_numbers=job_numbers,
-                product_names=product_names,
-                container_type=booking["container_type"],
-                container_count=booking["container_count"],
-                pickup_date=pickup_date,
-                expected_arrival=pickup_date,  # Same day arrival at factory
-                vessel_date=data.vessel_date or "",
-                cutoff_date=data.cutoff_date
-            )
-            await db.dispatch_schedules.insert_one(dispatch_schedule.model_dump())
+            dispatch_schedule = await db.dispatch_schedules.find_one({"transport_schedule_id": transport_schedule_obj.id}, {"_id": 0, "id": 1})
+            if dispatch_schedule:
+                await create_notification(
+                    event_type="CONTAINER_LOADING_SCHEDULED",
+                    title="Container Loading Scheduled",
+                    message=f"Container loading scheduled: {schedule_num} - Pickup on {pickup_date}. {len(job_numbers)} job order(s) to load.",
+                    link="/loading-unloading",
+                    ref_type="dispatch_schedule",
+                    ref_id=dispatch_schedule.get("id", ""),
+                    target_roles=["admin", "warehouse", "security", "production"],
+                    notification_type="info"
+                )
             
-            # Create notification for container loading scheduled
-            await create_notification(
-                event_type="CONTAINER_LOADING_SCHEDULED",
-                title="Container Loading Scheduled",
-                message=f"Container loading scheduled: {schedule_number} - Pickup on {pickup_date}. {len(job_numbers)} job order(s) to load.",
-                link="/loading-unloading",
-                ref_type="dispatch_schedule",
-                ref_id=dispatch_schedule.id,
-                target_roles=["admin", "warehouse", "security", "production"],
-                notification_type="info"
-            )
-            
-            # Update booking status
-            await db.shipping_bookings.update_one({"id": booking_id}, {"$set": {"status": "transport_scheduled"}})
-            
-            # Send email notification to Transport and Security
+            # Send email notification
             updated_booking = await db.shipping_bookings.find_one({"id": booking_id}, {"_id": 0})
-            await notify_cro_received(updated_booking, transport_schedule.model_dump())
-            
-            # Create transport_outward record for Transport Window
-            transport_out_number = await generate_sequence("TOUT", "transport_outward")
-            # Get customer from first job order
-            customer_name = ""
-            if booking.get("job_order_ids"):
-                first_job = await db.job_orders.find_one({"id": booking["job_order_ids"][0]}, {"_id": 0})
-                if first_job:
-                    so = await db.sales_orders.find_one({"id": first_job.get("sales_order_id")}, {"_id": 0})
-                    if so:
-                        customer_name = so.get("customer_name", "")
-            
-            transport_outward = {
-                "id": str(uuid.uuid4()),
-                "transport_number": transport_out_number,
-                "shipping_booking_id": booking_id,
-                "booking_number": booking["booking_number"],
-                "cro_number": data.cro_number,
-                "job_numbers": job_numbers,
-                "customer_name": customer_name,
-                "transport_type": "CONTAINER",
-                "container_number": None,
-                "container_type": booking.get("container_type"),
-                "destination": booking.get("port_of_discharge"),
-                "dispatch_date": None,
-                "delivery_date": None,
-                "status": "PENDING",
-                "created_at": datetime.now(timezone.utc).isoformat()
-            }
-            await db.transport_outward.insert_one(transport_outward)
+            if updated_booking:
+                await notify_cro_received(updated_booking, transport_schedule_obj.model_dump())
     
-    return {"message": "CRO details updated and transport schedule generated"}
+    # Handle PO import bookings - route to Import Window after CRO is received
+    # Create import record for ALL PO_IMPORT bookings (not just FOB) when CRO is saved
+    if is_po_import and data.cro_number:
+        # Get PO ID from booking - could be po_id (singular), first from po_ids (array), or ref_id (legacy)
+        po_id = booking.get("po_id") or (booking.get("po_ids") and len(booking.get("po_ids")) > 0 and booking.get("po_ids")[0]) or booking.get("ref_id")
+        
+        # If still no po_id, try to find PO by booking number or other means
+        if not po_id:
+            # Try to find PO by matching booking number in shipping_booking_id field
+            existing_import_by_booking = await db.imports.find_one({"shipping_booking_id": booking_id}, {"_id": 0, "po_id": 1})
+            if existing_import_by_booking:
+                po_id = existing_import_by_booking.get("po_id")
+            else:
+                # Try to find PO by matching supplier name and booking details
+                # This is a fallback for legacy bookings that might not have po_id set
+                if booking.get("supplier_name"):
+                    # Find POs with matching supplier that are FOB and approved
+                    matching_po = await db.purchase_orders.find_one({
+                        "supplier_name": booking.get("supplier_name"),
+                        "incoterm": {"$in": ["FOB", "fob", "Fob"]},
+                        "status": "APPROVED",
+                        "routed_to": {"$ne": "IMPORT"}  # Not already routed to import
+                    }, {"_id": 0, "id": 1, "po_number": 1}, sort=[("created_at", -1)])
+                    if matching_po:
+                        po_id = matching_po.get("id")
+                        # Update booking with found po_id
+                        await db.shipping_bookings.update_one(
+                            {"id": booking_id},
+                            {"$set": {"po_id": po_id, "po_number": matching_po.get("po_number", "")}}
+                        )
+                        booking["po_id"] = po_id
+                        booking["po_number"] = matching_po.get("po_number", "")
+        
+        if po_id:
+            # Check if import record already exists (by po_id OR by shipping_booking_id)
+            existing_import = await db.imports.find_one({
+                "$or": [
+                    {"po_id": po_id},
+                    {"shipping_booking_id": booking_id}
+                ]
+            }, {"_id": 0})
+            if not existing_import:
+                # Create import record for tracking
+                import_number = await generate_sequence("IMP", "imports")
+                po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+                
+                # Get default checklist (list format)
+                checklist_list = get_default_import_checklist()
+                
+                # Get incoterm from booking or PO (default to FOB if not specified)
+                incoterm = booking.get("incoterm") or (po.get("incoterm", "FOB") if po else "FOB")
+                
+                import_record = {
+                    "id": str(uuid.uuid4()),
+                    "import_number": import_number,
+                    "po_id": po_id,
+                    "po_number": po.get("po_number", "") if po else booking.get("po_number", ""),
+                    "supplier_name": booking.get("supplier_name", "") or (po.get("supplier_name", "") if po else ""),
+                    "incoterm": incoterm,
+                    "status": "PENDING_DOCS",  # Start as PENDING_DOCS when CRO received - user needs to track documents
+                    "shipping_booking_id": booking_id,
+                    "document_checklist": checklist_list,  # Use list format as per ImportRecord model
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+                await db.imports.insert_one(import_record)
+                
+                # Update PO routing
+                await db.purchase_orders.update_one(
+                    {"id": po_id},
+                    {"$set": {
+                        "routed_to": "IMPORT",
+                        "routed_at": datetime.now(timezone.utc).isoformat()
+                    }}
+                )
+                
+                # Create notification
+                await create_notification(
+                    event_type="IMPORT_RECORD_CREATED",
+                    title=f"Import Record Created: {import_number}",
+                    message=f"PO {booking.get('po_number', '')} shipping booked. Import record {import_number} created. Track shipment and collect import documents.",
+                    link="/import-window",
+                    ref_type="IMPORT",
+                    ref_id=import_record["id"],
+                    target_roles=["admin", "procurement", "finance"],
+                    notification_type="info"
+                )
+        
+        # Create notification for PO import shipping booked
+        await create_notification(
+            event_type="CRO_RECEIVED",
+            title=f"CRO Received for PO Import: {data.cro_number}",
+            message=f"CRO {data.cro_number} received for PO {booking.get('po_number', '')}. Shipping booked. Import tracking will be created.",
+            link="/shipping",
+            ref_type="SHIPPING_BOOKING",
+            ref_id=booking_id,
+            target_roles=["admin", "shipping", "procurement"],
+            notification_type="success"
+        )
+    
+    return {"message": "CRO details updated" + ("" if is_po_import else " and transport schedule generated")}
 
 @api_router.put("/shipping-bookings/{booking_id}")
 async def update_shipping_booking(booking_id: str, cro_number: Optional[str] = None, status: Optional[str] = None, current_user: dict = Depends(get_current_user)):
@@ -4849,6 +5746,435 @@ async def get_procurement_list(current_user: dict = Depends(get_current_user)):
         "procurement_list": procurement_list
     }
 
+# ==================== PRODUCTION LOGS ====================
+
+@api_router.post("/production/logs", response_model=ProductionLog)
+async def create_production_log(data: ProductionLogCreate, current_user: dict = Depends(get_current_user)):
+    """Create a production log entry"""
+    if current_user["role"] not in ["admin", "production"]:
+        raise HTTPException(status_code=403, detail="Only admin/production can create production logs")
+    
+    log = ProductionLog(**data.model_dump(), created_by=current_user["id"])
+    await db.production_logs.insert_one(log.model_dump())
+    
+    # Update job order with batch number from production log
+    await db.job_orders.update_one(
+        {"id": data.job_order_id},
+        {"$set": {"batch_number": data.batch_number}}
+    )
+    
+    # Update job order status if production is complete
+    job_order = await db.job_orders.find_one({"id": data.job_order_id}, {"_id": 0})
+    if job_order:
+        # Calculate total produced for this job order item
+        existing_logs = await db.production_logs.find(
+            {"job_order_id": data.job_order_id, "product_id": data.product_id},
+            {"_id": 0}
+        ).to_list(1000)
+        
+        total_produced = sum(log_entry.get("quantity_produced", 0) for log_entry in existing_logs)
+        
+        # Find the item in job order
+        items = job_order.get("items", [])
+        if not items:
+            # Handle legacy single product structure
+            if job_order.get("product_id") == data.product_id:
+                required_qty = job_order.get("quantity", 0)
+                if total_produced >= required_qty:
+                    # Production is complete - update status and create GRN
+                    await db.job_orders.update_one(
+                        {"id": data.job_order_id},
+                        {"$set": {"status": "ready_for_dispatch"}}
+                    )
+                    
+                    # Automatically create GRN to add finished goods to inventory
+                    try:
+                        # Get product details
+                        product = await db.products.find_one({"id": data.product_id}, {"_id": 0})
+                        product_name = product.get("name", data.product_name) if product else data.product_name
+                        product_sku = product.get("sku", "-") if product else "-"
+                        product_unit = product.get("unit", "KG") if product else "KG"
+                        
+                        # Get net_weight_kg from job order for drum-to-MT conversion
+                        packaging = job_order.get("packaging", "").upper()
+                        net_weight_kg = job_order.get("net_weight_kg")
+                        
+                        # If packaging is not Bulk and net_weight_kg exists, convert drums to MT/KG
+                        if packaging != "BULK" and net_weight_kg and net_weight_kg > 0:
+                            # Convert drums to KG first
+                            total_kg = required_qty * net_weight_kg
+                            # Then convert to MT if product unit is MT
+                            if product_unit.upper() == "MT":
+                                grn_quantity = total_kg / 1000
+                                grn_unit = "MT"
+                            else:
+                                grn_quantity = total_kg
+                                grn_unit = "KG"
+                        else:
+                            # Bulk packaging - use required_qty as-is
+                            grn_quantity = required_qty
+                            grn_unit = product_unit
+                        
+                        # Create GRN
+                        grn_number = await generate_sequence("GRN", "grn")
+                        grn_item = GRNItem(
+                            product_id=data.product_id,
+                            product_name=product_name,
+                            sku=product_sku,
+                            quantity=grn_quantity,
+                            unit=grn_unit
+                        )
+                        grn_data = GRNCreate(
+                            supplier="INTERNAL PRODUCTION",
+                            items=[grn_item],
+                            notes=f"Production completion for {job_order.get('job_number', 'N/A')} - Auto-generated from production log"
+                        )
+                        grn = GRN(**grn_data.model_dump(), grn_number=grn_number, received_by=current_user["id"])
+                        await db.grn.insert_one(grn.model_dump())
+                        
+                        # Update inventory - ADD finished goods
+                        item_id_for_balance = await find_inventory_item_id(
+                            data.product_id, 
+                            product_name, 
+                            product_sku
+                        )
+                        
+                        # Get inventory item and product for unit conversion
+                        inventory_item = await db.inventory_items.find_one({"id": item_id_for_balance}, {"_id": 0})
+                        
+                        # Determine the inventory item's unit
+                        if inventory_item:
+                            inventory_item_unit = inventory_item.get("uom", "KG").upper()
+                        elif product:
+                            inventory_item_unit = product.get("unit", "KG").upper()
+                        else:
+                            inventory_item_unit = "KG"
+                        
+                        # Convert GRN quantity to match inventory item's unit
+                        grn_unit_upper = grn_unit.upper()
+                        if inventory_item_unit == "KG":
+                            if grn_unit_upper == "MT":
+                                quantity_to_add = grn_quantity * 1000
+                            else:
+                                quantity_to_add = grn_quantity
+                        elif inventory_item_unit == "MT":
+                            if grn_unit_upper == "KG":
+                                quantity_to_add = grn_quantity / 1000
+                            else:
+                                quantity_to_add = grn_quantity
+                        else:
+                            quantity_to_add = grn_quantity if grn_unit_upper == "KG" else grn_quantity * 1000
+                        
+                        # Update products table
+                        if product:
+                            prev_stock = product.get("current_stock", 0)
+                            new_stock = prev_stock + quantity_to_add
+                            await db.products.update_one({"id": data.product_id}, {"$set": {"current_stock": new_stock}})
+                            
+                            # Create inventory movement record
+                            movement = InventoryMovement(
+                                product_id=data.product_id,
+                                product_name=product_name,
+                                sku=product_sku,
+                                movement_type="production_complete",
+                                quantity=quantity_to_add,
+                                reference_type="grn",
+                                reference_id=grn.id,
+                                reference_number=grn_number,
+                                previous_stock=prev_stock,
+                                new_stock=new_stock,
+                                created_by=current_user["id"]
+                            )
+                            await db.inventory_movements.insert_one(movement.model_dump())
+                        
+                        # Update inventory_balances
+                        await db.inventory_balances.update_one(
+                            {"item_id": item_id_for_balance},
+                            {"$inc": {"on_hand": quantity_to_add}},
+                            upsert=True
+                        )
+                        
+                        # Also update inventory_balances using product_id directly if different
+                        if product and data.product_id != item_id_for_balance:
+                            await db.inventory_balances.update_one(
+                                {"item_id": data.product_id},
+                                {"$inc": {"on_hand": quantity_to_add}},
+                                upsert=True
+                            )
+                    except Exception as e:
+                        # Log error but don't fail the production log creation
+                        logging.error(f"Failed to create GRN for completed production: {str(e)}")
+        else:
+            # Handle new multi-item structure
+            for item in items:
+                if item.get("product_id") == data.product_id:
+                    required_qty = item.get("quantity", 0)
+                    if total_produced >= required_qty:
+                        # Mark this item as complete
+                        await db.job_orders.update_one(
+                            {"id": data.job_order_id, "items.product_id": data.product_id},
+                            {"$set": {"items.$.production_completed": True}}
+                        )
+                        
+                        # Automatically create GRN for this completed item
+                        try:
+                            # Get product details
+                            product = await db.products.find_one({"id": data.product_id}, {"_id": 0})
+                            product_name = product.get("name", data.product_name) if product else data.product_name
+                            product_sku = product.get("sku", "-") if product else "-"
+                            product_unit = product.get("unit", "KG") if product else "KG"
+                            
+                            # Get net_weight_kg from job order item for drum-to-MT conversion
+                            packaging = item.get("packaging", job_order.get("packaging", "")).upper()
+                            net_weight_kg = item.get("net_weight_kg")
+                            
+                            # If packaging is not Bulk and net_weight_kg exists, convert drums to MT/KG
+                            if packaging != "BULK" and net_weight_kg and net_weight_kg > 0:
+                                # Convert drums to KG first
+                                total_kg = required_qty * net_weight_kg
+                                # Then convert to MT if product unit is MT
+                                if product_unit.upper() == "MT":
+                                    grn_quantity = total_kg / 1000
+                                    grn_unit = "MT"
+                                else:
+                                    grn_quantity = total_kg
+                                    grn_unit = "KG"
+                            else:
+                                # Bulk packaging - use required_qty as-is
+                                grn_quantity = required_qty
+                                grn_unit = product_unit
+                            
+                            # Create GRN for this item
+                            grn_number = await generate_sequence("GRN", "grn")
+                            grn_item = GRNItem(
+                                product_id=data.product_id,
+                                product_name=product_name,
+                                sku=product_sku,
+                                quantity=grn_quantity,
+                                unit=grn_unit
+                            )
+                            grn_data = GRNCreate(
+                                supplier="INTERNAL PRODUCTION",
+                                items=[grn_item],
+                                notes=f"Production completion for {job_order.get('job_number', 'N/A')} - Item: {product_name} - Auto-generated from production log"
+                            )
+                            grn = GRN(**grn_data.model_dump(), grn_number=grn_number, received_by=current_user["id"])
+                            await db.grn.insert_one(grn.model_dump())
+                            
+                            # Update inventory - same logic as above
+                            item_id_for_balance = await find_inventory_item_id(
+                                data.product_id, 
+                                product_name, 
+                                product_sku
+                            )
+                            
+                            inventory_item = await db.inventory_items.find_one({"id": item_id_for_balance}, {"_id": 0})
+                            
+                            if inventory_item:
+                                inventory_item_unit = inventory_item.get("uom", "KG").upper()
+                            elif product:
+                                inventory_item_unit = product.get("unit", "KG").upper()
+                            else:
+                                inventory_item_unit = "KG"
+                            
+                            grn_unit_upper = grn_unit.upper()
+                            if inventory_item_unit == "KG":
+                                if grn_unit_upper == "MT":
+                                    quantity_to_add = grn_quantity * 1000
+                                else:
+                                    quantity_to_add = grn_quantity
+                            elif inventory_item_unit == "MT":
+                                if grn_unit_upper == "KG":
+                                    quantity_to_add = grn_quantity / 1000
+                                else:
+                                    quantity_to_add = grn_quantity
+                            else:
+                                quantity_to_add = grn_quantity if grn_unit_upper == "KG" else grn_quantity * 1000
+                            
+                            if product:
+                                prev_stock = product.get("current_stock", 0)
+                                new_stock = prev_stock + quantity_to_add
+                                await db.products.update_one({"id": data.product_id}, {"$set": {"current_stock": new_stock}})
+                                
+                                movement = InventoryMovement(
+                                    product_id=data.product_id,
+                                    product_name=product_name,
+                                    sku=product_sku,
+                                    movement_type="production_complete",
+                                    quantity=quantity_to_add,
+                                    reference_type="grn",
+                                    reference_id=grn.id,
+                                    reference_number=grn_number,
+                                    previous_stock=prev_stock,
+                                    new_stock=new_stock,
+                                    created_by=current_user["id"]
+                                )
+                                await db.inventory_movements.insert_one(movement.model_dump())
+                            
+                            await db.inventory_balances.update_one(
+                                {"item_id": item_id_for_balance},
+                                {"$inc": {"on_hand": quantity_to_add}},
+                                upsert=True
+                            )
+                            
+                            if product and data.product_id != item_id_for_balance:
+                                await db.inventory_balances.update_one(
+                                    {"item_id": data.product_id},
+                                    {"$inc": {"on_hand": quantity_to_add}},
+                                    upsert=True
+                                )
+                        except Exception as e:
+                            logging.error(f"Failed to create GRN for completed production item: {str(e)}")
+                        
+                        # Check if all items are complete
+                        all_items_complete = True
+                        for job_item in items:
+                            if not job_item.get("production_completed", False):
+                                # Check if production is complete via logs
+                                item_logs = await db.production_logs.find(
+                                    {"job_order_id": data.job_order_id, "product_id": job_item.get("product_id")},
+                                    {"_id": 0}
+                                ).to_list(1000)
+                                item_produced = sum(log_entry.get("quantity_produced", 0) for log_entry in item_logs)
+                                if item_produced < job_item.get("quantity", 0):
+                                    all_items_complete = False
+                                    break
+                        
+                        if all_items_complete:
+                            await db.job_orders.update_one(
+                                {"id": data.job_order_id},
+                                {"$set": {"status": "ready_for_dispatch"}}
+                            )
+    
+    return log
+
+@api_router.get("/production/logs", response_model=List[ProductionLog])
+async def get_production_logs(
+    job_order_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get production logs with optional filters"""
+    query = {}
+    if job_order_id:
+        query["job_order_id"] = job_order_id
+    if product_id:
+        query["product_id"] = product_id
+    
+    logs = await db.production_logs.find(query, {"_id": 0}).sort("production_date", -1).to_list(1000)
+    return logs
+
+@api_router.get("/production/jobs-by-category")
+async def get_jobs_by_category(
+    category: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get job orders filtered by product category (Filling Jobs, Lubricants, Plasticisers, Jelly)"""
+    # Get all job orders with status in_production, approved, or pending
+    jobs = await db.job_orders.find(
+        {"status": {"$in": ["approved", "in_production", "pending", "production_completed"]}},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(1000)
+    
+    # Filter by category
+    filtered_jobs = []
+    for job in jobs:
+        # Handle both single product (legacy) and multi-item structure
+        items = job.get("items", [])
+        if not items:
+            # Legacy single product structure
+            should_include = False
+            
+            if category == "filling_jobs":
+                # Filling jobs: jobs with drum packaging (bulk to drums)
+                packaging = (job.get("packaging", "") or "").upper()
+                packaging_type = (job.get("packaging_type", "") or "").upper()
+                # Check if packaging contains "DRUM" or packaging_type is "DRUM"
+                # Also include if packaging is not "Bulk" (assuming non-bulk means drums)
+                should_include = "DRUM" in packaging or packaging_type == "DRUM" or (packaging and packaging != "BULK" and packaging != "")
+            elif category == "lubricants":
+                product_name = job.get("product_name", "").lower()
+                should_include = any(pattern in product_name for pattern in ["lubricant", "lube", "grease"])
+            elif category == "plasticisers":
+                product_name = job.get("product_name", "").lower()
+                should_include = any(pattern in product_name for pattern in ["plasticiser", "plasticizer", "plastic"])
+            elif category == "jelly":
+                product_name = job.get("product_name", "").lower()
+                should_include = any(pattern in product_name for pattern in ["jelly", "gel", "jell"])
+            
+            if should_include:
+                # Get production logs for this job
+                logs = await db.production_logs.find(
+                    {"job_order_id": job["id"], "product_id": job.get("product_id")},
+                    {"_id": 0}
+                ).to_list(1000)
+                
+                total_produced = sum(log.get("quantity_produced", 0) for log in logs)
+                required_qty = job.get("quantity", 0)
+                pending_qty = max(0, required_qty - total_produced)
+                
+                filtered_jobs.append({
+                    "job_id": job["id"],
+                    "job_number": job.get("job_number", ""),
+                    "product_id": job.get("product_id"),
+                    "product_name": job.get("product_name"),
+                    "product_sku": job.get("product_sku"),
+                    "container": job.get("packaging", "Bulk"),
+                    "quantity": required_qty,
+                    "quantity_produced": total_produced,
+                    "quantity_pending": pending_qty,
+                    "status": job.get("status"),
+                    "delivery_date": job.get("delivery_date"),
+                    "net_weight_kg": job.get("net_weight_kg"),
+                })
+        else:
+            # New multi-item structure
+            for item in items:
+                should_include = False
+                
+                if category == "filling_jobs":
+                    # Filling jobs: jobs with drum packaging (bulk to drums)
+                    packaging = (item.get("packaging", "") or "").upper()
+                    # Check if packaging contains "DRUM" or is not "Bulk"
+                    should_include = "DRUM" in packaging or (packaging and packaging != "BULK" and packaging != "")
+                elif category == "lubricants":
+                    product_name = item.get("product_name", "").lower()
+                    should_include = any(pattern in product_name for pattern in ["lubricant", "lube", "grease"])
+                elif category == "plasticisers":
+                    product_name = item.get("product_name", "").lower()
+                    should_include = any(pattern in product_name for pattern in ["plasticiser", "plasticizer", "plastic"])
+                elif category == "jelly":
+                    product_name = item.get("product_name", "").lower()
+                    should_include = any(pattern in product_name for pattern in ["jelly", "gel", "jell"])
+                
+                if should_include:
+                    # Get production logs for this item
+                    logs = await db.production_logs.find(
+                        {"job_order_id": job["id"], "product_id": item.get("product_id")},
+                        {"_id": 0}
+                    ).to_list(1000)
+                    
+                    total_produced = sum(log.get("quantity_produced", 0) for log in logs)
+                    required_qty = item.get("quantity", 0)
+                    pending_qty = max(0, required_qty - total_produced)
+                    
+                    filtered_jobs.append({
+                        "job_id": job["id"],
+                        "job_number": job.get("job_number", ""),
+                        "product_id": item.get("product_id"),
+                        "product_name": item.get("product_name"),
+                        "product_sku": item.get("product_sku"),
+                        "container": item.get("packaging", "Bulk"),
+                        "quantity": required_qty,
+                        "quantity_produced": total_produced,
+                        "quantity_pending": pending_qty,
+                        "status": job.get("status"),
+                        "delivery_date": job.get("delivery_date"),
+                        "net_weight_kg": item.get("net_weight_kg"),
+                    })
+    
+    return {"jobs": filtered_jobs}
+
 # ==================== BLEND REPORT ====================
 
 class BlendReportCreate(BaseModel):
@@ -5311,7 +6637,7 @@ def number_to_words(num: float) -> str:
     
     return words
 
-def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = False) -> BytesIO:
+def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = False, dispatch_contact: Optional[dict] = None) -> BytesIO:
     """Generate Quotation/PFI PDF matching PHP template design"""
     buffer = BytesIO()
     # Reduced margins for single page layout
@@ -5426,9 +6752,34 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
     country_of_origin = quotation.get("country_of_origin", "UAE") or "UAE"
     
     if is_local:
-        items_header = ["#", "Description of Goods", "Container", "Qty", "Net Weight/Unit", "Unit Price", "Grand Total"]
+        items_header = ["#", "Description of Goods", "Container", "Qty", "Unit Price", "Grand Total"]
     else:
-        items_header = ["#", "Description of Goods", "Container/Tank", "Qty", "Net Weight/Unit", "Unit Price Per MT", "Grand Total"]
+        # Determine U.O.M from first item to set header
+        first_item = quotation.get("items", [{}])[0] if quotation.get("items") else {}
+        uom = first_item.get("uom") or "per_mt"
+        
+        # If U.O.M is not set, try to infer from packaging
+        if not first_item.get("uom") or uom == "per_mt":
+            packaging = str(first_item.get("packaging", "") or "").lower()
+            packaging_type = str(first_item.get("packaging_type", "") or "").lower()
+            
+            if any(keyword in packaging for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
+                uom = "per_unit"
+            elif any(keyword in packaging_type for keyword in ["drum", "carton", "pail", "ibc"]):
+                uom = "per_unit"
+            elif any(keyword in packaging for keyword in ["flexi", "iso", "tank"]):
+                uom = "per_liter"
+            elif packaging == "bulk" or packaging_type == "bulk":
+                uom = "per_mt"
+        
+        if uom == "per_unit":
+            price_header = "Unit Price Per Unit"
+        elif uom == "per_liter":
+            price_header = "Unit Price Per Liter"
+        else:  # per_mt
+            price_header = "Unit Price Per MT"
+        
+        items_header = ["#", "Description of Goods", "Container/Tank", "Qty", price_header, "Grand Total"]
     
     items_data = [items_header]
     
@@ -5443,11 +6794,39 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
             unit_price = float(item.get("unit_price", 0) or 0)
             total = float(item.get("total", qty * unit_price) or 0)
             
+            # Get U.O.M from item, or infer from packaging type
+            uom = item.get("uom") or "per_mt"
+            
+            # If U.O.M is not set or is per_mt, try to infer from packaging
+            if not item.get("uom") or uom == "per_mt":
+                packaging = str(item.get("packaging", "") or "").lower()
+                packaging_type = str(item.get("packaging_type", "") or "").lower()
+                
+                # Infer U.O.M from packaging
+                if any(keyword in packaging for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
+                    uom = "per_unit"
+                elif any(keyword in packaging_type for keyword in ["drum", "carton", "pail", "ibc"]):
+                    uom = "per_unit"
+                elif any(keyword in packaging for keyword in ["flexi", "iso", "tank"]):
+                    uom = "per_liter"  # Flexi/ISO tanks typically priced per liter
+                elif packaging == "bulk" or packaging_type == "bulk":
+                    uom = "per_mt"
+                # else keep as per_mt
+            
             # Get net weight early (needed for calculation)
             net_weight_kg = float(item.get("net_weight_kg", 0) or 0)
             
-            # Calculate Qty: (drums * net weight) / 1000
-            qtyMT = (qty * net_weight_kg) / 1000.0 if qty > 0 and net_weight_kg > 0 else 0.0
+            # Display quantity based on U.O.M
+            if uom == "per_unit":
+                # For cartons, pails, drums: show actual quantity with comma formatting
+                qty_display = f"{int(qty):,}"  # e.g., "8,000" not "8.000"
+            elif uom == "per_liter":
+                # For liters: show quantity with comma formatting
+                qty_display = f"{qty:,.0f}" if qty == int(qty) else f"{qty:,.2f}"
+            else:  # per_mt
+                # For bulk: calculate and show MT
+                qtyMT = (qty * net_weight_kg) / 1000.0 if qty > 0 and net_weight_kg > 0 else qty
+                qty_display = f"{qtyMT:,.3f}"
             
             # Product description with packaging, net weight, and country of origin (matching ViewQuote.jsx)
             product_name = str(item.get('product_name', '') or '')
@@ -5476,35 +6855,40 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
             # Use Paragraph for description to handle HTML formatting
             desc_para = Paragraph(product_desc, item_desc_style)
             
-            # Get container with count - try item.container first, then item.container_type, then quotation.container_type
-            container_type = (item.get("container") or 
-                        item.get("container_type") or 
+            # Get container with count - use container_count_per_item for per-item allocation
+            container_count_per_item = item.get("container_count_per_item")
+            container_type = (item.get("container_type") or 
                         quotation.get("container_type") or 
                         "—")
             container_type = str(container_type) if container_type != "—" else "—"
             
-            # Get container count
-            container_count = item.get("container_count") or quotation.get("container_count") or 1
-            if container_type != "—" and container_count:
-                container = f"{container_count} x {container_type}"
+            # Use per-item container count if available, otherwise fallback to packing_display or quotation total
+            if container_count_per_item and container_count_per_item > 0:
+                # Format container type for display
+                if container_type == "20ft":
+                    container_display = f"{container_count_per_item} x 20ft"
+                elif container_type == "40ft":
+                    container_display = f"{container_count_per_item} x 40ft"
+                else:
+                    container_display = f"{container_count_per_item} x {container_type}"
+                container = container_display
+            elif container_type != "—":
+                # Fallback: use packing_display if available
+                packing_display = item.get("packing_display", "")
+                if packing_display:
+                    container = packing_display
+                else:
+                    # Last fallback: use quotation container count
+                    container_count = quotation.get("container_count") or 1
+                    container = f"{container_count} x {container_type}"
             else:
-                container = container_type
-            
-            # Net Weight/Unit - get from item or calculate (for separate column)
-            if net_weight_kg:
-                net_weight_unit = f"{net_weight_kg} KG"
-            elif packaging and packaging.lower() != "bulk":
-                # Try to calculate from quantity if available
-                net_weight_unit = "—"
-            else:
-                net_weight_unit = "—"
+                container = "—"
             
             items_data.append([
                 str(idx),
                 desc_para,  # Use Paragraph for HTML formatting
-                container,  # Container/Tank info
-                f"{qtyMT:,.3f}",  # Qty: (drums * net weight) / 1000
-                net_weight_unit,  # Net Weight/Unit
+                container,  # Container/Tank info (per-item allocation)
+                qty_display,  # Use dynamic qty_display based on U.O.M
                 f"{currency_symbol}{unit_price:,.2f}",
                 f"{currency_symbol}{total:,.2f}"
             ])
@@ -5514,17 +6898,16 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
                 str(idx),
                 Paragraph(f"<b>{str(item.get('product_name', 'N/A'))}</b>", item_desc_style),
                 "—",
-                "0.000",
-                "—",
+                "0",
                 f"{currency_symbol}0.00",
                 f"{currency_symbol}0.00"
             ])
     
     # Adjust column widths to prevent header overlapping
     # A4 width 21cm - 2cm margins = 19cm available
-    # Column widths: #, Description, Container/Tank, Total Weight (MT), Net Weight/Unit, Unit Price Per MT, Grand Total
-    # Removed Country of Origin column (now in description)
-    items_table = Table(items_data, colWidths=[0.7*cm, 5.5*cm, 2.3*cm, 2.5*cm, 2.3*cm, 2.5*cm, 2.7*cm])
+    # Column widths: #, Description, Container/Tank, Qty, Unit Price, Grand Total
+    # Removed Net Weight/Unit column
+    items_table = Table(items_data, colWidths=[0.7*cm, 6.5*cm, 2.5*cm, 2.5*cm, 3.0*cm, 3.0*cm])
     items_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e6f0fb')),  # Light blue matching PHP
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1847A6')),  # Blue text matching PHP
@@ -5534,9 +6917,8 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
         ('FONTSIZE', (0, 1), (-1, -1), 8),  # Normal font for data rows
         ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#d2d8e6')),  # Matching PHP border
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('ALIGN', (3, 0), (6, -1), 'RIGHT'),  # Align numeric columns right
+        ('ALIGN', (3, 0), (5, -1), 'RIGHT'),  # Align numeric columns right (Qty, Unit Price, Grand Total)
         ('ALIGN', (1, 1), (1, -1), 'LEFT'),  # Description left-aligned
-        ('ALIGN', (4, 1), (4, -1), 'CENTER'),  # Net Weight/Unit centered
         ('PADDING', (0, 0), (-1, -1), 2),  # Reduced padding to fit more columns
     ]))
     elements.append(items_table)
@@ -5556,30 +6938,59 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
     
     # For local: show Subtotal, VAT, Total
     # For export: show only Total
-    # Adjust totals table to match new column count (7 columns now - removed Country of Origin)
+    # Adjust totals table to match new column count (6 columns now - removed Net Weight/Unit)
     if is_local:
         totals_data = [
-            ["", "", "", "", "", f"Subtotal {quotation.get('currency', 'USD')} Amount:", f"{currency_symbol}{subtotal:,.2f}"],
+            ["", "", "", "", f"Subtotal {quotation.get('currency', 'USD')} Amount:", f"{currency_symbol}{subtotal:,.2f}"],
         ]
         
         # Add VAT (5% for local)
         if vat_amount > 0:
-            totals_data.append(["", "", "", "", "", f"VAT (5%)", f"{currency_symbol}{vat_amount:,.2f}"])
+            totals_data.append(["", "", "", "", f"VAT (5%)", f"{currency_symbol}{vat_amount:,.2f}"])
         
-        totals_data.append(["", "", "", "", "", f"Total {quotation.get('currency', 'USD')} Amount Payable", f"{currency_symbol}{total:,.2f}"])
+        totals_data.append(["", "", "", "", f"Total {quotation.get('currency', 'USD')} Amount Payable", f"{currency_symbol}{total:,.2f}"])
     else:
-        totals_data = [
-            ["", "", "", "", "", f"Total {quotation.get('currency', 'USD')} Amount Payable", f"{currency_symbol}{total:,.2f}"],
-        ]
+        # Export orders - show CFR amount, additional freight, and total receivable
+        totals_data = []
+        
+        # CFR Amount (product total)
+        cfr_amount = quotation.get("cfr_amount") or subtotal
+        port_of_discharge = quotation.get("port_of_discharge", "PORT")
+        
+        # Additional Freight (if CFR incoterm and freight is specified)
+        incoterm = quotation.get("incoterm", "").upper()
+        if incoterm == "CFR" and quotation.get("additional_freight_amount"):
+            freight_rate = quotation.get("additional_freight_rate_per_fcl", 0)
+            container_count = quotation.get("container_count", 0)
+            freight_currency = quotation.get("additional_freight_currency", "USD")
+            freight_symbol = {"USD": "$", "AED": "AED ", "EUR": "€"}.get(freight_currency, "$")
+            
+            # Show CFR amount
+            totals_data.append(["", "", "", "", f"TOTAL {quotation.get('currency', 'USD')} AMOUNT CFR {port_of_discharge}:", f"{currency_symbol}{cfr_amount:,.2f}"])
+            
+            # Show additional freight
+            if freight_rate > 0 and container_count > 0:
+                freight_label = f"ADDITIONAL FREIGHT AS AGREED {freight_symbol}{freight_rate:,.0f} X {container_count}FCL:"
+            else:
+                freight_label = "ADDITIONAL FREIGHT:"
+            
+            totals_data.append(["", "", "", "", freight_label, f"{currency_symbol}{quotation.get('additional_freight_amount', 0):,.2f}"])
+            
+            # Total Receivable
+            total_receivable = quotation.get("total_receivable") or (cfr_amount + quotation.get("additional_freight_amount", 0))
+            totals_data.append(["", "", "", "", f"TOTAL {quotation.get('currency', 'USD')} AMOUNT RECEIVABLE:", f"{currency_symbol}{total_receivable:,.2f}"])
+        else:
+            # No additional freight - just show total
+            totals_data.append(["", "", "", "", f"Total {quotation.get('currency', 'USD')} Amount Payable", f"{currency_symbol}{total:,.2f}"])
     
-    totals_table = Table(totals_data, colWidths=[0.7*cm, 5.5*cm, 2.3*cm, 2.5*cm, 2.3*cm, 2.5*cm, 2.7*cm])
+    totals_table = Table(totals_data, colWidths=[0.7*cm, 6.5*cm, 2.5*cm, 2.5*cm, 3.0*cm, 3.0*cm])
     totals_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#e9f2fc')),  # Light blue background matching PHP
-        ('FONTNAME', (5, 0), (6, -1), 'Helvetica-Bold'),
+        ('FONTNAME', (4, 0), (5, -1), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 9),
-        ('ALIGN', (5, 0), (6, -1), 'RIGHT'),
-        ('LINEABOVE', (5, 0), (6, 0), 1, colors.black),
-        ('LINEBELOW', (5, -1), (6, -1), 2, colors.black),
+        ('ALIGN', (4, 0), (5, -1), 'RIGHT'),
+        ('LINEABOVE', (4, 0), (5, 0), 1, colors.black),
+        ('LINEBELOW', (4, -1), (5, -1), 2, colors.black),
         ('PADDING', (0, 0), (-1, -1), 2),
     ]))
     elements.append(totals_table)
@@ -5627,6 +7038,30 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
         if shipping_text:
             elements.append(Paragraph(shipping_text, shipping_style))
             elements.append(Spacer(1, 3))
+        
+        # Export Dispatch Contact (for export orders only)
+        # Use provided dispatch_contact or default
+        if not dispatch_contact:
+            dispatch_contact = {
+                "name": "Dispatch Department",
+                "phone": "+971 4 2384533",
+                "email": "dispatch@asia-petrochem.com",
+                "address": "Plot # A 23 B, Al Jazeera Industrial Area, Ras Al Khaimah, UAE"
+            }
+        
+        contact_style = ParagraphStyle('Contact', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold', textColor=colors.HexColor('#1847A6'))
+        contact_text = f"<b>FOR DISPATCH INQUIRIES:</b><br/>"
+        if dispatch_contact.get("name"):
+            contact_text += f"{dispatch_contact['name']}<br/>"
+        if dispatch_contact.get("phone"):
+            contact_text += f"Phone: {dispatch_contact['phone']}<br/>"
+        if dispatch_contact.get("email"):
+            contact_text += f"Email: {dispatch_contact['email']}<br/>"
+        if dispatch_contact.get("address"):
+            contact_text += f"Address: {dispatch_contact['address']}"
+        
+        elements.append(Spacer(1, 2))
+        elements.append(Paragraph(contact_text, contact_style))
     
     # Shipping Details (for local) - matching PHP format
     if is_local and (quotation.get('port_of_loading') or quotation.get('port_of_discharge')):
@@ -5849,6 +7284,13 @@ async def download_quotation_pdf(
             if bank_details:
                 quotation["bank_details"] = bank_details
     
+    # Fetch export dispatch contact settings
+    dispatch_contact = None
+    if quotation.get("order_type", "").lower() == "export":
+        settings = await db.settings.find_one({"type": "contact_for_dispatch"}, {"_id": 0})
+        if settings and settings.get("data"):
+            dispatch_contact = settings["data"]
+    
     try:
         # Run PDF generation in thread pool to avoid blocking the event loop
         import asyncio
@@ -5857,7 +7299,8 @@ async def download_quotation_pdf(
             None, 
             generate_quotation_pdf, 
             quotation, 
-            include_stamp_signature
+            include_stamp_signature,
+            dispatch_contact
         )
         return StreamingResponse(
             pdf_buffer,
@@ -6463,11 +7906,17 @@ def generate_job_order_pdf(job: dict, so: dict = None, quotation: dict = None, c
                 drums = int(quantity) if quantity > 0 else 0
                 weight_mt = (drums * net_weight_kg) / 1000
             
+            # Get batch number from job order
+            batch_number = job.get("batch_number", "")
+            batch_text = f"<b>BATCH NO:</b> {batch_number}" if batch_number else ""
+            
             packing_desc = (
                 f"<b>{product_name}</b>, PACKED IN STEEL DRUMS PALLETISED, "
                 f"QTY: <b>{weight_mt:.2f} MT</b>; "
                 f"<b>{net_weight_kg:.0f}KGS/DRUM</b> TOTAL <b>{drums} DRUMS</b>"
             )
+            if batch_text:
+                packing_desc += f"; {batch_text}"
         else:
             # Bulk packaging
             drums = 0
@@ -7588,6 +9037,515 @@ async def update_packaging(packaging_id: str, data: PackagingCreate, current_use
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Packaging not found")
     return await db.packaging.find_one({"id": packaging_id}, {"_id": 0})
+
+# ==================== COSTING & MARGIN VALIDATION APIs ====================
+
+from costing_service import CostingService
+
+@api_router.post("/costing/calculate")
+async def calculate_costing(
+    reference_type: str = Query(..., description="QUOTATION or JOB_ORDER"),
+    reference_id: str = Query(...),
+    raw_material_cost: Optional[float] = Query(None),
+    ocean_freight: Optional[float] = Query(None),
+    raw_material_source: Optional[str] = Query("SYSTEM", description="SYSTEM or MANUAL"),
+    packaging_type: Optional[str] = Query(None, description="BULK or DRUM"),
+    incoterm_type: Optional[str] = Query(None, description="EXW or DELIVERED"),
+    is_dg: Optional[bool] = Query(None, description="Dangerous goods flag"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Calculate costs for quotation or job order"""
+    costing_service = CostingService(db)
+    
+    # Get reference document
+    if reference_type == "QUOTATION":
+        doc = await db.quotations.find_one({"id": reference_id}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Quotation not found")
+        
+        order_type = doc.get("order_type", "local")
+        items = doc.get("items", [])
+        packaging = items[0].get("packaging", "Bulk") if items else "Bulk"
+        incoterm = doc.get("incoterm")
+    elif reference_type == "JOB_ORDER":
+        doc = await db.job_orders.find_one({"id": reference_id}, {"_id": 0})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Job order not found")
+        
+        # Get order type from quotation via sales order
+        so = await db.sales_orders.find_one({"id": doc.get("sales_order_id")}, {"_id": 0})
+        if so:
+            quotation = await db.quotations.find_one({"id": so.get("quotation_id")}, {"_id": 0})
+            if quotation:
+                order_type = quotation.get("order_type", "local")
+                items = quotation.get("items", [])
+                packaging = items[0].get("packaging", "Bulk") if items else "Bulk"
+                incoterm = quotation.get("incoterm")
+            else:
+                order_type = "local"
+                packaging = doc.get("packaging", "Bulk")
+                incoterm = doc.get("incoterm")
+        else:
+            order_type = "local"
+            packaging = doc.get("packaging", "Bulk")
+            incoterm = doc.get("incoterm")
+    else:
+        raise HTTPException(status_code=400, detail="Invalid reference_type. Must be QUOTATION or JOB_ORDER")
+    
+    # Determine costing type
+    # Get country_of_destination and transport_mode from doc
+    country_of_destination = doc.get("country_of_destination") if reference_type == "QUOTATION" else None
+    transport_mode = doc.get("transport_mode") if reference_type == "QUOTATION" else None
+    if reference_type == "JOB_ORDER" and so:
+        quotation = await db.quotations.find_one({"id": so.get("quotation_id")}, {"_id": 0})
+        if quotation:
+            country_of_destination = quotation.get("country_of_destination")
+            transport_mode = quotation.get("transport_mode")
+    
+    costing_type = costing_service.determine_costing_type(
+        order_type, 
+        packaging, 
+        incoterm,
+        country_of_destination=country_of_destination,
+        transport_mode=transport_mode
+    )
+    
+    # Get quotation_id for cost calculation (always use quotation, even for job orders)
+    quotation_id_for_calc = reference_id
+    if reference_type == "JOB_ORDER":
+        so = await db.sales_orders.find_one({"id": doc.get("sales_order_id")}, {"_id": 0})
+        if so:
+            quotation_id_for_calc = so.get("quotation_id")
+        else:
+            raise HTTPException(status_code=400, detail="Job order must have a sales order with quotation")
+    
+    # Calculate costs based on type
+    if costing_type == "EXPORT_GCC_ROAD":
+        result = await costing_service.calculate_export_gcc_road_cost(
+            quotation_id_for_calc,
+            raw_material_cost
+        )
+    elif costing_type == "EXPORT_CONTAINERIZED":
+        result = await costing_service.calculate_export_containerized_cost(
+            quotation_id_for_calc,
+            raw_material_cost,
+            ocean_freight,
+            raw_material_source=raw_material_source,
+            packaging_type=packaging_type,
+            incoterm_type=incoterm_type,
+            is_dg=is_dg
+        )
+    elif costing_type == "EXPORT_BULK":
+        result = await costing_service.calculate_export_bulk_cost(
+            quotation_id_for_calc,
+            raw_material_cost,
+            ocean_freight,
+            raw_material_source=raw_material_source,
+            incoterm_type=incoterm_type
+        )
+    else:  # LOCAL_DISPATCH
+        result = await costing_service.calculate_local_dispatch_cost(
+            quotation_id_for_calc,
+            raw_material_cost,
+            raw_material_source=raw_material_source,
+            packaging_type=packaging_type,
+            incoterm_type=incoterm_type
+        )
+    
+    # Check if costing already exists
+    existing = await db.costing_calculations.find_one({
+        "reference_type": reference_type,
+        "reference_id": reference_id
+    }, {"_id": 0})
+    
+    if existing:
+        # Update existing
+        update_data = {
+            **result,
+            "costing_type": costing_type,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": current_user["id"]
+        }
+        await db.costing_calculations.update_one(
+            {"id": existing["id"]},
+            {"$set": update_data}
+        )
+        result["id"] = existing["id"]
+        result["cost_confirmed"] = existing.get("cost_confirmed", False)
+    else:
+        # Create new
+        costing = CostingCalculation(
+            reference_type=reference_type,
+            reference_id=reference_id,
+            costing_type=costing_type,
+            **result,
+            created_by=current_user["id"],
+            updated_by=current_user["id"]
+        )
+        await db.costing_calculations.insert_one(costing.model_dump())
+        result["id"] = costing.id
+        result["cost_confirmed"] = False
+    
+    result["costing_type"] = costing_type
+    return result
+
+@api_router.get("/costing/{reference_type}/{reference_id}")
+async def get_costing(
+    reference_type: str,
+    reference_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get existing costing for quotation or job order"""
+    costing = await db.costing_calculations.find_one({
+        "reference_type": reference_type,
+        "reference_id": reference_id
+    }, {"_id": 0})
+    
+    if not costing:
+        raise HTTPException(status_code=404, detail="Costing not found")
+    
+    return costing
+
+@api_router.put("/costing/{costing_id}/confirm")
+async def confirm_costing(
+    costing_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Confirm costing (sets cost_confirmed=true)"""
+    costing = await db.costing_calculations.find_one({"id": costing_id}, {"_id": 0})
+    if not costing:
+        raise HTTPException(status_code=404, detail="Costing not found")
+    
+    # Update costing
+    await db.costing_calculations.update_one(
+        {"id": costing_id},
+        {"$set": {
+            "cost_confirmed": True,
+            "confirmed_by": current_user["id"],
+            "confirmed_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    # Update reference document
+    reference_type = costing.get("reference_type")
+    reference_id = costing.get("reference_id")
+    
+    update_data = {
+        "costing_id": costing_id,
+        "cost_confirmed": True,
+        "margin_amount": costing.get("margin_amount"),
+        "margin_percentage": costing.get("margin_percentage")
+    }
+    
+    if reference_type == "QUOTATION":
+        await db.quotations.update_one({"id": reference_id}, {"$set": update_data})
+    elif reference_type == "JOB_ORDER":
+        await db.job_orders.update_one({"id": reference_id}, {"$set": update_data})
+    
+    return {"message": "Costing confirmed", "costing_id": costing_id}
+
+@api_router.put("/costing/{costing_id}")
+async def update_costing(
+    costing_id: str,
+    data: CostingCalculationCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update costing with manual overrides"""
+    costing = await db.costing_calculations.find_one({"id": costing_id}, {"_id": 0})
+    if not costing:
+        raise HTTPException(status_code=404, detail="Costing not found")
+    
+    # Recalculate total cost and margin
+    total_cost = (
+        data.raw_material_cost +
+        data.packaging_cost +
+        data.inland_transport_cost +
+        data.thc_cost +
+        data.isps_cost +
+        data.documentation_cost +
+        data.bl_cost +
+        data.ocean_freight_cost +
+        data.port_charges +
+        data.local_transport_cost
+    )
+    
+    selling_price = costing.get("selling_price", 0.0)
+    reference_type = costing.get("reference_type")
+    reference_id = costing.get("reference_id")
+    
+    # Get quantity from reference document
+    if reference_type == "QUOTATION":
+        doc = await db.quotations.find_one({"id": reference_id}, {"_id": 0})
+    else:
+        doc = await db.job_orders.find_one({"id": reference_id}, {"_id": 0})
+    
+    items = doc.get("items", []) if doc else []
+    total_quantity = sum(item.get("quantity", 0) for item in items)
+    unit_price = selling_price / total_quantity if total_quantity > 0 else 0.0
+    
+    # Calculate margin
+    costing_service = CostingService(db)
+    margin = costing_service.calculate_margin(selling_price, total_cost, total_quantity, unit_price)
+    
+    # Update costing
+    update_data = {
+        **data.model_dump(),
+        "total_cost": total_cost,
+        **margin,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": current_user["id"]
+    }
+    
+    await db.costing_calculations.update_one(
+        {"id": costing_id},
+        {"$set": update_data}
+    )
+    
+    # Update reference document with cached margin
+    if reference_type == "QUOTATION":
+        await db.quotations.update_one(
+            {"id": reference_id},
+            {"$set": {
+                "margin_amount": margin["margin_amount"],
+                "margin_percentage": margin["margin_percentage"]
+            }}
+        )
+    elif reference_type == "JOB_ORDER":
+        await db.job_orders.update_one(
+            {"id": reference_id},
+            {"$set": {
+                "margin_amount": margin["margin_amount"],
+                "margin_percentage": margin["margin_percentage"]
+            }}
+        )
+    
+    updated = await db.costing_calculations.find_one({"id": costing_id}, {"_id": 0})
+    return updated
+
+@api_router.get("/costing/{costing_id}/summary")
+async def get_costing_summary(
+    costing_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get costing summary for approval review"""
+    costing = await db.costing_calculations.find_one({"id": costing_id}, {"_id": 0})
+    if not costing:
+        raise HTTPException(status_code=404, detail="Costing not found")
+    
+    return costing
+
+# ==================== TRANSPORT ROUTES MASTER DATA APIs ====================
+
+@api_router.get("/transport-routes", response_model=List[TransportRoute])
+async def get_transport_routes(
+    origin: Optional[str] = None,
+    destination: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all transport routes"""
+    query = {}
+    if origin:
+        query["origin"] = origin.upper()
+    if destination:
+        query["destination"] = destination.upper()
+    if is_active is not None:
+        query["is_active"] = is_active
+    
+    routes = await db.transport_routes.find(query, {"_id": 0}).sort("route_name", 1).to_list(1000)
+    return routes
+
+@api_router.post("/transport-routes", response_model=TransportRoute)
+async def create_transport_route(
+    data: TransportRouteCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new transport route"""
+    if current_user["role"] not in ["admin", "finance"]:
+        raise HTTPException(status_code=403, detail="Only admin/finance can manage transport routes")
+    
+    route = TransportRoute(**data.model_dump())
+    await db.transport_routes.insert_one(route.model_dump())
+    return route
+
+@api_router.put("/transport-routes/{route_id}", response_model=TransportRoute)
+async def update_transport_route(
+    route_id: str,
+    data: TransportRouteCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update a transport route"""
+    if current_user["role"] not in ["admin", "finance"]:
+        raise HTTPException(status_code=403, detail="Only admin/finance can manage transport routes")
+    
+    update_data = data.model_dump()
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    result = await db.transport_routes.update_one(
+        {"id": route_id},
+        {"$set": update_data}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Transport route not found")
+    
+    return await db.transport_routes.find_one({"id": route_id}, {"_id": 0})
+
+@api_router.post("/transport/routes/update-from-bookings")
+async def update_transport_master_from_bookings(
+    route_id: Optional[str] = Query(None, description="Specific route ID to update. If not provided, updates all routes with auto_update enabled"),
+    auto_update: bool = Query(True, description="Whether to perform auto-update"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update transport master routes from actual booking charges.
+    Calculates average rate from recent bookings for matching routes.
+    """
+    if current_user["role"] not in ["admin", "finance"]:
+        raise HTTPException(status_code=403, detail="Only admin/finance can update transport master")
+    
+    if not auto_update:
+        return {"message": "Auto-update is disabled", "updated_routes": []}
+    
+    updated_routes = []
+    
+    # Get routes to update
+    if route_id:
+        route = await db.transport_routes.find_one({"id": route_id}, {"_id": 0})
+        if not route:
+            raise HTTPException(status_code=404, detail="Transport route not found")
+        routes_to_update = [route] if route.get("auto_update_from_bookings", False) else []
+    else:
+        # Get all routes with auto_update enabled
+        routes_to_update = await db.transport_routes.find(
+            {"auto_update_from_bookings": True, "is_active": True},
+            {"_id": 0}
+        ).to_list(1000)
+    
+    for route in routes_to_update:
+        origin = route.get("origin", "").upper()
+        destination = route.get("destination", "").upper()
+        vehicle_type = route.get("vehicle_type", "")
+        
+        # Get recent transport bookings for this route (last 30 days)
+        thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        
+        # Check transport_outward bookings
+        outward_bookings = await db.transport_outward.find({
+            "transport_charges": {"$exists": True, "$ne": None, "$gt": 0},
+            "created_at": {"$gte": thirty_days_ago},
+            "status": {"$in": ["DISPATCHED", "DELIVERED", "COMPLETED"]}
+        }, {"_id": 0}).to_list(1000)
+        
+        # Check transport_inward bookings
+        inward_bookings = await db.transport_inward.find({
+            "transport_charges": {"$exists": True, "$ne": None, "$gt": 0},
+            "created_at": {"$gte": thirty_days_ago},
+            "status": {"$in": ["ARRIVED", "DELIVERED", "COMPLETED"]}
+        }, {"_id": 0}).to_list(1000)
+        
+        # Filter bookings that match this route
+        # For outward: check if destination matches
+        # For inward: check if origin matches (assuming RAK as origin for local deliveries)
+        matching_charges = []
+        
+        for booking in outward_bookings:
+            # Try to match by delivery location or job order destination
+            job_id = booking.get("job_order_id")
+            if job_id:
+                job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
+                if job:
+                    delivery_place = (job.get("delivery_place") or job.get("delivery_location") or "").upper()
+                    if destination in delivery_place or delivery_place in destination:
+                        charges = booking.get("transport_charges")
+                        if charges and charges > 0:
+                            matching_charges.append(charges)
+        
+        for booking in inward_bookings:
+            # For inward, typically from port to RAK, so check if destination is RAK
+            if destination == "RAK" or origin == "RAK":
+                charges = booking.get("transport_charges")
+                if charges and charges > 0:
+                    matching_charges.append(charges)
+        
+        # Calculate average if we have matching charges
+        if matching_charges:
+            avg_rate = sum(matching_charges) / len(matching_charges)
+            
+            # Update route with new average rate
+            await db.transport_routes.update_one(
+                {"id": route["id"]},
+                {"$set": {
+                    "rate": round(avg_rate, 2),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "effective_date": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            
+            updated_routes.append({
+                "route_id": route["id"],
+                "route_name": route.get("route_name"),
+                "old_rate": route.get("rate"),
+                "new_rate": round(avg_rate, 2),
+                "samples_count": len(matching_charges)
+            })
+    
+    return {
+        "message": f"Updated {len(updated_routes)} transport route(s)",
+        "updated_routes": updated_routes
+    }
+
+# ==================== FIXED CHARGES MASTER DATA APIs ====================
+
+@api_router.get("/fixed-charges", response_model=List[FixedCharge])
+async def get_fixed_charges(
+    charge_type: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all fixed charges"""
+    query = {}
+    if charge_type:
+        query["charge_type"] = charge_type
+    if is_active is not None:
+        query["is_active"] = is_active
+    
+    charges = await db.fixed_charges.find(query, {"_id": 0}).sort("charge_type", 1).to_list(1000)
+    return charges
+
+@api_router.post("/fixed-charges", response_model=FixedCharge)
+async def create_fixed_charge(
+    data: FixedChargeCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new fixed charge"""
+    if current_user["role"] not in ["admin", "finance"]:
+        raise HTTPException(status_code=403, detail="Only admin/finance can manage fixed charges")
+    
+    charge = FixedCharge(**data.model_dump())
+    await db.fixed_charges.insert_one(charge.model_dump())
+    return charge
+
+@api_router.put("/fixed-charges/{charge_id}", response_model=FixedCharge)
+async def update_fixed_charge(
+    charge_id: str,
+    data: FixedChargeCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update a fixed charge"""
+    if current_user["role"] not in ["admin", "finance"]:
+        raise HTTPException(status_code=403, detail="Only admin/finance can manage fixed charges")
+    
+    update_data = data.model_dump()
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    result = await db.fixed_charges.update_one(
+        {"id": charge_id},
+        {"$set": update_data}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Fixed charge not found")
+    
+    return await db.fixed_charges.find_one({"id": charge_id}, {"_id": 0})
 
 # Inventory Items Management
 @api_router.post("/inventory-items", response_model=InventoryItem)
@@ -8716,6 +10674,8 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
         # calculate shortages from BOM
         if not material_shortages and job.get("procurement_required"):
             product_id = job.get("product_id")
+            # Use total_weight_mt from job order (correct value in MT) instead of quantity (number of units)
+            total_weight_mt = job.get("total_weight_mt", 0)
             quantity = job.get("quantity", 0)
             packaging = job.get("packaging", "Bulk")
             # Use stored net_weight_kg from job order, only default if not provided and not Bulk
@@ -8723,7 +10683,7 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
             if net_weight_kg is None and packaging != "Bulk":
                 net_weight_kg = 200  # Default only when needed
             
-            if product_id and quantity > 0:
+            if product_id and (total_weight_mt > 0 or quantity > 0):
                 # Get product BOM
                 product_bom = await db.product_boms.find_one({
                     "product_id": product_id,
@@ -8735,10 +10695,15 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
                         "bom_id": product_bom["id"]
                     }, {"_id": 0}).to_list(100)
                     
-                    # Calculate total KG needed
-                    if packaging != "Bulk":
+                    # Calculate total KG needed - prioritize total_weight_mt (correct value)
+                    if total_weight_mt > 0:
+                        # Use total_weight_mt from job order (e.g., 14.8 MT = 14,800 KG)
+                        total_kg = total_weight_mt * 1000
+                    elif packaging != "Bulk":
+                        # Fallback: calculate from quantity and net_weight_kg if total_weight_mt not available
                         total_kg = quantity * (net_weight_kg or 200)
                     else:
+                        # Fallback: assume quantity is in MT for bulk
                         total_kg = quantity * 1000
                     
                     # Build material_shortages from BOM
@@ -9558,8 +11523,44 @@ async def finance_approve_po(po_id: str, data: Optional[Dict[str, Any]] = None, 
         route_result["routed_to"] = "SECURITY_QC"
         route_result["checklist_number"] = checklist_number
         
-    elif incoterm in ["FOB", "CFR", "CIF", "CIP"]:
-        # Route to Import Window
+    elif incoterm == "FOB":
+        # FOB: Buyer responsible for shipping - Route to Shipping Window first
+        # After shipping is booked, will route to Import Window
+        booking_number = await generate_sequence("SHP", "shipping_bookings")
+        shipping_booking = {
+            "id": str(uuid.uuid4()),
+            "booking_number": booking_number,
+            "job_order_ids": [],  # Empty for PO imports
+            "customer_name": po.get("supplier_name", ""),  # Supplier for imports
+            "port_of_loading": po.get("port_of_loading", ""),
+            "port_of_discharge": po.get("port_of_discharge", ""),
+            "incoterm": incoterm,
+            "status": "PENDING",
+            "ref_type": "PO_IMPORT",
+            "ref_id": po_id,
+            "po_number": po.get("po_number"),
+            "supplier_name": po.get("supplier_name"),
+            "booking_source": "SELLER",  # Seller (buyer's company) books for FOB imports
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.shipping_bookings.insert_one(shipping_booking)
+        route_result["routed_to"] = "SHIPPING"
+        route_result["booking_number"] = booking_number
+        
+        # Create notification
+        await create_notification(
+            event_type="SHIP_BOOKING_REQUIRED",
+            title=f"🚢 Shipping Booking Required: PO {po.get('po_number')}",
+            message=f"PO {po.get('po_number')} (FOB incoterm) requires shipping booking. Buyer responsible for main carriage - please book shipping.",
+            link="/shipping",
+            ref_type="PO",
+            ref_id=po_id,
+            target_roles=["admin", "shipping", "procurement"],
+            notification_type="warning"
+        )
+        
+    elif incoterm in ["CFR", "CIF", "CIP"]:
+        # CFR/CIF/CIP: Seller arranges shipping - Route directly to Import Window
         import_number = await generate_sequence("IMP", "imports")
         import_record = {
             "id": str(uuid.uuid4()),
@@ -9568,7 +11569,7 @@ async def finance_approve_po(po_id: str, data: Optional[Dict[str, Any]] = None, 
             "po_number": po.get("po_number"),
             "supplier_name": po.get("supplier_name"),
             "incoterm": incoterm,
-            "status": "PENDING",
+            "status": "PENDING_DOCS",
             "document_checklist": {
                 "bl": False,
                 "invoice": False,
@@ -10738,6 +12739,8 @@ class TransportOutward(BaseModel):
     destination: Optional[str] = None
     dispatch_date: Optional[str] = None
     delivery_date: Optional[str] = None
+    delivery_order_number: Optional[str] = None
+    delivery_order_document: Optional[str] = None
     status: str = "PENDING"  # PENDING, LOADING, DISPATCHED, DELIVERED
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -10755,9 +12758,19 @@ async def get_transport_inward(status: Optional[str] = None, current_user: dict 
         if record.get("po_id"):
             po = await db.purchase_orders.find_one({"id": record["po_id"]}, {"_id": 0})
             if po:
+                # Ensure po_number, supplier_name, and incoterm are set from PO
+                if not record.get("po_number"):
+                    record["po_number"] = po.get("po_number", "")
+                if not record.get("supplier_name"):
+                    record["supplier_name"] = po.get("supplier_name", "")
+                if not record.get("incoterm"):
+                    record["incoterm"] = po.get("incoterm", "")
+                
                 # Get PO lines from purchase_order_lines collection
                 po_lines = await db.purchase_order_lines.find({"po_id": record["po_id"]}, {"_id": 0}).to_list(1000)
                 record["lines"] = po_lines
+                # Also set po_items for frontend compatibility
+                record["po_items"] = po_lines
                 
                 # Calculate total quantity from lines
                 total_qty = sum(line.get("qty", 0) for line in po_lines)
@@ -11135,10 +13148,14 @@ async def get_transport_outward(
                 if not record.get("customer_name") and job_order.get("customer_name"):
                     record["customer_name"] = job_order.get("customer_name")
                 # If still missing, try to get from sales order
-                if not record.get("customer_name") and job_order.get("sales_order_id"):
+                if job_order.get("sales_order_id"):
                     sales_order = await db.sales_orders.find_one({"id": job_order.get("sales_order_id")}, {"_id": 0})
-                    if sales_order and sales_order.get("customer_name"):
-                        record["customer_name"] = sales_order.get("customer_name")
+                    if sales_order:
+                        if not record.get("customer_name") and sales_order.get("customer_name"):
+                            record["customer_name"] = sales_order.get("customer_name")
+                        # Enrich expected_delivery_date from sales order for dispatch_date
+                        if sales_order.get("expected_delivery_date"):
+                            record["expected_delivery_date"] = sales_order.get("expected_delivery_date")
                 
                 # #region agent log
                 import json
@@ -11186,6 +13203,19 @@ async def get_transport_outward(
                 record["port_of_discharge"] = shipping_booking.get("port_of_discharge") or None
                 record["booking_number"] = shipping_booking.get("booking_number") or record.get("booking_number")
                 record["cro_number"] = shipping_booking.get("cro_number") or record.get("cro_number")
+                record["shipping_line"] = shipping_booking.get("shipping_line") or None
+                # Get pickup_date from booking, or calculate from cutoff_date if missing
+                pickup_date = shipping_booking.get("pickup_date")
+                if not pickup_date:
+                    cutoff_date = shipping_booking.get("cutoff_date")
+                    if cutoff_date:
+                        try:
+                            cutoff = datetime.fromisoformat(cutoff_date)
+                            pickup = cutoff - timedelta(days=3)
+                            pickup_date = pickup.strftime("%Y-%m-%d")
+                        except (ValueError, TypeError):
+                            pickup_date = None
+                record["pickup_date"] = pickup_date
                 # Also store the shipping_booking_id for future reference
                 if not record.get("shipping_booking_id"):
                     record["shipping_booking_id"] = shipping_booking.get("id")
@@ -11378,6 +13408,9 @@ async def book_transport_inward_exw(data: dict, current_user: dict = Depends(get
         "pickup_date": data.get("pickup_date", ""),
         "eta": data.get("eta", ""),
         "delivery_date": data.get("delivery_date") or po.get("delivery_date", ""),  # Get delivery date from form or PO
+        "transport_charges": data.get("transport_charges"),  # Save transport charges
+        "delivery_note_number": data.get("delivery_note_number", ""),  # Save delivery note number
+        "delivery_note_document": data.get("delivery_note_document", ""),  # Save delivery note document path/ID
         "status": "PENDING",  # Set to PENDING so it can be marked as IN_TRANSIT
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": current_user["id"]
@@ -11430,6 +13463,9 @@ async def book_transport_inward_import(data: dict, current_user: dict = Depends(
         "pickup_date": data.get("pickup_date", ""),
         "eta": data.get("eta", ""),
         "delivery_date": data.get("delivery_date") or import_record.get("delivery_date", ""),  # Get delivery date from form or import record
+        "transport_charges": data.get("transport_charges"),  # Save transport charges
+        "delivery_note_number": data.get("delivery_note_number", ""),  # Save delivery note number
+        "delivery_note_document": data.get("delivery_note_document", ""),  # Save delivery note document path/ID
         "status": "PENDING",  # Set to PENDING so it can be marked as IN_TRANSIT
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": current_user["id"]
@@ -11503,6 +13539,9 @@ async def book_transport_outward(data: dict, current_user: dict = Depends(get_cu
         "transport_type": transport_type,
         "incoterm": job.get("incoterm", ""),
         "notes": data.get("notes", ""),
+        "transport_charges": data.get("transport_charges"),  # Save transport charges
+        "delivery_order_number": data.get("delivery_order_number"),  # Save delivery order number
+        "delivery_order_document": data.get("delivery_order_document"),  # Save delivery order document path
         "status": "PENDING",  # Set to PENDING so it can be marked as LOADING/DISPATCHED
         "source": "TRANSPORT_PLANNER",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -12092,6 +14131,7 @@ async def get_unified_production_schedule(
                 day_schedule["jobs"].append({
                     "job_number": job.get("job_number"),
                     "job_id": job.get("id"),
+                    "product_id": job.get("product_id"),
                     "product_name": job.get("product_name"),
                     "product_sku": job.get("product_sku"),
                     "quantity": job_drums,
@@ -12114,6 +14154,7 @@ async def get_unified_production_schedule(
                 day_schedule["jobs"].append({
                     "job_number": job.get("job_number"),
                     "job_id": job.get("id"),
+                    "product_id": job.get("product_id"),
                     "product_name": job.get("product_name"),
                     "product_sku": job.get("product_sku"),
                     "quantity": partial_drums,
@@ -12252,17 +14293,22 @@ async def route_po_by_incoterm(po_id: str, current_user: dict = Depends(get_curr
         route_result["checklist_number"] = checklist_number
         
     elif incoterm == "FOB":
-        # Route to Shipping Module
-        shipping_number = await generate_sequence("SHIP", "shipping_bookings")
+        # Route to Shipping Module (Buyer books shipping for FOB)
+        shipping_number = await generate_sequence("SHP", "shipping_bookings")
         shipping = {
             "id": str(uuid.uuid4()),
             "booking_number": shipping_number,
+            "job_order_ids": [],  # Empty for PO imports
+            "customer_name": po.get("supplier_name", ""),  # Supplier for imports
+            "port_of_loading": po.get("port_of_loading", ""),
+            "port_of_discharge": po.get("port_of_discharge", ""),
             "ref_type": "PO_IMPORT",
             "ref_id": po_id,
             "po_number": po.get("po_number"),
             "supplier_name": po.get("supplier_name"),
             "incoterm": incoterm,
             "status": "PENDING",
+            "booking_source": "SELLER",  # Seller (buyer's company) books for FOB imports
             "created_at": datetime.now(timezone.utc).isoformat()
         }
         await db.shipping_bookings.insert_one(shipping)
@@ -12438,6 +14484,7 @@ async def get_security_inward(status: Optional[str] = None, current_user: dict =
     if status:
         query["status"] = status
     
+    # Get all fields including delivery_note_document
     inward = await db.transport_inward.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
     
     # Enrich with security checklist status and product information
@@ -12479,6 +14526,15 @@ async def get_security_inward(status: Optional[str] = None, current_user: dict =
     for checklist in po_checklists:
         po = await db.purchase_orders.find_one({"id": checklist["ref_id"]}, {"_id": 0})
         if po:
+            # Try to get vehicle_type from related transport_inward if it exists
+            vehicle_type = None
+            transport_inward = await db.transport_inward.find_one(
+                {"po_id": checklist["ref_id"]},
+                {"_id": 0, "vehicle_type": 1}
+            )
+            if transport_inward:
+                vehicle_type = transport_inward.get("vehicle_type")
+            
             # Create a transport-like object from the PO checklist
             po_transport = {
                 "id": checklist["id"],  # Use checklist ID as transport ID
@@ -12490,7 +14546,8 @@ async def get_security_inward(status: Optional[str] = None, current_user: dict =
                 "source": "PO_DDP",
                 "security_checklist": checklist,
                 "created_at": checklist.get("created_at"),
-                "vehicle_number": checklist.get("vehicle_number")  # May be set later
+                "vehicle_number": checklist.get("vehicle_number"),  # May be set later
+                "vehicle_type": vehicle_type  # Include vehicle_type from transport_inward if available
             }
             
             # Enrich with PO items/product information
@@ -12516,13 +14573,60 @@ async def get_security_outward(status: Optional[str] = None, current_user: dict 
     
     outward = await db.transport_outward.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
     
-    # Enrich with security checklist status
+    # Enrich with security checklist status and delivery date from job order
     for transport in outward:
         checklist = await db.security_checklists.find_one({
             "ref_type": "OUTWARD",
             "ref_id": transport["id"]
         }, {"_id": 0})
         transport["security_checklist"] = checklist
+        
+        # Fetch delivery_date and job_number from job order
+        # Priority: Use transport's delivery_date (from booking modal) if exists, otherwise fall back to job_order's delivery_date
+        if transport.get("job_order_id"):
+            job = await db.job_orders.find_one({"id": transport["job_order_id"]}, {"_id": 0, "delivery_date": 1, "job_number": 1})
+            if job:
+                # Only use job_order's delivery_date if transport doesn't have one (from booking)
+                if not transport.get("delivery_date") and job.get("delivery_date"):
+                    transport["delivery_date"] = job["delivery_date"]
+                # Populate job_numbers if not already present
+                if not transport.get("job_numbers") and job.get("job_number"):
+                    transport["job_numbers"] = [job["job_number"]]
+        
+        # Handle CONTAINER transports with shipping_booking_id
+        elif transport.get("shipping_booking_id"):
+            booking = await db.shipping_bookings.find_one({"id": transport["shipping_booking_id"]}, {"_id": 0, "job_order_ids": 1})
+            if booking and booking.get("job_order_ids"):
+                job_numbers = []
+                delivery_dates = []
+                
+                # Fetch all job orders from the booking
+                for job_id in booking["job_order_ids"]:
+                    job = await db.job_orders.find_one({"id": job_id}, {"_id": 0, "delivery_date": 1, "job_number": 1})
+                    if job:
+                        if job.get("job_number"):
+                            job_numbers.append(job["job_number"])
+                        if job.get("delivery_date"):
+                            delivery_dates.append(job["delivery_date"])
+                
+                # Populate job_numbers if not already present or if it's incomplete
+                if job_numbers:
+                    transport["job_numbers"] = job_numbers
+                
+                # Use the earliest delivery date, or any available one
+                if delivery_dates and not transport.get("delivery_date"):
+                    # Sort dates and use the earliest
+                    delivery_dates.sort()
+                    transport["delivery_date"] = delivery_dates[0]
+        
+        # If job_numbers already exists but delivery_date is missing, try to fetch it
+        if transport.get("job_numbers") and not transport.get("delivery_date"):
+            # Try to get delivery_date from all job numbers
+            for job_number in transport["job_numbers"]:
+                job = await db.job_orders.find_one({"job_number": job_number}, {"_id": 0, "delivery_date": 1})
+                if job and job.get("delivery_date"):
+                    transport["delivery_date"] = job["delivery_date"]
+                    break
     
     return outward
 
@@ -14286,6 +16390,20 @@ async def import_product_packaging_configs_excel(
         logging.error(f"Excel import error: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=f"Failed to import Excel: {str(e)}")
 
+@api_router.get("/settings/contact-for-dispatch")
+async def get_contact_for_dispatch(current_user: dict = Depends(get_current_user)):
+    """Get contact for dispatch information"""
+    settings = await db.settings.find_one({"type": "contact_for_dispatch"}, {"_id": 0})
+    if settings and settings.get("data"):
+        return settings["data"]
+    # Return default
+    return {
+        "name": "Dispatch Department",
+        "phone": "+971 4 2384533",
+        "email": "dispatch@asia-petrochem.com",
+        "address": "Plot # A 23 B, Al Jazeera Industrial Area, Ras Al Khaimah, UAE"
+    }
+
 @api_router.put("/settings/contact-for-dispatch")
 async def update_contact_for_dispatch(data: dict, current_user: dict = Depends(get_current_user)):
     """Update contact for dispatch information"""
@@ -14294,7 +16412,14 @@ async def update_contact_for_dispatch(data: dict, current_user: dict = Depends(g
     
     result = await db.settings.update_one(
         {"type": "contact_for_dispatch"},
-        {"$set": {"data": data}},
+        {
+            "$set": {
+                "type": "contact_for_dispatch",
+                "data": data,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_by": current_user["id"]
+            }
+        },
         upsert=True
     )
     return {"message": "Contact for dispatch updated successfully", "data": data}
@@ -14421,6 +16546,160 @@ async def startup_event():
     # Start the orphaned dispatch routing checker
     asyncio.create_task(check_orphaned_dispatch_routing())
     logger.info("Started orphaned dispatch routing background task")
+
+# ==================== SHIPPING LINES MANAGEMENT ====================
+
+@api_router.get("/shipping-lines")
+async def get_shipping_lines(current_user: dict = Depends(get_current_user)):
+    """Get all shipping lines"""
+    shipping_lines = await db.shipping_lines.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+    return shipping_lines
+
+@api_router.post("/shipping-lines")
+async def create_shipping_line(data: dict, current_user: dict = Depends(get_current_user)):
+    """Create a new shipping line"""
+    if not data.get("name"):
+        raise HTTPException(status_code=400, detail="Shipping line name is required")
+    
+    # Check if shipping line already exists
+    existing = await db.shipping_lines.find_one({"name": {"$regex": f"^{data['name']}$", "$options": "i"}}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Shipping line '{data['name']}' already exists")
+    
+    shipping_line = {
+        "id": str(uuid.uuid4()),
+        "name": data.get("name", "").strip(),
+        "code": data.get("code", "").strip(),
+        "contact_person": data.get("contact_person", ""),
+        "contact_email": data.get("contact_email", ""),
+        "contact_phone": data.get("contact_phone", ""),
+        "website": data.get("website", ""),
+        "is_active": data.get("is_active", True),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": current_user["id"]
+    }
+    
+    await db.shipping_lines.insert_one(shipping_line)
+    return shipping_line
+
+@api_router.put("/shipping-lines/{shipping_line_id}")
+async def update_shipping_line(shipping_line_id: str, data: dict, current_user: dict = Depends(get_current_user)):
+    """Update a shipping line"""
+    if not data.get("name"):
+        raise HTTPException(status_code=400, detail="Shipping line name is required")
+    
+    # Check if another shipping line with the same name exists
+    existing = await db.shipping_lines.find_one({
+        "name": {"$regex": f"^{data['name']}$", "$options": "i"},
+        "id": {"$ne": shipping_line_id}
+    }, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Shipping line '{data['name']}' already exists")
+    
+    update_data = {
+        "name": data.get("name", "").strip(),
+        "code": data.get("code", "").strip(),
+        "contact_person": data.get("contact_person", ""),
+        "contact_email": data.get("contact_email", ""),
+        "contact_phone": data.get("contact_phone", ""),
+        "website": data.get("website", ""),
+        "is_active": data.get("is_active", True),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": current_user["id"]
+    }
+    
+    result = await db.shipping_lines.update_one(
+        {"id": shipping_line_id},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Shipping line not found")
+    
+    updated = await db.shipping_lines.find_one({"id": shipping_line_id}, {"_id": 0})
+    return updated
+
+@api_router.delete("/shipping-lines/{shipping_line_id}")
+async def delete_shipping_line(shipping_line_id: str, current_user: dict = Depends(get_current_user)):
+    """Delete a shipping line"""
+    # Check if shipping line is used in any bookings
+    booking_count = await db.shipping_bookings.count_documents({"shipping_line": {"$regex": shipping_line_id, "$options": "i"}})
+    if booking_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete shipping line: it is used in {booking_count} booking(s). Deactivate it instead."
+        )
+    
+    result = await db.shipping_lines.delete_one({"id": shipping_line_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Shipping line not found")
+    
+    return {"message": "Shipping line deleted successfully"}
+
+@api_router.post("/files/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Upload a file and return the file path"""
+    try:
+        # Generate unique filename
+        file_ext = Path(file.filename).suffix if file.filename else ''
+        file_id = str(uuid.uuid4())
+        filename = f"{file_id}{file_ext}"
+        file_path = UPLOAD_DIR / filename
+        
+        # Save file
+        contents = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(contents)
+        
+        # Return file path relative to uploads directory
+        return {
+            "success": True,
+            "path": filename,
+            "file_id": file_id,
+            "id": filename,
+            "original_filename": file.filename
+        }
+    except Exception as e:
+        logging.error(f"File upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+
+@api_router.get("/files/{file_path:path}")
+async def get_file(
+    file_path: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Serve uploaded file"""
+    try:
+        file_full_path = UPLOAD_DIR / file_path
+        if not file_full_path.exists() or not file_full_path.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Security check: ensure file is within upload directory
+        if not str(file_full_path.resolve()).startswith(str(UPLOAD_DIR.resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Determine content type
+        content_type = "application/octet-stream"
+        if file_path.lower().endswith('.pdf'):
+            content_type = "application/pdf"
+        elif file_path.lower().endswith(('.jpg', '.jpeg')):
+            content_type = "image/jpeg"
+        elif file_path.lower().endswith('.png'):
+            content_type = "image/png"
+        
+        return StreamingResponse(
+            open(file_full_path, "rb"),
+            media_type=content_type,
+            headers={"Content-Disposition": f'inline; filename="{file_path}"'}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"File retrieval error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve file: {str(e)}")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

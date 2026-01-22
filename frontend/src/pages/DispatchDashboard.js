@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { dispatchAPI } from '../lib/api';
+import { dispatchAPI, jobOrderAPI } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -8,9 +8,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { toast } from 'sonner';
 import { formatDate, getStatusColor } from '../lib/utils';
-import { Truck, Package, Calendar, Clock, Play, CheckCircle, Loader2 } from 'lucide-react';
+import { Truck, Package, Calendar, Clock, Play, CheckCircle, Loader2, PieChart as PieChartIcon } from 'lucide-react';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 
 const STATUSES = ['scheduled', 'in_transit', 'arrived', 'loading', 'loaded', 'departed'];
+
+const COLORS = ['#8884d8', '#82ca9d', '#ffc658', '#ff7c7c', '#8dd1e1', '#d084d0', '#ffb347', '#87ceeb'];
 
 export default function DispatchDashboard() {
   const { user } = useAuth();
@@ -19,6 +22,7 @@ export default function DispatchDashboard() {
   const [upcomingSchedules, setUpcomingSchedules] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('today');
+  const [pendingProducts, setPendingProducts] = useState([]);
 
   useEffect(() => {
     loadData();
@@ -34,10 +38,72 @@ export default function DispatchDashboard() {
       setSchedules(allRes.data);
       setTodaySchedules(todayRes.data);
       setUpcomingSchedules(upcomingRes.data);
+
+      // Calculate pending products for pie chart
+      await calculatePendingProducts(allRes.data);
     } catch (error) {
       toast.error('Failed to load dispatch schedules');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const calculatePendingProducts = async (schedules) => {
+    try {
+      // Get schedules that are not yet departed (pending dispatch)
+      const pendingSchedules = schedules.filter(schedule =>
+        schedule.status !== 'departed'
+      );
+
+      const productQuantities = {};
+
+      // For each pending schedule, get job order details
+      for (const schedule of pendingSchedules) {
+        if (schedule.job_numbers && schedule.job_numbers.length > 0) {
+          for (const jobNumber of schedule.job_numbers) {
+            try {
+              const jobRes = await jobOrderAPI.getOne(jobNumber);
+              const job = jobRes.data;
+
+              if (job.items && job.items.length > 0) {
+                // Multiple products in job order
+                job.items.forEach((item, index) => {
+                  const productName = schedule.product_names?.[index] || item.product_name || 'Unknown Product';
+                  const quantity = item.quantity || 0;
+
+                  if (productQuantities[productName]) {
+                    productQuantities[productName] += quantity;
+                  } else {
+                    productQuantities[productName] = quantity;
+                  }
+                });
+              } else {
+                // Single product in job order
+                const productName = schedule.product_names?.[0] || job.product_name || 'Unknown Product';
+                const quantity = job.quantity || 0;
+
+                if (productQuantities[productName]) {
+                  productQuantities[productName] += quantity;
+                } else {
+                  productQuantities[productName] = quantity;
+                }
+              }
+            } catch (error) {
+              console.error(`Failed to load job order ${jobNumber}:`, error);
+            }
+          }
+        }
+      }
+
+      // Convert to chart data format
+      const chartData = Object.entries(productQuantities)
+        .map(([name, value]) => ({ name, value: Math.round(value * 100) / 100 }))
+        .sort((a, b) => b.value - a.value); // Sort by quantity descending
+
+      setPendingProducts(chartData);
+    } catch (error) {
+      console.error('Failed to calculate pending products:', error);
+      toast.error('Failed to load pending products analytics');
     }
   };
 
@@ -247,6 +313,45 @@ export default function DispatchDashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Pending Products Pie Chart */}
+      {pendingProducts.length > 0 && (
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <PieChartIcon className="w-5 h-5 text-blue-400" />
+              Products Yet to be Dispatched
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={pendingProducts}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(1)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {pendingProducts.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value) => [value, 'Quantity']} />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="mt-4 text-sm text-muted-foreground text-center">
+              Total pending quantity: {pendingProducts.reduce((sum, item) => sum + item.value, 0).toFixed(2)} units
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">

@@ -3,13 +3,34 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Badge } from '../components/ui/badge';
+import { Textarea } from '../components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { 
   Settings, Building, FileText, CreditCard, Container, Users,
-  Plus, Trash2, Save, RefreshCw, Edit, Check, X, MapPin, Package
+  Plus, Trash2, Save, RefreshCw, Edit, Check, X, MapPin, Package, Truck, Receipt
 } from 'lucide-react';
 import { toast } from 'sonner';
-import api from '../lib/api';
+import { Checkbox } from '../components/ui/checkbox';
+import api, { transportRoutesAPI, fixedChargesAPI } from '../lib/api';
+
+// Helper function to format FastAPI validation errors
+const formatError = (error) => {
+  if (error.response?.data?.detail) {
+    const detail = error.response.data.detail;
+    if (Array.isArray(detail)) {
+      // Pydantic validation errors - format them
+      return detail.map(err => {
+        const field = err.loc?.join('.') || 'field';
+        return `${field}: ${err.msg || 'Invalid value'}`;
+      }).join(', ');
+    } else if (typeof detail === 'string') {
+      return detail;
+    } else {
+      return JSON.stringify(detail);
+    }
+  }
+  return error.message || 'An error occurred';
+};
 
 const SettingsPage = () => {
   const [activeTab, setActiveTab] = useState('vendors');
@@ -22,10 +43,13 @@ const SettingsPage = () => {
   const [bankAccounts, setBankAccounts] = useState([]);
   const [productPackagingConfigs, setProductPackagingConfigs] = useState([]);
   const [products, setProducts] = useState([]);
+  const [transportRoutes, setTransportRoutes] = useState([]);
+  const [fixedCharges, setFixedCharges] = useState([]);
   const [contactForDispatch, setContactForDispatch] = useState({
-    name: "Vidhesh",
-    phone: "+971 52 299 7006",
-    email: "vidhesh@asia-petrochem.com"
+    name: "Dispatch Department",
+    phone: "+971 4 2384533",
+    email: "dispatch@asia-petrochem.com",
+    address: "Plot # A 23 B, Al Jazeera Industrial Area, Ras Al Khaimah, UAE"
   });
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -39,11 +63,14 @@ const SettingsPage = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [vendorsRes, settingsRes, configsRes, productsRes] = await Promise.all([
+      const [vendorsRes, settingsRes, configsRes, productsRes, transportRes, fixedChargesRes, dispatchContactRes] = await Promise.all([
         api.get('/suppliers'),
         api.get('/settings/all').catch(() => ({ data: {} })),
         api.get('/product-packaging-configs').catch(() => ({ data: [] })),
-        api.get('/products').catch(() => ({ data: [] }))
+        api.get('/products').catch(() => ({ data: [] })),
+        transportRoutesAPI.getAll().catch(() => ({ data: [] })),
+        fixedChargesAPI.getAll().catch(() => ({ data: [] })),
+        api.get('/settings/contact-for-dispatch').catch(() => ({ data: null }))
       ]);
       setVendors(vendorsRes.data || []);
       
@@ -56,7 +83,13 @@ const SettingsPage = () => {
       setBankAccounts(settings.bank_accounts || []);
       setProductPackagingConfigs(configsRes.data || []);
       setProducts((productsRes.data || []).filter(p => p.category === 'finished_product'));
-      if (settings.contact_for_dispatch) {
+      setTransportRoutes(transportRes.data || []);
+      setFixedCharges(fixedChargesRes.data || []);
+      
+      // Load contact for dispatch from dedicated endpoint or settings
+      if (dispatchContactRes.data) {
+        setContactForDispatch(dispatchContactRes.data);
+      } else if (settings.contact_for_dispatch) {
         setContactForDispatch(settings.contact_for_dispatch);
       }
     } catch (error) {
@@ -90,6 +123,8 @@ const SettingsPage = () => {
         packaging: `/settings/packaging-types/${id}`,
         banks: `/settings/bank-accounts/${id}`,
         product_packaging: `/product-packaging-configs/${id}`,
+        transport_routes: `/transport-routes/${id}`,
+        fixed_charges: `/fixed-charges/${id}`,
       };
       await api.delete(endpoints[type]);
       toast.success('Deleted successfully');
@@ -108,6 +143,8 @@ const SettingsPage = () => {
     { id: 'packaging', label: 'Packaging Types', icon: Package },
     { id: 'product_packaging', label: 'Product-Packaging Configs', icon: Package },
     { id: 'banks', label: 'Bank Accounts', icon: CreditCard },
+    { id: 'transport_routes', label: 'Transport Routes', icon: Truck },
+    { id: 'fixed_charges', label: 'Fixed Charges', icon: Receipt },
     { id: 'contact_dispatch', label: 'Contact for Dispatch', icon: Users }
   ];
 
@@ -295,15 +332,37 @@ const SettingsPage = () => {
                 onDelete={(id) => handleDelete('banks', id)}
               />
             )}
+            {activeTab === 'transport_routes' && (
+              <DataTable
+                data={transportRoutes}
+                columns={['route_name', 'origin', 'destination', 'vehicle_type', 'rate', 'currency', 'effective_date', 'is_active']}
+                labels={['Route Name', 'Origin', 'Destination', 'Vehicle Type', 'Rate', 'Currency', 'Effective Date', 'Active']}
+                onEdit={(item) => openEditModal('transport_routes', item)}
+                onDelete={(id) => handleDelete('transport_routes', id)}
+              />
+            )}
+            {activeTab === 'fixed_charges' && (
+              <DataTable
+                data={fixedCharges}
+                columns={['charge_type', 'charge_name', 'amount', 'currency', 'container_type', 'is_dg', 'applicable_to', 'effective_date', 'is_active']}
+                labels={['Charge Type', 'Charge Name', 'Amount', 'Currency', 'Container Type', 'Is DG', 'Applicable To', 'Effective Date', 'Active']}
+                onEdit={(item) => openEditModal('fixed_charges', item)}
+                onDelete={(id) => handleDelete('fixed_charges', id)}
+              />
+            )}
             {activeTab === 'contact_dispatch' && (
               <div className="space-y-4">
+                <p className="text-sm text-muted-foreground mb-4">
+                  Contact information displayed on export quotations for dispatch inquiries
+                </p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
-                    <Label>Name *</Label>
+                    <Label>Name/Department *</Label>
                     <Input
                       value={contactForDispatch.name || ''}
                       onChange={(e) => setContactForDispatch({...contactForDispatch, name: e.target.value})}
                       className="mt-1"
+                      placeholder="e.g., Dispatch Department"
                     />
                   </div>
                   <div>
@@ -312,6 +371,7 @@ const SettingsPage = () => {
                       value={contactForDispatch.phone || ''}
                       onChange={(e) => setContactForDispatch({...contactForDispatch, phone: e.target.value})}
                       className="mt-1"
+                      placeholder="e.g., +971 4 2384533"
                     />
                   </div>
                   <div>
@@ -321,8 +381,19 @@ const SettingsPage = () => {
                       value={contactForDispatch.email || ''}
                       onChange={(e) => setContactForDispatch({...contactForDispatch, email: e.target.value})}
                       className="mt-1"
+                      placeholder="e.g., dispatch@asia-petrochem.com"
                     />
                   </div>
+                </div>
+                <div>
+                  <Label>Address</Label>
+                  <Textarea
+                    value={contactForDispatch.address || ''}
+                    onChange={(e) => setContactForDispatch({...contactForDispatch, address: e.target.value})}
+                    className="mt-1"
+                    placeholder="Full address"
+                    rows={3}
+                  />
                 </div>
                 <Button 
                   onClick={async () => {
@@ -397,8 +468,24 @@ const DataTable = ({ data, columns, labels, onEdit, onDelete }) => {
                       ? item[col].join(', ')
                       : item.net_weight_kg || '-'}
                   </span>
-                ) : col === 'type' || col === 'required_for' ? (
+                ) : col === 'type' || col === 'required_for' || col === 'charge_type' ? (
                   <Badge className="bg-purple-500/20 text-purple-400">{item[col]?.toUpperCase()}</Badge>
+                ) : col === 'rate' || col === 'amount' ? (
+                  <span className="font-mono text-emerald-400">
+                    {item[col] != null ? `${item[col]} ${item.currency || ''}` : '-'}
+                  </span>
+                ) : col === 'is_active' || col === 'is_dg' ? (
+                  <Badge variant={item[col] ? 'default' : 'outline'}>
+                    {item[col] ? 'Yes' : 'No'}
+                  </Badge>
+                ) : col === 'container_type' ? (
+                  <Badge variant={item[col] ? 'default' : 'outline'}>
+                    {item[col] || 'All'}
+                  </Badge>
+                ) : col === 'applicable_to' ? (
+                  <Badge variant="outline">
+                    {item[col] || 'both'}
+                  </Badge>
                 ) : (
                   item[col] || '-'
                 )}
@@ -479,6 +566,34 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
           { key: 'swift', label: 'SWIFT Code' },
           { key: 'branch_address', label: 'Branch Address' },
         ];
+      case 'transport_routes':
+        return [
+          { key: 'route_name', label: 'Route Name', required: true },
+          { key: 'origin', label: 'Origin', required: true },
+          { key: 'destination', label: 'Destination', required: true },
+          { key: 'vehicle_type', label: 'Vehicle Type', required: true },
+          { key: 'rate', label: 'Rate', type: 'number', required: true },
+          { key: 'currency', label: 'Currency', type: 'select', options: ['USD', 'AED', 'EUR'], required: true },
+          { key: 'effective_date', label: 'Effective Date', type: 'date', required: true },
+          { key: 'is_active', label: 'Active', type: 'checkbox' },
+        ];
+      case 'fixed_charges':
+        return [
+          { key: 'charge_type', label: 'Charge Type', type: 'select', options: [
+            'THC', 'ISPS', 'DOCUMENTATION', 'BL_FEES',
+            'TLUC', 'SEAL_CHARGES', 'CONTAINER_PROTECTION', 'FLEXI_SURCHARGE',
+            'NMC_CERTIFICATE', 'SERVICE_FEE', 'BILL_OF_ENTRY',
+            'EPDA', 'SIRA', 'MOFAIC', 'RAK_CHAMBER', 'MOH', 'CERTIFICATE_OF_ORIGIN'
+          ], required: true },
+          { key: 'charge_name', label: 'Charge Name', required: true },
+          { key: 'amount', label: 'Amount (Per Container)', type: 'number', required: true },
+          { key: 'currency', label: 'Currency', type: 'select', options: ['USD', 'AED', 'EUR'], required: true },
+          { key: 'effective_date', label: 'Effective Date', type: 'date', required: true },
+          { key: 'is_active', label: 'Active', type: 'checkbox' },
+          { key: 'container_type', label: 'Container Type', type: 'select', options: ['20ft', '40ft'], required: false },
+          { key: 'is_dg', label: 'Is DG?', type: 'checkbox', required: false },
+          { key: 'applicable_to', label: 'Applicable To', type: 'select', options: ['both', 'export', 'local'], required: false },
+        ];
       case 'product_packaging':
         return [
           { key: 'product_id', label: 'Product', type: 'select', options: (products || []).map(p => ({ value: p.id, label: p.name })), required: true },
@@ -513,6 +628,8 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
       packaging: '/settings/packaging-types',
       banks: '/settings/bank-accounts',
       product_packaging: '/product-packaging-configs',
+      transport_routes: '/transport-routes',
+      fixed_charges: '/fixed-charges',
     };
     return {
       post: base[type],
@@ -535,6 +652,22 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
       const endpoints = getEndpoints();
       // For packaging types, ensure net_weights is included
       const dataToSave = { ...form };
+      
+      // Ensure boolean fields are properly converted
+      const booleanFields = ['is_active', 'is_dg'];
+      booleanFields.forEach(field => {
+        if (dataToSave.hasOwnProperty(field)) {
+          // Convert string 'true'/'false' to boolean, undefined/null to false
+          if (dataToSave[field] === 'true' || dataToSave[field] === true) {
+            dataToSave[field] = true;
+          } else if (dataToSave[field] === 'false' || dataToSave[field] === false) {
+            dataToSave[field] = false;
+          } else {
+            dataToSave[field] = false; // Default to false if not set
+          }
+        }
+      });
+      
       if (type === 'packaging' && netWeights.length > 0) {
         dataToSave.net_weights = netWeights.filter(w => w !== '' && w !== null && !isNaN(w));
       }
@@ -562,17 +695,31 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
         });
       }
       
-      if (isEdit) {
-        await api.put(endpoints.put, dataToSave);
+      // Use appropriate API for transport routes and fixed charges
+      if (type === 'transport_routes') {
+        if (isEdit) {
+          await transportRoutesAPI.update(item.id, dataToSave);
+        } else {
+          await transportRoutesAPI.create(dataToSave);
+        }
+      } else if (type === 'fixed_charges') {
+        if (isEdit) {
+          await fixedChargesAPI.update(item.id, dataToSave);
+        } else {
+          await fixedChargesAPI.create(dataToSave);
+        }
       } else {
-        await api.post(endpoints.post, dataToSave);
+        if (isEdit) {
+          await api.put(endpoints.put, dataToSave);
+        } else {
+          await api.post(endpoints.post, dataToSave);
+        }
       }
       toast.success(isEdit ? 'Updated successfully' : 'Added successfully');
       onSave();
     } catch (error) {
       console.error('Save error:', error);
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to save';
-      toast.error(errorMessage);
+      toast.error(formatError(error) || 'Failed to save');
     } finally {
       setSaving(false);
     }
@@ -599,13 +746,25 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
   useEffect(() => {
     if (item) {
       const updatedForm = { ...item };
+      // Ensure boolean fields are properly set
+      if (updatedForm.is_active !== undefined) {
+        updatedForm.is_active = updatedForm.is_active === true || updatedForm.is_active === 'true';
+      } else {
+        updatedForm.is_active = true; // Default to true for new items
+      }
+      if (updatedForm.is_dg !== undefined) {
+        updatedForm.is_dg = updatedForm.is_dg === true || updatedForm.is_dg === 'true';
+      }
       const weights = item.net_weights && Array.isArray(item.net_weights) 
         ? item.net_weights 
         : (item.net_weight_kg ? [item.net_weight_kg] : []);
       setForm(updatedForm);
       setNetWeights(weights);
     } else {
-      setForm({});
+      // Set default values for new items
+      setForm({
+        is_active: true, // Default to true for new items
+      });
       setNetWeights([]);
     }
   }, [item]);
@@ -691,6 +850,22 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
                     <Plus className="w-4 h-4 mr-2" />
                     Add Net Weight
                   </Button>
+                </div>
+              ) : field.type === 'checkbox' ? (
+                <div className="mt-2 flex items-center space-x-2">
+                  <Checkbox
+                    id={field.key}
+                    checked={form[field.key] === true || form[field.key] === 'true'}
+                    onCheckedChange={(checked) => {
+                      setForm({ ...form, [field.key]: checked === true });
+                    }}
+                  />
+                  <label
+                    htmlFor={field.key}
+                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer"
+                  >
+                    Enable
+                  </label>
                 </div>
               ) : (
                 <Input

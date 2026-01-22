@@ -25,7 +25,7 @@ export default function SalesOrdersPage() {
 
   const [form, setForm] = useState({
     quotation_id: '',
-    expected_delivery_date: '',
+    // expected_delivery_date: '',
     notes: '',
   });
 
@@ -66,7 +66,7 @@ export default function SalesOrdersPage() {
       await salesOrderAPI.create(form);
       toast.success('Sales order created successfully');
       setCreateOpen(false);
-      setForm({ quotation_id: '', expected_delivery_date: '', notes: '' });
+      setForm({ quotation_id: '', notes: '' });
       loadData();
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Failed to create order');
@@ -143,7 +143,7 @@ export default function SalesOrdersPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="form-field">
+                {/* <div className="form-field">
                   <Label>Expected Delivery Date</Label>
                   <Input
                     type="date"
@@ -151,7 +151,7 @@ export default function SalesOrdersPage() {
                     onChange={(e) => setForm({...form, expected_delivery_date: e.target.value})}
                     data-testid="delivery-date-input"
                   />
-                </div>
+                </div> */}
                 <div className="form-field">
                   <Label>Notes</Label>
                   <Input

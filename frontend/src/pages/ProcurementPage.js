@@ -23,6 +23,7 @@ const ProcurementPage = () => {
   const [purchaseOrders, setPurchaseOrders] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [companies, setCompanies] = useState([]);
+  const [paymentTerms, setPaymentTerms] = useState(PAYMENT_TERMS); // Payment terms from settings + defaults
   const [loading, setLoading] = useState(false);
   const [selectedShortages, setSelectedShortages] = useState([]);
   const [showGeneratePO, setShowGeneratePO] = useState(false);
@@ -35,14 +36,40 @@ const ProcurementPage = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [shortagesRes, poRes, suppRes] = await Promise.all([
+      const [shortagesRes, poRes, suppRes, settingsRes] = await Promise.all([
         api.get('/procurement/shortages'),
         api.get('/purchase-orders'),
-        api.get('/suppliers')
+        api.get('/suppliers'),
+        api.get('/settings/all').catch(() => ({ data: {} }))
       ]);
       setShortages(shortagesRes.data);
       setPurchaseOrders(poRes.data || []);
       setSuppliers(suppRes.data || []);
+      
+      // Load payment terms from settings and merge with defaults
+      const settings = settingsRes.data || {};
+      const paymentTermsFromSettings = settings.payment_terms || [];
+      const termsFromSettings = paymentTermsFromSettings.map(t => t.name || t).filter(Boolean);
+      
+      // Merge defaults with settings terms, checking for duplicates
+      const merged = [...PAYMENT_TERMS];
+      const duplicates = [];
+      
+      termsFromSettings.forEach(term => {
+        const existsIndex = merged.findIndex(t => t.toLowerCase() === term.toLowerCase());
+        if (existsIndex >= 0) {
+          duplicates.push(term);
+        } else {
+          merged.push(term);
+        }
+      });
+      
+      if (duplicates.length > 0) {
+        console.warn('Duplicate payment terms found in Procurement:', duplicates);
+        toast.warning(`Duplicate payment terms ignored: ${duplicates.join(', ')}`);
+      }
+      
+      setPaymentTerms(merged);
       
       try {
         const compRes = await api.get('/companies');
@@ -215,6 +242,7 @@ const ProcurementPage = () => {
           selectedItems={selectedShortages}
           suppliers={suppliers}
           companies={companies}
+          paymentTerms={paymentTerms}
           onClose={() => setShowGeneratePO(false)}
           onCreated={() => {
             setShowGeneratePO(false);
@@ -528,7 +556,7 @@ const POCard = ({ po, onRefresh, showStatus }) => {
 };
 
 // ==================== GENERATE PO MODAL ====================
-const GeneratePOModal = ({ selectedItems, suppliers, companies, onClose, onCreated }) => {
+const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, onClose, onCreated }) => {
   const [form, setForm] = useState({
     supplier_id: '',
     billing_company_id: '',
@@ -712,7 +740,7 @@ const GeneratePOModal = ({ selectedItems, suppliers, companies, onClose, onCreat
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {PAYMENT_TERMS.map(t => (
+                    {paymentTerms?.map(t => (
                       <SelectItem key={t} value={t}>{t}</SelectItem>
                     ))}
                   </SelectContent>
