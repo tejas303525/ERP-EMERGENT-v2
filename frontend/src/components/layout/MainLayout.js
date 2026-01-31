@@ -26,7 +26,6 @@ import {
   UserCog,
   DollarSign,
   FileStack,
-  Container,
   Globe,
   Shield,
   Microscope,
@@ -37,36 +36,35 @@ import { Button } from '../ui/button';
 import { cn } from '../../lib/utils';
 
 const menuItems = [
-  { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard', roles: ['all'] },
-  { icon: FileText, label: 'Quotations', path: '/quotations', roles: ['admin', 'sales', 'finance'] },
-  { icon: ShoppingCart, label: 'Sales Orders', path: '/sales-orders', roles: ['admin', 'sales', 'finance'] },
-  { icon: Factory, label: 'Job Orders', path: '/job-orders', roles: ['admin', 'production', 'procurement'] },
-  { icon: Calendar, label: 'Production Dashboard (Schedule and Planning)', path: '/production-schedule', roles: ['admin', 'production', 'procurement'] },
-  // { icon: PackageCheck, label: 'Material Availability', path: '/material-availability', roles: ['admin', 'production', 'procurement'] },
+  { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard', category: 'core' },
+  
+  // 8 Main Windows
+  { icon: FileText, label: 'Commercial Contracts', path: '/quotations', category: 'main', roles: ['admin', 'sales', 'finance'] },
+  { icon: ShoppingCart, label: 'Contracts', path: '/sales-orders', category: 'main', roles: ['admin', 'sales', 'finance'] },
+  { icon: Factory, label: 'Order Fulfillment', path: '/job-orders', category: 'main', roles: ['admin', 'production', 'procurement'] },
+  { icon: Calendar, label: 'Production', path: '/production-schedule', category: 'main', roles: ['admin', 'production', 'procurement'] },
+  { icon: ShoppingCart, label: 'Procurement Window', path: '/procurement', category: 'main', roles: ['admin', 'procurement'] },
+  { icon: Globe, label: 'Logistics Inwards (Imports)', path: '/import-window', category: 'main', roles: ['admin', 'procurement', 'finance'] },
+  { icon: Ship, label: 'Shipping Window', path: '/shipping', category: 'main', roles: ['admin', 'shipping'] },
+  { icon: Truck, label: 'Transport Window', path: '/transport-window', category: 'main', roles: ['admin', 'transport', 'procurement'] },
+  { icon: Shield, label: 'Security & Q.C.', path: '/security-qc', category: 'main', roles: ['admin', 'security', 'qc'] },
+  
+  // Additional Pages
   { icon: FileStack, label: 'BOM Management', path: '/bom-management', roles: ['admin', 'production', 'inventory'] },
   { icon: Boxes, label: 'Inventory', path: '/inventory', roles: ['admin', 'inventory', 'production', 'procurement'] },
   { icon: Package, label: 'Stock Management', path: '/stock-management', roles: ['admin', 'inventory'] },
   { icon: Receipt, label: 'GRN', path: '/grn', roles: ['admin', 'security', 'inventory', 'finance'] },
   { icon: ClipboardList, label: 'Delivery Orders', path: '/delivery-orders', roles: ['admin', 'security', 'shipping'] },
-  { icon: Ship, label: 'Shipping', path: '/shipping', roles: ['admin', 'shipping'] },
-  { icon: Truck, label: 'Transport Window', path: '/transport-window', roles: ['admin', 'transport', 'procurement'] },
-  { icon: Globe, label: 'Import Window', path: '/import-window', roles: ['admin', 'procurement', 'finance'] },
-  // { icon: ArrowUpFromLine, label: 'Loading/Unloading', path: '/loading-unloading', roles: ['admin', 'warehouse', 'transport', 'security'] },
-  // { icon: DoorOpen, label: 'Dispatch Gate', path: '/dispatch-gate', roles: ['admin', 'security', 'shipping', 'transport'] },
-  { icon: Shield, label: 'Security Gate', path: '/security', roles: ['admin', 'security'] },
   { icon: Microscope, label: 'QC Inspection', path: '/qc-inspection', roles: ['admin', 'qc'] },
   { icon: FileCheck, label: 'Documentation', path: '/documentation', roles: ['admin', 'documentation'] },
-  // { icon: ClipboardCheck, label: 'Quality Control', path: '/qc', roles: ['admin', 'qc'] },
-  { icon: ShoppingCart, label: 'Procurement', path: '/procurement', roles: ['admin', 'procurement'] },
   { icon: DollarSign, label: 'Finance Approval', path: '/finance-approval', roles: ['admin', 'finance'] },
   { icon: DollarSign, label: 'Payables (AP)', path: '/payables', roles: ['admin', 'finance'] },
   { icon: Receipt, label: 'Receivables (AR)', path: '/receivables', roles: ['admin', 'finance', 'sales'] },
   { icon: Users, label: 'Customers', path: '/customers', roles: ['admin', 'sales'] },
   { icon: Package, label: 'Products', path: '/products', roles: ['admin', 'inventory', 'sales'] },
-  { icon: Truck, label: 'Transport Operation', path: '/transport-operation', roles: ['admin', 'transport'] },
-  { icon: Container, label: 'Transport Planner', path: '/transport-planner', roles: ['admin', 'transport'] },
   { icon: FileStack, label: 'Settings', path: '/settings', roles: ['admin'] },
   { icon: UserCog, label: 'User Management', path: '/users', roles: ['admin'] },
+  { icon: Shield, label: 'Role Management', path: '/roles', roles: ['admin'] },
 ];
 
 export const MainLayout = ({ children }) => {
@@ -75,9 +73,26 @@ export const MainLayout = ({ children }) => {
   const { user, logout } = useAuth();
   const location = useLocation();
 
-  const filteredMenu = menuItems.filter(
-    (item) => item.roles.includes('all') || item.roles.includes(user?.role)
-  );
+  const filteredMenu = menuItems.filter((item) => {
+    // Admin sees everything
+    if (user?.role === 'admin') return true;
+    
+    // If user has allowed_pages from their custom role
+    if (user?.allowed_pages && user.allowed_pages.length > 0) {
+      // If allowed_pages is ["all"], show everything (admin case)
+      if (user.allowed_pages.includes('all')) return true;
+      // Show if path is in allowed_pages or if it's dashboard
+      return user.allowed_pages.includes(item.path) || item.path === '/dashboard';
+    }
+    
+    // Fallback to old role-based filtering
+    if (item.roles) {
+      return item.roles.includes(user?.role);
+    }
+    
+    // Default: hide if no permission logic matches
+    return false;
+  });
 
   const getRoleBadgeColor = (role) => {
     const colors = {
@@ -182,7 +197,7 @@ export const MainLayout = ({ children }) => {
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <header className="h-16 glass border-b border-border flex items-center justify-between px-4 lg:px-6">
+        <header className="h-16 bg-white border-b border-[#E5E7EB] flex items-center justify-between px-4 lg:px-6">
           <Button
             variant="ghost"
             size="icon"

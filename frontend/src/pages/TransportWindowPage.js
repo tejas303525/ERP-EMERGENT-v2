@@ -182,14 +182,18 @@ const TransportWindowPage = () => {
       // Get unbooked jobs that need dispatch booking
       const existingJobIds = new Set(bookedLocal.map(t => t.job_order_id).filter(Boolean));
       
-      // Include ALL ready_for_dispatch jobs, not just those with specific incoterms
-      // The incoterm filter was too restrictive - show all jobs ready for dispatch
-      const unbookedJobs = jobsData.filter(job => 
-        job.status === 'ready_for_dispatch' &&
-        !existingJobIds.has(job.id) &&
-        !job.transport_outward_id &&
-        !job.transport_booked
-      );
+      // Only include local/domestic orders - exclude export incoterms (CIF, FOB, etc.)
+      const unbookedJobs = jobsData.filter(job => {
+        const incoterm = (job.incoterm || '').toUpperCase();
+        // Exclude CIF, FOB, CFR, and other export incoterms from local dispatch
+        const isExportIncoterm = ['CIF', 'FOB', 'CFR', 'FCA', 'CPT', 'CIP', 'DAP', 'DPU', 'DDP'].includes(incoterm);
+        
+        return job.status === 'ready_for_dispatch' &&
+          !existingJobIds.has(job.id) &&
+          !job.transport_outward_id &&
+          !job.transport_booked &&
+          !isExportIncoterm;  // Only local/domestic orders
+      });
       
       // Combine booked local dispatches with unbooked jobs
       const finalLocalDispatch = [
@@ -209,7 +213,8 @@ const TransportWindowPage = () => {
           transport_number: null,
           needs_booking: true,
           delivery_date: job.delivery_date || job.expected_delivery_date,
-          total_weight_mt: job.total_weight_mt
+          total_weight_mt: job.total_weight_mt,
+          incoterm: job.incoterm
         }))
       ];
       // #region agent log
@@ -224,18 +229,39 @@ const TransportWindowPage = () => {
       const existingContainerJobIds = new Set(bookedContainer.map(t => t.job_order_id).filter(Boolean));
       // Also check jobs that are already in bookedContainer to avoid duplicates
       const allContainerJobIds = new Set([...existingContainerJobIds, ...existingJobIds]);
-      const unbookedContainerJobs = jobsData.filter(job => 
-        job.status === 'ready_for_dispatch' &&
-        !allContainerJobIds.has(job.id) &&
-        !job.transport_outward_id &&
-        !job.transport_booked &&
-        // Check if job needs container transport (has container_count or container_type)
-        (job.container_count > 0 || job.container_type)
-      );
+      const unbookedContainerJobs = jobsData.filter(job => {
+        const incoterm = (job.incoterm || '').toUpperCase();
+        // Include CIF, FOB, CFR, and other export incoterms
+        const isExportIncoterm = ['CIF', 'FOB', 'CFR', 'FCA', 'CPT', 'CIP', 'DAP', 'DPU', 'DDP'].includes(incoterm);
+        
+        return job.status === 'ready_for_dispatch' &&
+          !allContainerJobIds.has(job.id) &&
+          !job.transport_outward_id &&
+          !job.transport_booked &&
+          isExportIncoterm;  // Only export incoterm orders
+      });
       
       // Combine booked containers with unbooked jobs
+      // First, deduplicate booked containers by job_order_id to avoid showing same job multiple times
+      const bookedContainerByJob = new Map();
+      bookedContainer.forEach(transport => {
+        const jobId = transport.job_order_id || transport.job_number;
+        if (jobId) {
+          if (!bookedContainerByJob.has(jobId)) {
+            bookedContainerByJob.set(jobId, transport);
+          } else {
+            // If this job already exists, merge/update with latest info
+            const existing = bookedContainerByJob.get(jobId);
+            // Keep the transport with more complete data (has transport_number preferred)
+            if (transport.transport_number && !existing.transport_number) {
+              bookedContainerByJob.set(jobId, transport);
+            }
+          }
+        }
+      });
+
       const finalExportContainer = [
-        ...bookedContainer,
+        ...Array.from(bookedContainerByJob.values()),
         ...unbookedContainerJobs.map(job => ({
           id: `unbooked-job-${job.id}`,
           job_order_id: job.id,
@@ -253,7 +279,8 @@ const TransportWindowPage = () => {
           transport_number: null,
           needs_booking: true,
           delivery_date: job.delivery_date || job.expected_delivery_date,
-          total_weight_mt: job.total_weight_mt
+          total_weight_mt: job.total_weight_mt,
+          incoterm: job.incoterm
         }))
       ];
       // #region agent log
@@ -478,396 +505,99 @@ const TransportWindowPage = () => {
           Transport Window
         </h1>
         <p className="text-muted-foreground mt-1">
-          Transport Window Dashboard - All Views
+          Transport Window Dashboard
         </p>
       </div>
-
-      {/* Stats Cards */}
-      <div className="grid grid-cols-8 gap-4 mb-6">
-        <div className="glass p-4 rounded-lg border border-emerald-500/30">
-          <p className="text-sm text-muted-foreground">Inward DDP Pending</p>
-          <p className="text-2xl font-bold text-emerald-400">{ddpPending}</p>
-        </div>
-        <div className="glass p-4 rounded-lg border border-blue-500/30">
-          <p className="text-sm text-muted-foreground">Inward EXW Pending</p>
-          <p className="text-2xl font-bold text-blue-400">{exwPending}</p>
-        </div>
-        <div className="glass p-4 rounded-lg border border-purple-500/30">
-          <p className="text-sm text-muted-foreground">Inward Import Pending</p>
-          <p className="text-2xl font-bold text-purple-400">{importPending}</p>
-        </div>
-        <div className="glass p-4 rounded-lg border border-amber-500/30">
-          <p className="text-sm text-muted-foreground">Local Dispatch Pending</p>
-          <p className="text-2xl font-bold text-amber-400">{localPending}</p>
-        </div>
-        <div className="glass p-4 rounded-lg border border-green-500/30">
-          <p className="text-sm text-muted-foreground">Export Container Pending</p>
-          <p className="text-2xl font-bold text-green-400">{exportPending}</p>
-        </div>
-        <div className="glass p-4 rounded-lg border border-cyan-500/30">
-          <p className="text-sm text-muted-foreground">Dispatched MT</p>
-          <p className="text-2xl font-bold text-cyan-400">{dispatchedMT.toFixed(2)}</p>
-        </div>
-        <div className="glass p-4 rounded-lg border border-orange-500/30">
-          <p className="text-sm text-muted-foreground">Pending MT</p>
-          <p className="text-2xl font-bold text-orange-400">{pendingMT.toFixed(2)}</p>
-        </div>
-        <div className="glass p-4 rounded-lg border border-green-500/30">
-          <p className="text-sm text-muted-foreground">Today's Deliveries</p>
-          <p className="text-2xl font-bold text-green-400">{todaysDeliveries.length}</p>
-        </div>
-      </div>
-
-      {/* PENDING TRANSPORTATION BOOKINGS ALERT */}
-      {(pendingTransportBookings.urgent.length > 0 || pendingTransportBookings.warning.length > 0 || pendingTransportBookings.normal.length > 0) && (
-        <div className="glass rounded-lg border-2 border-orange-500/50 p-4 animate-pulse">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <AlertTriangle className="w-6 h-6 text-orange-400 animate-bounce" />
-              <div>
-                <h3 className="text-lg font-semibold text-orange-400">
-                  Transportation Booking Required
-                </h3>
-                <p className="text-sm text-muted-foreground">
-                  {pendingTransportBookings.urgent.length + pendingTransportBookings.warning.length + pendingTransportBookings.normal.length} orders waiting for transportation booking
-                </p>
-              </div>
-            </div>
-            <div className="flex gap-4">
-              {pendingTransportBookings.urgent.length > 0 && (
-                <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/20 border border-red-500/50 animate-pulse">
-                  <div className="w-2 h-2 bg-red-500 rounded-full animate-ping"></div>
-                  <span className="text-red-400 font-medium">
-                    {pendingTransportBookings.urgent.length} Urgent (&gt;3 days)
-                  </span>
-                </div>
-              )}
-              {pendingTransportBookings.warning.length > 0 && (
-                <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-yellow-500/20 border border-yellow-500/50 animate-pulse">
-                  <div className="w-2 h-2 bg-yellow-500 rounded-full animate-ping"></div>
-                  <span className="text-yellow-400 font-medium">
-                    {pendingTransportBookings.warning.length} Warning (2 days)
-                  </span>
-                </div>
-              )}
-              {pendingTransportBookings.normal.length > 0 && (
-                <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-green-500/20 border border-green-500/50 animate-pulse">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-ping"></div>
-                  <span className="text-green-400 font-medium">
-                    {pendingTransportBookings.normal.length} Normal (&lt;2 days)
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Detailed scrollable table */}
-          <div className="border border-orange-500/30 rounded-lg overflow-hidden">
-            <div className="max-h-96 overflow-y-auto">
-              <table className="w-full">
-                <thead className="bg-orange-500/10 sticky top-0">
-                  <tr className="border-b border-orange-500/30">
-                    <th className="p-3 text-left text-xs font-medium text-orange-400">Order #</th>
-                    <th className="p-3 text-left text-xs font-medium text-orange-400">Product</th>
-                    <th className="p-3 text-left text-xs font-medium text-orange-400">Type</th>
-                    <th className="p-3 text-left text-xs font-medium text-orange-400">Days Pending</th>
-                    <th className="p-3 text-left text-xs font-medium text-orange-400">Status</th>
-                    <th className="p-3 text-left text-xs font-medium text-orange-400">Priority</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {/* Urgent orders */}
-                  {pendingTransportBookings.urgent.map((order, index) => {
-                    const getProductDisplay = (order) => {
-                      if (order.po_items && order.po_items.length > 0) {
-                        const products = order.po_items.slice(0, 2).map(item =>
-                          item.product_name || item.item_name || 'Unknown'
-                        ).join(', ');
-                        return order.po_items.length > 2 ? `${products} (+${order.po_items.length - 2} more)` : products;
-                      }
-                      return order.product_name || order.products_summary || '-';
-                    };
-
-                    const getOrderType = (order) => {
-                      if (order.po_number) return 'PO';
-                      if (order.job_number) return 'Job Order';
-                      if (order.import_number) return 'Import';
-                      return 'Transport';
-                    };
-
-                    return (
-                      <tr key={`urgent-${index}`} className="border-b border-red-500/20 bg-red-500/5 hover:bg-red-500/10 transition-colors animate-pulse">
-                        <td className="p-3 font-mono text-sm text-red-300">
-                          {order.po_number || order.job_number || order.import_number || '-'}
-                        </td>
-                        <td className="p-3 text-sm max-w-[200px] truncate" title={getProductDisplay(order)}>
-                          {getProductDisplay(order)}
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-red-500/20 text-red-400 text-xs">
-                            {getOrderType(order)}
-                          </Badge>
-                        </td>
-                        <td className="p-3 text-sm text-red-300 font-medium">
-                          {order.daysPending} days
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-red-500/20 text-red-400 text-xs animate-pulse">
-                            🚨 NOT BOOKED
-                          </Badge>
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-red-500/20 text-red-400 text-xs border border-red-500/50 animate-pulse">
-                            URGENT
-                          </Badge>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {/* Warning orders */}
-                  {pendingTransportBookings.warning.map((order, index) => {
-                    const getProductDisplay = (order) => {
-                      if (order.po_items && order.po_items.length > 0) {
-                        const products = order.po_items.slice(0, 2).map(item =>
-                          item.product_name || item.item_name || 'Unknown'
-                        ).join(', ');
-                        return order.po_items.length > 2 ? `${products} (+${order.po_items.length - 2} more)` : products;
-                      }
-                      return order.product_name || order.products_summary || '-';
-                    };
-
-                    const getOrderType = (order) => {
-                      if (order.po_number) return 'PO';
-                      if (order.job_number) return 'Job Order';
-                      if (order.import_number) return 'Import';
-                      return 'Transport';
-                    };
-
-                    return (
-                      <tr key={`warning-${index}`} className="border-b border-yellow-500/20 bg-yellow-500/5 hover:bg-yellow-500/10 transition-colors animate-pulse">
-                        <td className="p-3 font-mono text-sm text-yellow-300">
-                          {order.po_number || order.job_number || order.import_number || '-'}
-                        </td>
-                        <td className="p-3 text-sm max-w-[200px] truncate" title={getProductDisplay(order)}>
-                          {getProductDisplay(order)}
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-yellow-500/20 text-yellow-400 text-xs">
-                            {getOrderType(order)}
-                          </Badge>
-                        </td>
-                        <td className="p-3 text-sm text-yellow-300 font-medium">
-                          {order.daysPending} days
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-yellow-500/20 text-yellow-400 text-xs animate-pulse">
-                            ⚠️ NOT BOOKED
-                          </Badge>
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-yellow-500/20 text-yellow-400 text-xs border border-yellow-500/50 animate-pulse">
-                            WARNING
-                          </Badge>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {/* Normal orders */}
-                  {pendingTransportBookings.normal.map((order, index) => {
-                    const getProductDisplay = (order) => {
-                      if (order.po_items && order.po_items.length > 0) {
-                        const products = order.po_items.slice(0, 2).map(item =>
-                          item.product_name || item.item_name || 'Unknown'
-                        ).join(', ');
-                        return order.po_items.length > 2 ? `${products} (+${order.po_items.length - 2} more)` : products;
-                      }
-                      return order.product_name || order.products_summary || '-';
-                    };
-
-                    const getOrderType = (order) => {
-                      if (order.po_number) return 'PO';
-                      if (order.job_number) return 'Job Order';
-                      if (order.import_number) return 'Import';
-                      return 'Transport';
-                    };
-
-                    return (
-                      <tr key={`normal-${index}`} className="border-b border-green-500/20 bg-green-500/5 hover:bg-green-500/10 transition-colors animate-pulse">
-                        <td className="p-3 font-mono text-sm text-green-300">
-                          {order.po_number || order.job_number || order.import_number || '-'}
-                        </td>
-                        <td className="p-3 text-sm max-w-[200px] truncate" title={getProductDisplay(order)}>
-                          {getProductDisplay(order)}
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-green-500/20 text-green-400 text-xs">
-                            {getOrderType(order)}
-                          </Badge>
-                        </td>
-                        <td className="p-3 text-sm text-green-300 font-medium">
-                          {order.daysPending} days
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-green-500/20 text-green-400 text-xs animate-pulse">
-                            ✅ NOT BOOKED
-                          </Badge>
-                        </td>
-                        <td className="p-3">
-                          <Badge className="bg-green-500/20 text-green-400 text-xs border border-green-500/50 animate-pulse">
-                            NORMAL
-                          </Badge>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Summary footer */}
-          <div className="mt-3 text-center text-sm text-muted-foreground">
-            Scroll to view all pending transportation bookings • Total: {pendingTransportBookings.urgent.length + pendingTransportBookings.warning.length + pendingTransportBookings.normal.length} orders
-          </div>
-        </div>
-      )}
 
       {loading ? (
         <div className="flex items-center justify-center h-64">
           <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <div className="space-y-6">
-          {/* TODAY'S DELIVERIES - Blinking Section - Moved to Top */}
-          {todaysDeliveries.length > 0 && (
-            <div className="glass rounded-lg border border-green-500/50 overflow-hidden">
-              <TodaysDeliveriesWidget 
-                deliveries={todaysDeliveries}
-                onStatusUpdate={handleStatusUpdate}
-                onViewDetails={handleViewDetails}
-              />
-            </div>
-          )}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* LEFT: INWARD TABLE SECTION */}
+          <div className="space-y-4">
+            <h2 className="text-xl font-semibold text-foreground">INWARD TABLE</h2>
+            <div className="space-y-6">
+              {/* Table 1: Exworks (procurement) */}
+              <div>
+                <div className="mb-3 px-1">
+                  <h3 className="font-semibold text-base">Table 1: Exworks (procurement)/DDP</h3>
+                </div>
+                <InwardEXWTab 
+                  transports={[...inwardDDP, ...inwardEXW]} 
+                  onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'inward')}
+                  onRefresh={loadData}
+                  onViewDetails={handleViewDetails}
+                  onBookTransport={(item) => {
+                    // Determine booking type based on incoterm
+                    const bookingType = (item.incoterm === 'DDP' || item.source === 'PO_DDP') ? 'INWARD_DDP' : 'INWARD_EXW';
+                    setBookingType(bookingType);
+                    setBookingItem(item);
+                    setShowBookingModal(true);
+                  }}
+                />
+              </div>
 
-          {/* SCHEDULED BOOKINGS SECTION - Two Column Layout */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Left: Inward Scheduled Bookings */}
-            <div className="glass rounded-lg border border-border">
-              <InwardScheduledBookingsTable 
-                inwardDDP={inwardDDP}
-                inwardEXW={inwardEXW}
-                inwardImport={inwardImport}
-                scheduled={inwardScheduled}
-                onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'inward')}
-                onViewDetails={handleViewDetails}
-                onRefresh={loadData}
-              />
-            </div>
-
-            {/* Right: Outward Scheduled Bookings */}
-            <div className="glass rounded-lg border border-border">
-              <OutwardScheduledBookingsTable 
-                local={localDispatch}
-                container={exportContainer}
-                scheduled={outwardScheduled}
-                onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
-                onViewDetails={handleViewDetails}
-                onRefresh={loadData}
-                onBookTransport={(item) => {
-                  setBookingType(item.transport_type === 'CONTAINER' ? 'EXPORT_CONTAINER' : 'LOCAL_DISPATCH');
-                  setBookingItem(item);
-                  setShowBookingModal(true);
-                }}
-              />
+              {/* Table 2: Logistics inward */}
+              <div>
+                <div className="mb-3 px-1">
+                  <h3 className="font-semibold text-base">Table 2: Logistics inward</h3>
+                </div>
+                <InwardImportTab 
+                  imports={inwardImport}
+                  onRefresh={loadData}
+                  onViewDetails={handleViewDetails}
+                  onBookTransport={(item) => {
+                    setBookingType('INWARD_IMPORT');
+                    setBookingItem(item);
+                    setShowBookingModal(true);
+                  }}
+                />
+              </div>
             </div>
           </div>
 
-          {/* ALL TRANSPORTS SECTION - Keep existing tab components but show all */}
-          <div className="space-y-6">
-            {/* Inward DDP and EXW Tables - Side by Side */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <InwardDDPTab 
-                transports={inwardDDP} 
-                onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'inward')}
-                onRefresh={loadData}
-                onViewDetails={handleViewDetails}
-                onBookTransport={(item) => {
-                  setBookingType('INWARD_DDP');
-                  setBookingItem(item);
-                  setShowBookingModal(true);
-                }}
-              />
-              <InwardEXWTab 
-                transports={inwardEXW} 
-                onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'inward')}
-                onRefresh={loadData}
-                onViewDetails={handleViewDetails}
-                onBookTransport={(item) => {
-                  setBookingType('INWARD_EXW');
-                  setBookingItem(item);
-                  setShowBookingModal(true);
-                }}
-              />
+          {/* RIGHT: OUTWARD (Dispatch) SECTION */}
+          <div className="space-y-4">
+            <h2 className="text-xl font-semibold text-foreground">OUTWARD (Dispatch)</h2>
+            <div className="space-y-6">
+              {/* Table 3: Container shipping */}
+              <div>
+                <div className="mb-3 px-1">
+                  <h3 className="font-semibold text-base">Table 3: Dispatch Export</h3>
+                </div>
+                <ExportContainerTab 
+                  transports={exportContainer}
+                  onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
+                  onRefresh={loadData}
+                  onViewDetails={handleViewDetails}
+                  onBookTransport={(item) => {
+                    setBookingType('EXPORT_CONTAINER');
+                    setBookingItem(item);
+                    setShowBookingModal(true);
+                  }}
+                />
+              </div>
+
+              {/* Table 4: Local orders */}
+              <div>
+                <div className="mb-3 px-1">
+                  <h3 className="font-semibold text-base">Table 4: Local orders</h3>
+                </div>
+                <LocalDispatchTab 
+                  transports={localDispatch}
+                  onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
+                  onRefresh={loadData}
+                  onViewDetails={handleViewDetails}
+                  onBookTransport={(item) => {
+                    setBookingType('LOCAL_DISPATCH');
+                    setBookingItem(item);
+                    setShowBookingModal(true);
+                  }}
+                />
+              </div>
             </div>
-            <InwardImportTab 
-              imports={inwardImport}
-              onRefresh={loadData}
-              onViewDetails={handleViewDetails}
-              onBookTransport={(item) => {
-                setBookingType('INWARD_IMPORT');
-                setBookingItem(item);
-                setShowBookingModal(true);
-              }}
-            />
-            {/* Jobs Ready for Dispatch Table */}
-            <JobsReadyForDispatchTab
-              jobs={dispatchJobs}
-              onRefresh={loadData}
-              onBookTransport={(item) => {
-                // Determine booking type based on job properties
-                const bookingType = (item.container_count > 0 || item.container_type) ? 'EXPORT_CONTAINER' : 'LOCAL_DISPATCH';
-                setBookingType(bookingType);
-                setBookingItem(item);
-                setShowBookingModal(true);
-              }}
-            />
-            
-            {/* Container Tabs - Side by Side */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <LocalDispatchTab 
-                transports={localDispatch}
-                onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
-                onRefresh={loadData}
-                onViewDetails={handleViewDetails}
-                onBookTransport={(item) => {
-                  setBookingType('LOCAL_DISPATCH');
-                  setBookingItem(item);
-                  setShowBookingModal(true);
-                }}
-              />
-              <ExportContainerTab 
-                transports={exportContainer}
-                onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
-                onRefresh={loadData}
-                onViewDetails={handleViewDetails}
-                onBookTransport={(item) => {
-                  setBookingType('EXPORT_CONTAINER');
-                  setBookingItem(item);
-                  setShowBookingModal(true);
-                }}
-              />
-            </div>
-            <CompletedBookingsTab 
-              inwardDDP={inwardDDP}
-              inwardEXW={inwardEXW}
-              inwardImport={inwardImport}
-              localDispatch={localDispatch}
-              exportContainer={exportContainer}
-              onViewDetails={handleViewDetails}
-              onRefresh={loadData}
-            />
           </div>
         </div>
       )}
@@ -1034,7 +764,7 @@ const InwardDDPTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
   };
 
   return (
-    <div className="glass rounded-lg border border-border">
+    <div className="glass rounded-lg border border-border bg-white shadow-sm">
       <div className="p-4 border-b border-border flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -1059,16 +789,16 @@ const InwardDDPTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead className="bg-muted/30">
+            <thead className="bg-muted/40">
               <tr>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO Number</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Products</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Quantity</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">PO Number</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Supplier</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Products</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Quantity</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Vehicle</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Delivery Date</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Status</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1158,6 +888,11 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
   // Filter out COMPLETED status transports
   const filteredTransports = transports.filter(t => t.status !== 'COMPLETED');
   
+  // Helper to determine if transport is DDP
+  const isDDP = (transport) => {
+    return transport.incoterm === 'DDP' || transport.source === 'PO_DDP';
+  };
+  
   const getStatusColor = (status) => {
     switch (status) {
       case 'NOT_BOOKED': return 'bg-red-500/20 text-red-400';
@@ -1202,15 +937,15 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
   };
 
   return (
-    <div className="glass rounded-lg border border-border">
+    <div className="glass rounded-lg border border-border bg-white shadow-sm">
       <div className="p-4 border-b border-border flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <ArrowDownToLine className="w-5 h-5 text-blue-400" />
-            Inward Transport (EXW)
+            Inward Transport (EXW) / DDP
           </h2>
           <p className="text-sm text-muted-foreground">
-            Supplier-arranged transport to our location (EXW incoterm)
+            Supplier-arranged transport to our location (EXW and DDP incoterms)
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={onRefresh}>
@@ -1222,96 +957,111 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
       {filteredTransports.length === 0 ? (
         <div className="p-8 text-center">
           <Truck className="w-12 h-12 text-muted-foreground mx-auto mb-4 opacity-50" />
-          <p className="text-muted-foreground">No EXW inward transports</p>
+          <p className="text-muted-foreground">No EXW/DDP inward transports</p>
         </div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead className="bg-muted/30">
+            <thead className="bg-muted/40">
               <tr>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO Number</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Products</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Quantity</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">PO Number</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Supplier</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Products</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Quantity</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Vehicle</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Delivery Date</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Status</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {filteredTransports.map((transport) => (
-                <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
-                  <td className="p-3 text-blue-400 font-mono">{transport.po_number || '-'}</td>
-                  <td className="p-3">{transport.supplier_name || '-'}</td>
-                  <td className="p-3 text-sm max-w-[200px]">
-                    {transport.po_items?.length > 0 ? (
-                      <div className="space-y-1">
-                        {transport.po_items.slice(0, 2).map((item, idx) => (
-                          <div key={idx} className="truncate" title={item.product_name || item.item_name}>
-                            {item.product_name || item.item_name || 'Unknown'}
-                          </div>
-                        ))}
-                        {transport.po_items.length > 2 && (
-                          <div className="text-xs text-muted-foreground">+{transport.po_items.length - 2} more</div>
-                        )}
+              {filteredTransports.map((transport) => {
+                const isDDPTransport = isDDP(transport);
+                return (
+                  <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
+                    <td className="p-3 font-mono">
+                      <div className="flex items-center gap-2">
+                        <span className={isDDPTransport ? 'text-emerald-400' : 'text-blue-400'}>
+                          {transport.po_number || '-'}
+                        </span>
+                        <Badge 
+                          variant="outline" 
+                          className={isDDPTransport ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-blue-500/20 text-blue-400 border-blue-500/30'}
+                        >
+                          {isDDPTransport ? 'DDP' : 'EXW'}
+                        </Badge>
                       </div>
-                    ) : (
-                      <span className="text-muted-foreground">{transport.products_summary || '-'}</span>
-                    )}
-                  </td>
-                  <td className="p-3">
-                    {transport.total_quantity ? (
-                      <Badge variant="outline" className="font-mono">
-                        {transport.total_quantity.toLocaleString()} {getTransportUnit(transport)}
-                      </Badge>
-                    ) : '-'}
-                  </td>
-                  <td className="p-3 font-mono">{transport.vehicle_number || '-'}</td>
-                  <td className="p-3 text-sm">
-                    {transport.delivery_date ? new Date(transport.delivery_date).toLocaleDateString() : 
-                     transport.expected_delivery ? new Date(transport.expected_delivery).toLocaleDateString() : '-'}
-                  </td>
-                  <td className="p-3">
-                    <div className="flex flex-col gap-1">
-                      <Badge className={getStatusColor(getStatusDisplay(transport))}>
-                        {getStatusDisplay(transport) === 'NOT_BOOKED' ? 'Transportation Not Booked' : transport.status}
-                      </Badge>
-                    </div>
-                  </td>
-                  <td className="p-3">
-                    <div className="flex gap-1">
-                      <Button 
-                        size="sm" 
-                        variant="ghost"
-                        onClick={() => onViewDetails(transport)}
-                        className="h-8"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </Button>
-                      {(!transport.transport_number || transport.status === 'NOT_BOOKED' || transport.needs_booking) && (
+                    </td>
+                    <td className="p-3">{transport.supplier_name || '-'}</td>
+                    <td className="p-3 text-sm max-w-[200px]">
+                      {transport.po_items?.length > 0 ? (
+                        <div className="space-y-1">
+                          {transport.po_items.slice(0, 2).map((item, idx) => (
+                            <div key={idx} className="truncate" title={item.product_name || item.item_name}>
+                              {item.product_name || item.item_name || 'Unknown'}
+                            </div>
+                          ))}
+                          {transport.po_items.length > 2 && (
+                            <div className="text-xs text-muted-foreground">+{transport.po_items.length - 2} more</div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground">{transport.products_summary || '-'}</span>
+                      )}
+                    </td>
+                    <td className="p-3">
+                      {transport.total_quantity ? (
+                        <Badge variant="outline" className="font-mono">
+                          {transport.total_quantity.toLocaleString()} {getTransportUnit(transport)}
+                        </Badge>
+                      ) : '-'}
+                    </td>
+                    <td className="p-3 font-mono">{transport.vehicle_number || '-'}</td>
+                    <td className="p-3 text-sm">
+                      {transport.delivery_date ? new Date(transport.delivery_date).toLocaleDateString() : 
+                       transport.expected_delivery ? new Date(transport.expected_delivery).toLocaleDateString() : '-'}
+                    </td>
+                    <td className="p-3">
+                      <div className="flex flex-col gap-1">
+                        <Badge className={getStatusColor(getStatusDisplay(transport))}>
+                          {getStatusDisplay(transport) === 'NOT_BOOKED' ? 'Transportation Not Booked' : transport.status}
+                        </Badge>
+                      </div>
+                    </td>
+                    <td className="p-3">
+                      <div className="flex gap-1">
                         <Button 
                           size="sm" 
-                          onClick={() => onBookTransport(transport)}
+                          variant="ghost"
+                          onClick={() => onViewDetails(transport)}
+                          className="h-8"
                         >
-                          <Plus className="w-4 h-4 mr-1" />
-                          Book Transport
+                          <Eye className="w-4 h-4" />
                         </Button>
-                      )}
-                      {transport.transport_number && transport.status === 'PENDING' && (
-                        <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'IN_TRANSIT')}>
-                          Mark In Transit
-                        </Button>
-                      )}
-                      {transport.status === 'IN_TRANSIT' && (
-                        <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'ARRIVED')}>
-                          Mark Arrived
-                        </Button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                        {(!transport.transport_number || transport.status === 'NOT_BOOKED' || transport.needs_booking) && (
+                          <Button 
+                            size="sm" 
+                            onClick={() => onBookTransport(transport)}
+                          >
+                            <Plus className="w-4 h-4 mr-1" />
+                            Book Transport
+                          </Button>
+                        )}
+                        {transport.transport_number && transport.status === 'PENDING' && (
+                          <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'IN_TRANSIT')}>
+                            Mark In Transit
+                          </Button>
+                        )}
+                        {transport.status === 'IN_TRANSIT' && (
+                          <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'ARRIVED')}>
+                            Mark Arrived
+                          </Button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1344,12 +1094,12 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
   };
 
   return (
-    <div className="glass rounded-lg border border-border">
+    <div className="glass rounded-lg border border-border bg-white shadow-sm">
       <div className="p-4 border-b border-border flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Ship className="w-5 h-5 text-purple-400" />
-            Inward Transport (Import/Logistics)
+            Import
           </h2>
           <p className="text-sm text-muted-foreground">
             International imports with FOB/CFR/CIF incoterms
@@ -1369,18 +1119,18 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead className="bg-muted/30">
+            <thead className="bg-muted/40">
               <tr>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Import #</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO Number</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Products</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Quantity</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Incoterm</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Documents</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Import #</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">PO Number</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Supplier</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Products</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Quantity</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Delivery Date</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Incoterm</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Documents</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Status</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -2094,7 +1844,7 @@ const JobsReadyForDispatchTab = ({ jobs, onRefresh, onBookTransport }) => {
   };
 
   return (
-    <div className="glass rounded-lg border border-border">
+    <div className="glass rounded-lg border border-border bg-white shadow-sm">
       <div className="p-4 border-b border-border flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -2255,7 +2005,7 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Home className="w-5 h-5 text-amber-400" />
-            Local Dispatch
+            Dispatch Local
           </h2>
           <p className="text-sm text-muted-foreground">
             Local deliveries via tanker/trailer
@@ -2275,17 +2025,17 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead className="bg-muted/30">
+            <thead className="bg-muted/40">
               <tr>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Job Orders</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Customer</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Products</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Quantity</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">MT</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Job Orders</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Customer</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Products</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Quantity</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">MT</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Vehicle</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Delivery Date</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Status</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -2386,15 +2136,15 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
   };
 
   return (
-    <div className="glass rounded-lg border border-border">
+    <div className="glass rounded-lg border border-border bg-background shadow-sm">
       <div className="p-4 border-b border-border flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Globe className="w-5 h-5 text-green-400" />
-            Export Container
+            Dispatch Export
           </h2>
           <p className="text-sm text-muted-foreground">
-            Container shipments for export orders
+            Dispatch export containers
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={onRefresh}>
@@ -2411,19 +2161,19 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead className="bg-muted/30">
+            <thead className="bg-muted/40">
               <tr>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Job Order</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Containers</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Shipping Line</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Cro Vessel</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Cutoff</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Pickup</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Customer</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">MT</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Job Order</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Product</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Containers</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Shipping Line</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Cro Vessel</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Cutoff</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Pickup</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Customer</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">MT</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Status</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -2495,30 +2245,56 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                       >
                         <Eye className="w-4 h-4" />
                       </Button>
-                      {(!transport.transport_number || transport.status === 'NOT_BOOKED' || transport.needs_booking) && (
-                        <Button 
-                          size="sm" 
-                          onClick={() => onBookTransport(transport)}
-                        >
-                          <Plus className="w-4 h-4 mr-1" />
-                          Book Transport
-                        </Button>
-                      )}
-                      {transport.transport_number && transport.status === 'PENDING' && (
-                        <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'LOADING')}>
-                          Start Loading
-                        </Button>
-                      )}
-                      {transport.status === 'LOADING' && (
-                        <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'DISPATCHED')}>
-                          Dispatch
-                        </Button>
-                      )}
-                      {transport.status === 'DISPATCHED' && (
-                        <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'AT_PORT')}>
-                          At Port
-                        </Button>
-                      )}
+                      {(() => {
+                        const incoterm = (transport.incoterm || '').toUpperCase();
+                        // For CIF/CFR/CPT/CIP, we handle freight and transport booking
+                        const needsTransportBooking = ['CIF', 'CFR', 'CPT', 'CIP'].includes(incoterm);
+                        
+                        if (needsTransportBooking) {
+                          // CIF/CFR: Show "Book Transport" button for booking shipping
+                          return (
+                            (!transport.transport_number || transport.status === 'NOT_BOOKED' || transport.needs_booking) && (
+                              <Button 
+                                size="sm" 
+                                onClick={() => onBookTransport(transport)}
+                              >
+                                <Plus className="w-4 h-4 mr-1" />
+                                Book Transport
+                              </Button>
+                            )
+                          );
+                        } else {
+                          // FOB/Other: Show normal Start Loading/Dispatch flow
+                          return (
+                            <>
+                              {(!transport.transport_number || transport.status === 'NOT_BOOKED' || transport.needs_booking) && (
+                                <Button 
+                                  size="sm" 
+                                  onClick={() => onBookTransport(transport)}
+                                >
+                                  <Plus className="w-4 h-4 mr-1" />
+                                  Book Transport
+                                </Button>
+                              )}
+                              {transport.transport_number && transport.status === 'PENDING' && (
+                                <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'LOADING')}>
+                                  Start Loading
+                                </Button>
+                              )}
+                              {transport.status === 'LOADING' && (
+                                <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'DISPATCHED')}>
+                                  Dispatch
+                                </Button>
+                              )}
+                              {transport.status === 'DISPATCHED' && (
+                                <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'AT_PORT')}>
+                                  At Port
+                                </Button>
+                              )}
+                            </>
+                          );
+                        }
+                      })()}
                     </div>
                   </td>
                 </tr>

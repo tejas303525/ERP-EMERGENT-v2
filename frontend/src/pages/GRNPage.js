@@ -279,7 +279,7 @@ export default function GRNPage() {
                   <td className="font-medium">{grn.grn_number}</td>
                   <td>{grn.supplier}</td>
                   <td>
-                    {grn.items?.map(item => item.product_name).join(', ') || '-'}
+                    {grn.items?.map(item => item.display_name || item.product_name).join(', ') || '-'}
                   </td>
                   <td>{grn.po_number || '-'}</td>
                   <td>{grn.qc_number || '-'}</td>
@@ -371,7 +371,14 @@ export default function GRNPage() {
                       <tbody>
                         {selectedGRN.items.map((item, idx) => (
                           <tr key={idx}>
-                            <td>{item.product_name}</td>
+                            <td>
+                              {item.display_name || item.product_name}
+                              {item.packaging_qty && item.packaging_name && (
+                                <div className="text-xs text-muted-foreground mt-1">
+                                  Packaging: {item.packaging_qty} x {item.packaging_name}
+                                </div>
+                              )}
+                            </td>
                             <td className="font-mono text-sm">{item.sku}</td>
                             <td className="font-mono">{item.quantity?.toFixed(2)}</td>
                             <td>{item.unit}</td>

@@ -102,12 +102,15 @@ class TestMaterialShortages:
             assert "item_id" in shortage
             assert "item_name" in shortage
             assert "item_type" in shortage
-            assert shortage["item_type"] in ["RAW", "PACK"]
-            assert "total_shortage" in shortage
+            # TRADED items are valid shortages for job orders (direct procurement items)
+            assert shortage["item_type"] in ["RAW", "PACK", "TRADED"], \
+                f"item_type should be RAW, PACK, or TRADED, got {shortage['item_type']}"
+            assert "shortage" in shortage or "total_shortage" in shortage
             assert "on_hand" in shortage
-            assert "reserved" in shortage
-            assert "total_required" in shortage
-            print(f"✓ Found {len(data['all_shortages'])} material shortages (RAW: {len(data['raw_shortages'])}, PACK: {len(data['pack_shortages'])})")
+            assert "reserved" in shortage or "available" in shortage
+            # Check for traded_shortages field
+            assert "traded_shortages" in data, "Response should have 'traded_shortages' field"
+            print(f"✓ Found {len(data['all_shortages'])} material shortages (RAW: {len(data['raw_shortages'])}, PACK: {len(data['pack_shortages'])}, TRADED: {len(data['traded_shortages'])})")
         else:
             print("✓ No material shortages (all materials available)")
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { userAPI } from '../lib/api';
+import { userAPI, roleAPI } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -29,6 +29,7 @@ const ROLES = [
 export default function UsersPage() {
   const { user: currentUser } = useAuth();
   const [users, setUsers] = useState([]);
+  const [availableRoles, setAvailableRoles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -41,12 +42,14 @@ export default function UsersPage() {
     password: '',
     name: '',
     role: 'sales',
+    role_id: '',
     department: '',
   });
 
   const [editForm, setEditForm] = useState({
     name: '',
     role: '',
+    role_id: '',
     department: '',
     is_active: true,
   });
@@ -55,6 +58,7 @@ export default function UsersPage() {
 
   useEffect(() => {
     loadUsers();
+    loadAvailableRoles();
   }, []);
 
   const loadUsers = async () => {
@@ -65,6 +69,15 @@ export default function UsersPage() {
       toast.error('Failed to load users');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadAvailableRoles = async () => {
+    try {
+      const res = await roleAPI.getAll();
+      setAvailableRoles(res.data);
+    } catch (error) {
+      console.error('Failed to load roles');
     }
   };
 
@@ -126,6 +139,7 @@ export default function UsersPage() {
     setEditForm({
       name: user.name,
       role: user.role,
+      role_id: user.role_id || '',
       department: user.department || '',
       is_active: user.is_active,
     });
@@ -139,7 +153,7 @@ export default function UsersPage() {
   };
 
   const resetForm = () => {
-    setForm({ email: '', password: '', name: '', role: 'sales', department: '' });
+    setForm({ email: '', password: '', name: '', role: 'sales', role_id: '', department: '' });
   };
 
   const getRoleColor = (role) => {
@@ -229,6 +243,20 @@ export default function UsersPage() {
                     <SelectContent>
                       {ROLES.map(r => (
                         <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="form-field">
+                  <Label>Custom Role (Optional)</Label>
+                  <Select value={form.role_id || undefined} onValueChange={(v) => setForm({...form, role_id: v === 'none' ? '' : v})}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="None (use standard role)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None (use standard role)</SelectItem>
+                      {availableRoles.map(r => (
+                        <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -355,6 +383,20 @@ export default function UsersPage() {
                 <SelectContent>
                   {ROLES.map(r => (
                     <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="form-field">
+              <Label>Custom Role (Optional)</Label>
+              <Select value={editForm.role_id || undefined} onValueChange={(v) => setEditForm({...editForm, role_id: v === 'none' ? '' : v})}>
+                <SelectTrigger>
+                  <SelectValue placeholder="None (use standard role)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None (use standard role)</SelectItem>
+                  {availableRoles.map(r => (
+                    <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

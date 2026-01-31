@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { toast } from 'sonner';
 import { formatDate } from '../lib/utils';
-import { Boxes, AlertTriangle, TrendingUp, TrendingDown, Eye, Package, Layers } from 'lucide-react';
+import { Boxes, AlertTriangle, TrendingUp, TrendingDown, Eye, Package, Layers, Plus, Edit2, Trash2 } from 'lucide-react';
 
 const CATEGORIES = [
   { value: 'all', label: 'All Categories' },
@@ -28,6 +28,14 @@ export default function InventoryPage() {
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [movements, setMovements] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [addPackagingOpen, setAddPackagingOpen] = useState(false);
+  const [newPackaging, setNewPackaging] = useState({
+    sku: '',
+    name: '',
+    uom: 'EA',
+    capacity_liters: '',
+    net_weight_kg_default: ''
+  });
 
   useEffect(() => {
     loadData();
@@ -63,6 +71,51 @@ export default function InventoryPage() {
       setMovements([]);
     }
     setMovementsOpen(true);
+  };
+
+  const handleAddPackaging = async () => {
+    try {
+      // Validate required fields
+      if (!newPackaging.sku || !newPackaging.name) {
+        toast.error('SKU and Name are required');
+        return;
+      }
+
+      // Prepare data for API
+      const packagingData = {
+        sku: newPackaging.sku.toUpperCase(),
+        name: newPackaging.name,
+        item_type: 'PACK',
+        uom: newPackaging.uom || 'EA',
+        is_active: true
+      };
+
+      // Add optional fields if provided
+      if (newPackaging.capacity_liters) {
+        packagingData.capacity_liters = parseFloat(newPackaging.capacity_liters);
+      }
+      if (newPackaging.net_weight_kg_default) {
+        packagingData.net_weight_kg_default = parseFloat(newPackaging.net_weight_kg_default);
+      }
+
+      await inventoryItemAPI.create(packagingData);
+      toast.success('Packaging material added successfully');
+      
+      // Reset form and close modal
+      setNewPackaging({
+        sku: '',
+        name: '',
+        uom: 'EA',
+        capacity_liters: '',
+        net_weight_kg_default: ''
+      });
+      setAddPackagingOpen(false);
+      
+      // Reload data
+      loadData();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to add packaging material');
+    }
   };
 
   // Stats for finished products
@@ -220,7 +273,13 @@ export default function InventoryPage() {
             </div>
           </div>
 
-          <RawMaterialsTable materials={rawMaterials} loading={loading} />
+          <RawMaterialsTable 
+            materials={rawMaterials} 
+            loading={loading}
+            onEdit={loadData}
+            onDelete={loadData}
+            onAdjustStock={loadData}
+          />
         </>
       )}
 
@@ -247,7 +306,22 @@ export default function InventoryPage() {
             </div>
           </div>
 
-          <RawMaterialsTable materials={packagingMaterials} loading={loading} title="Packaging Materials" />
+          {/* Add Packaging Button */}
+          <div className="mb-4 flex justify-end">
+            <Button onClick={() => setAddPackagingOpen(true)} className="gap-2">
+              <Plus className="w-4 h-4" />
+              Add Packaging Material
+            </Button>
+          </div>
+
+          <RawMaterialsTable 
+            materials={packagingMaterials} 
+            loading={loading} 
+            title="Packaging Materials"
+            onEdit={loadData}
+            onDelete={loadData}
+            onAdjustStock={loadData}
+          />
         </>
       )}
 
@@ -305,6 +379,91 @@ export default function InventoryPage() {
             ) : (
               <p className="text-center text-muted-foreground py-8">No movements recorded</p>
             )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Packaging Dialog */}
+      <Dialog open={addPackagingOpen} onOpenChange={setAddPackagingOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Add Packaging Material</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">SKU *</label>
+                <Input
+                  placeholder="e.g., PACK-DRUM-200L-8MM"
+                  value={newPackaging.sku}
+                  onChange={(e) => setNewPackaging({...newPackaging, sku: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Name *</label>
+                <Input
+                  placeholder="e.g., New Drums - 8 mm"
+                  value={newPackaging.name}
+                  onChange={(e) => setNewPackaging({...newPackaging, name: e.target.value})}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">Unit of Measure</label>
+                <Select 
+                  value={newPackaging.uom} 
+                  onValueChange={(v) => setNewPackaging({...newPackaging, uom: v})}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="EA">EA (Each)</SelectItem>
+                    <SelectItem value="KG">KG</SelectItem>
+                    <SelectItem value="L">L (Liters)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Capacity (Liters)</label>
+                <Input
+                  type="number"
+                  placeholder="e.g., 200"
+                  value={newPackaging.capacity_liters}
+                  onChange={(e) => setNewPackaging({...newPackaging, capacity_liters: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Net Weight (KG)</label>
+                <Input
+                  type="number"
+                  placeholder="e.g., 180"
+                  value={newPackaging.net_weight_kg_default}
+                  onChange={(e) => setNewPackaging({...newPackaging, net_weight_kg_default: e.target.value})}
+                />
+              </div>
+            </div>
+
+            <div className="text-xs text-muted-foreground p-3 bg-muted/20 rounded">
+              <strong>Common SKU Formats:</strong>
+              <ul className="mt-1 space-y-1">
+                <li>• Drums: PACK-DRUM-200L-8MM, PACK-DRUM-210L-HDPE, PACK-DRUM-250L-HDPE</li>
+                <li>• IBCs: PACK-IBC-1000L-NEW, PACK-IBC-1000L-RECON</li>
+                <li>• Others: PACK-FLEXI-BAG, PACK-PALLET</li>
+              </ul>
+            </div>
+
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setAddPackagingOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={handleAddPackaging}>
+                <Plus className="w-4 h-4 mr-2" />
+                Add Packaging
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
@@ -389,81 +548,292 @@ const FinishedProductsTable = ({ products, loading, onViewMovements }) => {
   );
 };
 
-// Raw Materials Table Component
-const RawMaterialsTable = ({ materials, loading, title = "Raw Materials" }) => {
+// Raw Materials Table Component with Edit/Delete/Adjust
+const RawMaterialsTable = ({ materials, loading, title = "Raw Materials", onEdit, onDelete, onAdjustStock }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [editOpen, setEditOpen] = useState(false);
+  const [adjustOpen, setAdjustOpen] = useState(false);
+  const [selectedItem, setSelectedItem] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [adjustForm, setAdjustForm] = useState({ quantity: 0, reason: '' });
 
   const filtered = materials.filter(m =>
     m.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
     m.sku?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  const handleEdit = (item) => {
+    setSelectedItem(item);
+    setEditForm({
+      sku: item.sku,
+      name: item.name,
+      uom: item.uom,
+      capacity_liters: item.capacity_liters || '',
+      net_weight_kg_default: item.net_weight_kg_default || ''
+    });
+    setEditOpen(true);
+  };
+
+  const handleAdjust = (item) => {
+    setSelectedItem(item);
+    setAdjustForm({ quantity: 0, reason: '' });
+    setAdjustOpen(true);
+  };
+
+  const handleSaveEdit = async () => {
+    try {
+      const updateData = {
+        sku: editForm.sku,
+        name: editForm.name,
+        item_type: selectedItem.item_type,
+        uom: editForm.uom,
+        is_active: true
+      };
+
+      if (editForm.capacity_liters) {
+        updateData.capacity_liters = parseFloat(editForm.capacity_liters);
+      }
+      if (editForm.net_weight_kg_default) {
+        updateData.net_weight_kg_default = parseFloat(editForm.net_weight_kg_default);
+      }
+
+      await inventoryItemAPI.update(selectedItem.id, updateData);
+      toast.success('Item updated successfully');
+      setEditOpen(false);
+      if (onEdit) onEdit();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to update item');
+    }
+  };
+
+  const handleSaveAdjustment = async () => {
+    try {
+      if (adjustForm.quantity === 0) {
+        toast.error('Quantity cannot be zero');
+        return;
+      }
+
+      await inventoryItemAPI.adjustStock(selectedItem.id, adjustForm);
+      toast.success(`Stock adjusted by ${adjustForm.quantity > 0 ? '+' : ''}${adjustForm.quantity} ${selectedItem.uom}`);
+      setAdjustOpen(false);
+      if (onAdjustStock) onAdjustStock();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to adjust stock');
+    }
+  };
+
+  const handleDelete = async (item) => {
+    if (!window.confirm(`Are you sure you want to delete "${item.name}"? This cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      await inventoryItemAPI.delete(item.id);
+      toast.success('Item deleted successfully');
+      if (onDelete) onDelete();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to delete item');
+    }
+  };
+
   if (loading) {
     return <div className="p-8 text-center text-muted-foreground">Loading...</div>;
   }
 
   return (
-    <div className="data-grid">
-      <div className="data-grid-header flex justify-between items-center">
-        <h3 className="font-medium">{title} ({filtered.length})</h3>
-        <Input
-          placeholder="Search..."
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          className="w-64"
-        />
-      </div>
-      {filtered.length === 0 ? (
-        <div className="p-8 text-center text-muted-foreground">
-          <Layers className="w-12 h-12 mx-auto mb-4 opacity-50" />
-          <p>No items found</p>
+    <>
+      <div className="data-grid">
+        <div className="data-grid-header flex justify-between items-center">
+          <h3 className="font-medium">{title} ({filtered.length})</h3>
+          <Input
+            placeholder="Search..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-64"
+          />
         </div>
-      ) : (
-        <table className="erp-table w-full">
-          <thead>
-            <tr>
-              <th>SKU</th>
-              <th>Name</th>
-              <th>Type</th>
-              <th>On Hand</th>
-              <th>Reserved</th>
-              <th>Available</th>
-              <th>Inbound (PO)</th>
-              <th>UOM</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((item) => (
-              <tr key={item.id} data-testid={`raw-material-${item.sku}`}>
-                <td className="font-medium font-mono">{item.sku}</td>
-                <td>{item.name}</td>
-                <td>
-                  <Badge variant="outline" className="text-xs">
-                    {item.item_type}
-                  </Badge>
-                </td>
-                <td className="font-mono">{item.on_hand?.toLocaleString() || 0}</td>
-                <td className="font-mono text-amber-400">{item.reserved?.toLocaleString() || 0}</td>
-                <td className={`font-mono font-bold ${item.available > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {item.available?.toLocaleString() || 0}
-                </td>
-                <td className="font-mono text-cyan-400">{item.inbound?.toLocaleString() || 0}</td>
-                <td>{item.uom}</td>
-                <td>
-                  <span className={`px-2 py-0.5 rounded text-xs ${
-                    item.status === 'IN_STOCK' ? 'bg-green-500/20 text-green-400' :
-                    item.status === 'INBOUND' ? 'bg-amber-500/20 text-amber-400' :
-                    'bg-red-500/20 text-red-400'
-                  }`}>
-                    {item.status}
-                  </span>
-                </td>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-muted-foreground">
+            <Layers className="w-12 h-12 mx-auto mb-4 opacity-50" />
+            <p>No items found</p>
+          </div>
+        ) : (
+          <table className="erp-table w-full">
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>Name</th>
+                <th>Type</th>
+                <th>On Hand</th>
+                <th>Reserved</th>
+                <th>Available</th>
+                <th>Inbound (PO)</th>
+                <th>UOM</th>
+                <th>Status</th>
+                <th>Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
+            </thead>
+            <tbody>
+              {filtered.map((item) => (
+                <tr key={item.id} data-testid={`raw-material-${item.sku}`}>
+                  <td className="font-medium font-mono">{item.sku}</td>
+                  <td>{item.name}</td>
+                  <td>
+                    <Badge variant="outline" className="text-xs">
+                      {item.item_type}
+                    </Badge>
+                  </td>
+                  <td className="font-mono">{item.on_hand?.toLocaleString() || 0}</td>
+                  <td className="font-mono text-amber-400">{item.reserved?.toLocaleString() || 0}</td>
+                  <td className={`font-mono font-bold ${item.available > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {item.available?.toLocaleString() || 0}
+                  </td>
+                  <td className="font-mono text-cyan-400">{item.inbound?.toLocaleString() || 0}</td>
+                  <td>{item.uom}</td>
+                  <td>
+                    <span className={`px-2 py-0.5 rounded text-xs ${
+                      item.status === 'IN_STOCK' ? 'bg-green-500/20 text-green-400' :
+                      item.status === 'INBOUND' ? 'bg-amber-500/20 text-amber-400' :
+                      'bg-red-500/20 text-red-400'
+                    }`}>
+                      {item.status}
+                    </span>
+                  </td>
+                  <td>
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleAdjust(item)}
+                        title="Adjust Stock"
+                      >
+                        <TrendingUp className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleEdit(item)}
+                        title="Edit"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDelete(item)}
+                        className="text-red-400 hover:text-red-300"
+                        title="Delete"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Edit Dialog */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Edit Item - {selectedItem?.name}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">SKU</label>
+                <Input
+                  value={editForm.sku}
+                  onChange={(e) => setEditForm({...editForm, sku: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Name</label>
+                <Input
+                  value={editForm.name}
+                  onChange={(e) => setEditForm({...editForm, name: e.target.value})}
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2">UOM</label>
+                <Input
+                  value={editForm.uom}
+                  onChange={(e) => setEditForm({...editForm, uom: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Capacity (L)</label>
+                <Input
+                  type="number"
+                  value={editForm.capacity_liters}
+                  onChange={(e) => setEditForm({...editForm, capacity_liters: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Net Weight (KG)</label>
+                <Input
+                  type="number"
+                  value={editForm.net_weight_kg_default}
+                  onChange={(e) => setEditForm({...editForm, net_weight_kg_default: e.target.value})}
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
+              <Button onClick={handleSaveEdit}>Save Changes</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Adjust Stock Dialog */}
+      <Dialog open={adjustOpen} onOpenChange={setAdjustOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Adjust Stock - {selectedItem?.name}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="p-3 bg-muted/20 rounded">
+              <div className="text-sm space-y-1">
+                <div><span className="text-muted-foreground">Current Stock:</span> <span className="font-mono font-bold">{selectedItem?.on_hand || 0} {selectedItem?.uom}</span></div>
+                <div><span className="text-muted-foreground">Available:</span> <span className="font-mono text-green-400">{selectedItem?.available || 0} {selectedItem?.uom}</span></div>
+              </div>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium mb-2">Quantity Change</label>
+              <Input
+                type="number"
+                placeholder="Enter + to increase, - to decrease"
+                value={adjustForm.quantity}
+                onChange={(e) => setAdjustForm({...adjustForm, quantity: parseFloat(e.target.value) || 0})}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                New stock will be: {(selectedItem?.on_hand || 0) + adjustForm.quantity} {selectedItem?.uom}
+              </p>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium mb-2">Reason</label>
+              <Input
+                placeholder="e.g., Physical count adjustment, Damaged goods"
+                value={adjustForm.reason}
+                onChange={(e) => setAdjustForm({...adjustForm, reason: e.target.value})}
+              />
+            </div>
+            
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setAdjustOpen(false)}>Cancel</Button>
+              <Button onClick={handleSaveAdjustment}>Adjust Stock</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 };

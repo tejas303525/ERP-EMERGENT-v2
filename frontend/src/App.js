@@ -24,6 +24,7 @@ import ProductsPage from './pages/ProductsPage';
 import ProductionSchedulePage from './pages/ProductionSchedulePage';
 import BlendReportsPage from './pages/BlendReportsPage';
 import UsersPage from './pages/UsersPage';
+import RolesPage from './pages/RolesPage';
 import DrumSchedulePage from './pages/DrumSchedulePage';
 import ProcurementPage from './pages/ProcurementPage';
 import FinanceApprovalPage from './pages/FinanceApprovalPage';
@@ -106,6 +107,8 @@ const AppRoutes = () => {
                 <Route path="/transport-operation" element={<TransportOperationPage />} />
                 <Route path="/transport-planner" element={<TransportPlannerPage />} />
                 <Route path="/users" element={<UsersPage />} />
+                <Route path="/roles" element={<RolesPage />} />
+                <Route path="/security-qc" element={<SecurityQCPage />} />
               </Routes>
             </MainLayout>
           </PrivateRoute>

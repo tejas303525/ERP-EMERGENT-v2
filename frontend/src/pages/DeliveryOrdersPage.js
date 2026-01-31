@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
 import { formatDate } from '../lib/utils';
-import { Plus, ClipboardList, Download } from 'lucide-react';
+import { Plus, ClipboardList, Download, Eye } from 'lucide-react';
 
 export default function DeliveryOrdersPage() {
   const { user } = useAuth();
@@ -18,6 +18,8 @@ export default function DeliveryOrdersPage() {
   const [bookings, setBookings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
+  const [viewOpen, setViewOpen] = useState(false);
+  const [selectedDO, setSelectedDO] = useState(null);
 
   const [form, setForm] = useState({
     job_order_id: '',
@@ -221,17 +223,31 @@ export default function DeliveryOrdersPage() {
                   <td>{dorder.driver_name || '-'}</td>
                   <td>{formatDate(dorder.issued_at)}</td>
                   <td>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => {
-                        const token = localStorage.getItem('erp_token');
-                        const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
-                        window.open(`${backendUrl}/api/pdf/delivery-note/${dorder.id}?token=${token}`, '_blank');
-                      }}
-                    >
-                      <Download className="w-4 h-4" />
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          setSelectedDO(dorder);
+                          setViewOpen(true);
+                        }}
+                        title="View Details"
+                      >
+                        <Eye className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          const token = localStorage.getItem('erp_token');
+                          const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+                          window.open(`${backendUrl}/api/pdf/delivery-note/${dorder.id}?token=${token}`, '_blank');
+                        }}
+                        title="Download PDF"
+                      >
+                        <Download className="w-4 h-4" />
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -239,6 +255,81 @@ export default function DeliveryOrdersPage() {
           </table>
         )}
       </div>
+
+      {/* View Dialog */}
+      <Dialog open={viewOpen} onOpenChange={setViewOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Delivery Order Details - {selectedDO?.do_number}</DialogTitle>
+          </DialogHeader>
+          {selectedDO && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-muted-foreground">DO Number:</span>
+                  <p className="font-medium">{selectedDO.do_number}</p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Job Number:</span>
+                  <p className="font-medium">{selectedDO.job_number}</p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Product:</span>
+                  <p className="font-medium">{selectedDO.product_name}</p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Quantity:</span>
+                  <p className="font-medium">{selectedDO.quantity}</p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Vehicle Type:</span>
+                  <p className="font-medium">{selectedDO.vehicle_type || '-'}</p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Vehicle Number:</span>
+                  <p className="font-medium">{selectedDO.vehicle_number || '-'}</p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Driver Name:</span>
+                  <p className="font-medium">{selectedDO.driver_name || '-'}</p>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Issued Date:</span>
+                  <p className="font-medium">{formatDate(selectedDO.issued_at)}</p>
+                </div>
+                {selectedDO.shipping_booking_id && (
+                  <div>
+                    <span className="text-muted-foreground">Shipping Booking:</span>
+                    <p className="font-medium">{selectedDO.shipping_booking_id}</p>
+                  </div>
+                )}
+                {selectedDO.notes && (
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground">Notes:</span>
+                    <p className="font-medium">{selectedDO.notes}</p>
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-end gap-2 pt-4 border-t">
+                <Button variant="outline" onClick={() => setViewOpen(false)}>
+                  Close
+                </Button>
+                <Button
+                  variant="default"
+                  onClick={() => {
+                    const token = localStorage.getItem('erp_token');
+                    const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+                    window.open(`${backendUrl}/api/pdf/delivery-note/${selectedDO.id}?token=${token}`, '_blank');
+                  }}
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Download PDF
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

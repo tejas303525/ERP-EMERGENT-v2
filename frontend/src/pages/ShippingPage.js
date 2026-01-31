@@ -15,7 +15,7 @@ import { formatDate, getStatusColor } from '../lib/utils';
 import { Plus, Ship, Edit2, FileText, AlertTriangle, Package } from 'lucide-react';
 
 const CONTAINER_TYPES = ['20ft', '40ft', '40ft_hc'];
-const STATUSES = ['pending', 'cro_received', 'transport_scheduled', 'loaded', 'shipped'];
+const STATUSES = ['pending_details', 'pending', 'cro_received', 'transport_scheduled', 'loaded', 'shipped'];
 
 export default function ShippingPage() {
   const { user } = useAuth();
@@ -27,6 +27,7 @@ export default function ShippingPage() {
   const [bookingType, setBookingType] = useState(null); // 'import' or 'export'
   const [activeTab, setActiveTab] = useState('export'); // 'import' or 'export'
   const [croOpen, setCroOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const [selectedBooking, setSelectedBooking] = useState(null);
   const [statusFilter, setStatusFilter] = useState('all');
 
@@ -77,6 +78,19 @@ export default function ShippingPage() {
     gate_in_date: '',
   });
 
+  const [editForm, setEditForm] = useState({
+    shipping_line: '',
+    container_type: '20ft',
+    container_count: 1,
+    port_of_loading: '',
+    port_of_discharge: '',
+    cargo_description: '',
+    cargo_weight: 0,
+    is_dg: false,
+    dg_class: '',
+    notes: '',
+  });
+
   useEffect(() => {
     loadData();
   }, []);
@@ -87,8 +101,8 @@ export default function ShippingPage() {
       // 'dispatched' jobs might still need container shipping bookings
       const [bookingsRes, posRes, readyJobsRes, dispatchedJobsRes] = await Promise.all([
         shippingAPI.getAll(),
-        // Load approved POs for import bookings
-        purchaseOrderAPI.getAll('APPROVED'),
+        // Load approved FOB POs for import bookings
+        purchaseOrderAPI.getReadyForImportBooking(),
         // Load job orders ready for dispatch
         jobOrderAPI.getAll('ready_for_dispatch'),
         // Also load dispatched jobs (they might need container shipping)
@@ -292,7 +306,43 @@ export default function ShippingPage() {
       
       setPurchaseOrders(availablePOs);
       
-      setJobOrders(allJobsData);
+      // Get all existing booking job IDs to filter them out
+      const bookedJobIds = new Set();
+      allBookingsData.forEach(booking => {
+        if (booking.job_order_ids && Array.isArray(booking.job_order_ids)) {
+          booking.job_order_ids.forEach(jobId => {
+            // Only exclude jobs from active bookings (not cancelled/deleted)
+            const status = booking.status?.toLowerCase() || '';
+            if (status !== 'cancelled' && status !== 'deleted') {
+              bookedJobIds.add(jobId);
+            }
+          });
+        }
+      });
+      
+      // Filter jobs for Shipping window:
+      // 1. Must be export incoterm (FOB, CFR, CIF, CIP) - for export bookings
+      // 2. Must not already have a shipping booking
+      // 3. Must be ready_for_dispatch or dispatched
+      const availableExportJobs = allJobsData.filter(job => {
+        // Get incoterm from job (should be enriched by backend now)
+        const incoterm = (job.incoterm || '').toUpperCase();
+        
+        // Only show export incoterms that require shipping bookings
+        // FOB: Customer books, CFR/CIF/CIP: Seller books
+        if (!['FOB', 'CFR', 'CIF', 'CIP'].includes(incoterm)) {
+          return false;
+        }
+        
+        // Exclude jobs that already have a shipping booking
+        if (bookedJobIds.has(job.id) || job.shipping_booking_id) {
+          return false;
+        }
+        
+        return true;
+      });
+      
+      setJobOrders(availableExportJobs);
     } catch (error) {
       toast.error('Failed to load data');
       // Set empty arrays on error to prevent rendering issues
@@ -396,17 +446,63 @@ export default function ShippingPage() {
         return;
       }
 
-      if (!form.shipping_line || !form.shipping_line.trim()) {
-        toast.error('Please enter shipping line');
+      // Check if selected jobs are FOB
+      const selectedJobs = jobOrders.filter(job => form.job_order_ids.includes(job.id));
+      const isFOB = selectedJobs.length > 0 && selectedJobs.every(job => (job.incoterm || '').toUpperCase() === 'FOB');
+      const isMixed = selectedJobs.some(job => (job.incoterm || '').toUpperCase() === 'FOB') && 
+                      selectedJobs.some(job => (job.incoterm || '').toUpperCase() !== 'FOB');
+
+      if (isMixed) {
+        toast.error('Cannot mix FOB and non-FOB jobs in same booking. FOB requires customer CRO.');
         return;
       }
-      if (!form.port_of_loading) {
-        toast.error('Please provide port of loading');
-        return;
-      }
-      if (!form.port_of_discharge) {
-        toast.error('Please provide port of discharge');
-        return;
+
+      if (isFOB) {
+        // FOB: Require CRO details
+        if (!form.cro_number || !form.cro_number.trim()) {
+          toast.error('Please enter CRO number (required for FOB)');
+          return;
+        }
+        if (!form.shipping_line || !form.shipping_line.trim()) {
+          toast.error('Please enter shipping line');
+          return;
+        }
+        if (!form.vessel_name || !form.vessel_name.trim()) {
+          toast.error('Please enter vessel name');
+          return;
+        }
+        if (!form.vessel_date) {
+          toast.error('Please enter vessel date');
+          return;
+        }
+        if (!form.cutoff_date) {
+          toast.error('Please enter cutoff date');
+          return;
+        }
+        if (!form.port_of_loading) {
+          toast.error('Please provide port of loading');
+          return;
+        }
+        if (!form.port_of_discharge) {
+          toast.error('Please provide port of discharge');
+          return;
+        }
+        form.booking_source = 'CUSTOMER';
+      } else {
+        // CFR/CIF/CIP: Require basic shipping details
+        if (!form.shipping_line || !form.shipping_line.trim()) {
+          toast.error('Please enter shipping line');
+          return;
+        }
+        if (!form.port_of_loading) {
+          toast.error('Please provide port of loading');
+          return;
+        }
+        if (!form.port_of_discharge) {
+          toast.error('Please provide port of discharge');
+          return;
+        }
+        form.booking_source = 'SELLER';
       }
 
       try {
@@ -418,7 +514,9 @@ export default function ShippingPage() {
         };
         
         await shippingAPI.create(payload);
-        toast.success('Export booking created. Please add CRO details when received from shipping line.');
+        toast.success(isFOB 
+          ? 'Export booking created with CRO details.' 
+          : 'Export booking created. Please add CRO details when received from shipping line.');
         setCreateOpen(false);
         resetForm();
         loadData();
@@ -482,6 +580,35 @@ export default function ShippingPage() {
     setCroOpen(true);
   };
 
+  const openEditDialog = (booking) => {
+    setSelectedBooking(booking);
+    setEditForm({
+      shipping_line: booking.shipping_line || '',
+      container_type: booking.container_type || '20ft',
+      container_count: booking.container_count || 1,
+      port_of_loading: booking.port_of_loading || '',
+      port_of_discharge: booking.port_of_discharge || '',
+      cargo_description: booking.cargo_description || '',
+      cargo_weight: booking.cargo_weight || 0,
+      is_dg: booking.is_dg || false,
+      dg_class: booking.dg_class || '',
+      notes: booking.notes || '',
+    });
+    setEditOpen(true);
+  };
+
+  const handleEditSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await shippingAPI.update(selectedBooking.id, editForm);
+      toast.success('Booking details updated successfully');
+      setEditOpen(false);
+      loadData();
+    } catch (error) {
+      toast.error('Failed to update booking: ' + (error.response?.data?.detail || error.message));
+    }
+  };
+
   const resetForm = () => {
     setForm({
       po_ids: [],
@@ -517,6 +644,10 @@ export default function ShippingPage() {
   // Check if selected POs are FOB
   const selectedPOs = purchaseOrders.filter(po => form.po_ids.includes(po.id));
   const isFOBBooking = selectedPOs.length > 0 && selectedPOs.every(po => po.incoterm?.toUpperCase() === 'FOB');
+  
+  // Check if selected jobs are FOB
+  const selectedJobs = jobOrders.filter(job => form.job_order_ids.includes(job.id));
+  const isFOBExportBooking = selectedJobs.length > 0 && selectedJobs.every(job => (job.incoterm || '').toUpperCase() === 'FOB');
 
   // Separate bookings into Import and Export
   const importBookings = bookings
@@ -527,13 +658,63 @@ export default function ShippingPage() {
       return dateB - dateA; // Descending (newest first)
     });
   
-  const exportBookings = bookings
+  // Get booked job IDs to identify unbooked jobs
+  const bookedJobIds = new Set();
+  bookings
+    .filter(b => b.ref_type !== 'PO_IMPORT' && !b.po_id && (!b.po_ids || b.po_ids.length === 0))
+    .forEach(booking => {
+      if (booking.job_order_ids && Array.isArray(booking.job_order_ids)) {
+        booking.job_order_ids.forEach(jobId => {
+          const status = booking.status?.toLowerCase() || '';
+          if (status !== 'cancelled' && status !== 'deleted') {
+            bookedJobIds.add(jobId);
+          }
+        });
+      }
+    });
+
+  // Combine existing bookings with unbooked jobs
+  const existingExportBookings = bookings
     .filter(b => b.ref_type !== 'PO_IMPORT' && !b.po_id && (!b.po_ids || b.po_ids.length === 0))
     .sort((a, b) => {
       const dateA = new Date(a.created_at || a.vessel_date || 0);
       const dateB = new Date(b.created_at || b.vessel_date || 0);
       return dateB - dateA; // Descending (newest first)
     });
+
+  // Convert unbooked jobs to booking-like objects for display
+  const unbookedJobs = jobOrders
+    .filter(job => {
+      const incoterm = (job.incoterm || '').toUpperCase();
+      return ['FOB', 'CFR', 'CIF', 'CIP'].includes(incoterm) && 
+             !bookedJobIds.has(job.id) && 
+             !job.shipping_booking_id;
+    })
+    .map(job => ({
+      id: `job-${job.id}`, // Prefix to distinguish from bookings
+      booking_number: null, // No booking number yet
+      job_number: job.job_number,
+      job_numbers: job.job_number,
+      job_order_ids: [job.id],
+      customer_name: job.customer_name || 'Unknown',
+      shipping_line: null,
+      container_type: null,
+      container_count: null,
+      cro_number: null,
+      vessel_name: null,
+      vessel_date: null,
+      status: 'unbooked',
+      incoterm: job.incoterm,
+      isUnbookedJob: true, // Flag to identify unbooked jobs
+      jobData: job // Store full job data
+    }))
+    .sort((a, b) => {
+      // Sort by job number
+      return (a.job_number || '').localeCompare(b.job_number || '');
+    });
+
+  // Combine bookings and unbooked jobs
+  const exportBookings = [...existingExportBookings, ...unbookedJobs];
 
   // Apply status filter to active tab
   const filteredBookings = activeTab === 'import' 
@@ -582,9 +763,14 @@ export default function ShippingPage() {
                   <DialogTitle>
                     {!bookingType ? 'Select Booking Type' : 
                      bookingType === 'import' ? (isFOBBooking ? 'Create Import Booking from Customer CRO (FOB)' : 'Create Import Container Booking Request') :
-                     'Create Export Container Booking Request'}
+                     (isFOBExportBooking ? 'Create Export Booking from Customer CRO (FOB)' : 'Create Export Container Booking Request')}
                   </DialogTitle>
                   {bookingType === 'import' && isFOBBooking && (
+                    <p className="text-sm text-amber-400 mt-2">
+                      ⚠️ FOB Incoterm: Customer is responsible for booking. Enter CRO details provided by customer.
+                    </p>
+                  )}
+                  {bookingType === 'export' && isFOBExportBooking && (
                     <p className="text-sm text-amber-400 mt-2">
                       ⚠️ FOB Incoterm: Customer is responsible for booking. Enter CRO details provided by customer.
                     </p>
@@ -678,6 +864,11 @@ export default function ShippingPage() {
                                     {job.status}
                                   </Badge>
                                 )}
+                                {job.incoterm && (
+                                  <Badge variant="outline" className="text-xs">
+                                    {job.incoterm}
+                                  </Badge>
+                                )}
                               </div>
                               <p className="text-xs text-muted-foreground">
                                 <span className="font-medium">{job.customer_name || 'Customer'} - </span>
@@ -690,7 +881,7 @@ export default function ShippingPage() {
                             </div>
                           </div>
                         )) : (
-                          <p className="p-4 text-center text-muted-foreground text-sm">No job orders ready for dispatch</p>
+                          <p className="p-4 text-center text-muted-foreground text-sm">No export job orders (FOB/CFR/CIF/CIP) ready for shipping</p>
                         )}
                       </div>
                     </div>
@@ -889,8 +1080,177 @@ export default function ShippingPage() {
                     </div>
                   )}
 
-                  {/* Shipping Line for Export Bookings */}
-                  {bookingType === 'export' && (
+                  {/* FOB Export Booking - CRO Details */}
+                  {bookingType === 'export' && isFOBExportBooking && (
+                    <>
+                      <div className="border-t border-border pt-4 mt-4">
+                        <h3 className="font-medium mb-4 text-amber-400">Customer CRO Details (Required for FOB)</h3>
+                        <div className="form-grid">
+                          <div className="form-field">
+                            <Label>CRO Number *</Label>
+                            <Input
+                              value={form.cro_number}
+                              onChange={(e) => setForm({...form, cro_number: e.target.value})}
+                              placeholder="Container Release Order number"
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Shipping Line *</Label>
+                            <Input
+                              value={form.shipping_line}
+                              onChange={(e) => setForm({...form, shipping_line: e.target.value})}
+                              placeholder="e.g., MSC, Maersk, Hapag"
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Vessel Name *</Label>
+                            <Input
+                              value={form.vessel_name}
+                              onChange={(e) => setForm({...form, vessel_name: e.target.value})}
+                              placeholder="Vessel name"
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Vessel Date *</Label>
+                            <Input
+                              type="date"
+                              value={form.vessel_date}
+                              onChange={(e) => setForm({...form, vessel_date: e.target.value})}
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Cutoff Date *</Label>
+                            <Input
+                              type="date"
+                              value={form.cutoff_date}
+                              onChange={(e) => setForm({...form, cutoff_date: e.target.value})}
+                              required
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Gate Cutoff</Label>
+                            <Input
+                              type="datetime-local"
+                              value={form.gate_cutoff}
+                              onChange={(e) => setForm({...form, gate_cutoff: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>VGM Cutoff</Label>
+                            <Input
+                              type="datetime-local"
+                              value={form.vgm_cutoff}
+                              onChange={(e) => setForm({...form, vgm_cutoff: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>SI Cutoff</Label>
+                            <Input
+                              type="datetime-local"
+                              value={form.si_cutoff}
+                              onChange={(e) => setForm({...form, si_cutoff: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Gate In Date</Label>
+                            <Input
+                              type="date"
+                              value={form.gate_in_date}
+                              onChange={(e) => setForm({...form, gate_in_date: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Pull Out Date</Label>
+                            <Input
+                              type="date"
+                              value={form.pull_out_date}
+                              onChange={(e) => setForm({...form, pull_out_date: e.target.value})}
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Freight Rate</Label>
+                            <Input
+                              type="number"
+                              value={form.freight_rate || ''}
+                              onChange={(e) => setForm({...form, freight_rate: parseFloat(e.target.value) || 0})}
+                              placeholder="0.00"
+                            />
+                          </div>
+                          <div className="form-field">
+                            <Label>Freight Currency</Label>
+                            <Select value={form.freight_currency} onValueChange={(v) => setForm({...form, freight_currency: v})}>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="USD">USD</SelectItem>
+                                <SelectItem value="EUR">EUR</SelectItem>
+                                <SelectItem value="AED">AED</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="form-field">
+                            <Label>Freight Charges (Total)</Label>
+                            <Input
+                              type="number"
+                              value={form.freight_charges || ''}
+                              onChange={(e) => setForm({...form, freight_charges: parseFloat(e.target.value) || 0})}
+                              placeholder="0.00"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="form-grid mt-4">
+                        <div className="form-field">
+                          <Label>Container Type</Label>
+                          <Select value={form.container_type} onValueChange={(v) => setForm({...form, container_type: v})}>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {CONTAINER_TYPES.map(t => (
+                                <SelectItem key={t} value={t}>{t.toUpperCase()}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="form-field">
+                          <Label>Container Count</Label>
+                          <Input
+                            type="number"
+                            min="1"
+                            value={form.container_count}
+                            onChange={(e) => setForm({...form, container_count: parseInt(e.target.value)})}
+                          />
+                        </div>
+                        <div className="form-field">
+                          <Label>Port of Loading *</Label>
+                          <Input
+                            value={form.port_of_loading}
+                            onChange={(e) => setForm({...form, port_of_loading: e.target.value})}
+                            placeholder="e.g., Jebel Ali"
+                            required
+                          />
+                        </div>
+                        <div className="form-field">
+                          <Label>Port of Discharge *</Label>
+                          <Input
+                            value={form.port_of_discharge}
+                            onChange={(e) => setForm({...form, port_of_discharge: e.target.value})}
+                            placeholder="e.g., Mumbai"
+                            required
+                          />
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Shipping Line for Export Bookings (Non-FOB) */}
+                  {bookingType === 'export' && !isFOBExportBooking && (
                     <div className="form-grid">
                       <div className="form-field">
                         <Label>Shipping Line *</Label>
@@ -1000,7 +1360,11 @@ export default function ShippingPage() {
                       resetForm();
                     }}>Cancel</Button>
                     <Button onClick={handleCreate} data-testid="submit-booking-btn">
-                      {bookingType === 'import' && isFOBBooking ? 'Create Booking from Customer CRO' : 'Create Booking Request'}
+                      {bookingType === 'import' && isFOBBooking 
+                        ? 'Create Booking from Customer CRO' 
+                        : bookingType === 'export' && isFOBExportBooking
+                        ? 'Create Booking from Customer CRO'
+                        : 'Create Booking Request'}
                     </Button>
                   </div>
                     </>
@@ -1027,102 +1391,300 @@ export default function ShippingPage() {
         </Card>
       )}
 
-      {/* Bookings List */}
-      <div className="data-grid">
-        <div className="data-grid-header">
-          <h3 className="font-medium">Container Bookings ({filteredBookings.length})</h3>
-        </div>
-        {loading ? (
-          <div className="p-8 text-center text-muted-foreground">Loading...</div>
-        ) : filteredBookings.length === 0 ? (
-          <div className="empty-state">
-            <Ship className="empty-state-icon" />
-            <p className="empty-state-title">No bookings found</p>
-            <p className="empty-state-description">Create a booking for export orders</p>
+      {/* Import and Export Tables Side by Side */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        {/* IMPORT TABLE - Purchase Orders */}
+        <div className="data-grid">
+          <div className="data-grid-header" style={{ background: 'rgba(59, 130, 246, 0.1)', borderBottom: '2px solid rgb(59, 130, 246)' }}>
+            <h3 className="font-medium text-blue-400">
+              🔵 Import Bookings  ({importBookings.length})
+            </h3>
           </div>
-        ) : (
-          <table className="erp-table w-full">
-            <thead>
-              <tr>
-                <th>Booking #</th>
-                {activeTab === 'import' ? (
-                  <>
+          {loading ? (
+            <div className="p-8 text-center text-muted-foreground">Loading...</div>
+          ) : importBookings.length === 0 ? (
+            <div className="empty-state">
+              <Ship className="empty-state-icon text-blue-400" />
+              <p className="empty-state-title">No import bookings</p>
+              <p className="empty-state-description">Create a booking for FOB purchase orders</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="erp-table w-full">
+                <thead>
+                  <tr>
+                    <th>Booking #</th>
                     <th>PO #</th>
                     <th>Supplier</th>
-                  </>
-                ) : (
-                  <>
-                    <th>Job #</th>
-                    <th>Customer</th>
-                  </>
-                )}
-                <th>Shipping Line</th>
-                <th>Container</th>
-                <th>CRO #</th>
-                <th>Vessel</th>
-                <th>Cutoff</th>
-                <th>Pickup</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredBookings.map((booking) => (
-                <tr key={booking.id} data-testid={`booking-row-${booking.booking_number}`}>
-                  <td className="font-medium">{booking.booking_number}</td>
-                  {activeTab === 'import' ? (
-                    <>
+                    <th>Incoterm</th>
+                    <th>Shipping Line</th>
+                    <th>Container</th>
+                    <th>CRO #</th>
+                    <th>Vessel</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {importBookings.map((booking) => (
+                    <tr 
+                      key={booking.id} 
+                      data-testid={`booking-row-${booking.booking_number}`}
+                      className={booking.status === 'pending_details' ? 'bg-amber-500/5' : ''}
+                    >
+                      <td className="font-medium">{booking.booking_number}</td>
                       <td className="text-xs font-mono text-blue-400">
                         {booking.po_number || '-'}
                       </td>
                       <td className="text-sm">{booking.supplier_name || '-'}</td>
-                    </>
-                  ) : (
-                    <>
-                      <td className="text-xs font-mono text-amber-400">
-                        {Array.isArray(booking.job_numbers) 
-                          ? booking.job_numbers.join(', ') 
-                          : (typeof booking.job_numbers === 'string' 
-                            ? booking.job_numbers 
-                            : (booking.job_number || '-'))}
+                      <td>
+                        <Badge variant="outline" className="text-xs">
+                          {booking.incoterm || 'FOB'}
+                        </Badge>
                       </td>
-                      <td className="text-sm">{booking.customer_name || '-'}</td>
-                    </>
-                  )}
-                  <td>{booking.shipping_line}</td>
-                  <td>{booking.container_count}x {booking.container_type?.toUpperCase()}</td>
-                  <td className={booking.cro_number ? 'text-emerald-400 font-mono' : 'text-amber-400'}>
-                    {booking.cro_number || 'Pending'}
-                  </td>
-                  <td className="text-xs">
-                    {booking.vessel_name ? (
-                      <div>
-                        <p>{booking.vessel_name}</p>
-                        <p className="text-muted-foreground">{formatDate(booking.vessel_date)}</p>
-                      </div>
-                    ) : '-'}
-                  </td>
-                  <td>{booking.cutoff_date ? formatDate(booking.cutoff_date) : '-'}</td>
-                  <td className="text-sky-400">{booking.pickup_date ? formatDate(booking.pickup_date) : '-'}</td>
-                  <td><Badge className={getStatusColor(booking.status)}>{booking.status?.replace(/_/g, ' ')}</Badge></td>
-                  <td>
-                    {canCreate && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => openCRODialog(booking)}
-                        title="Enter/Edit CRO Details"
-                        data-testid={`cro-booking-${booking.booking_number}`}
+                      <td className="text-sm">{booking.shipping_line}</td>
+                      <td>{booking.container_count}x {booking.container_type?.toUpperCase()}</td>
+                      <td className={booking.cro_number ? 'text-emerald-400 font-mono' : 'text-amber-400'}>
+                        {booking.cro_number || 'Pending'}
+                      </td>
+                      <td className="text-xs">
+                        {booking.vessel_name ? (
+                          <div>
+                            <p>{booking.vessel_name}</p>
+                            <p className="text-muted-foreground">{formatDate(booking.vessel_date)}</p>
+                          </div>
+                        ) : '-'}
+                      </td>
+                      <td><Badge className={getStatusColor(booking.status)}>{booking.status?.replace(/_/g, ' ')}</Badge></td>
+                      <td>
+                        {canCreate && (
+                          <>
+                            {/* Edit Booking Details Button */}
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => openEditDialog(booking)}
+                              title="Edit Booking Details"
+                              data-testid={`edit-booking-${booking.booking_number}`}
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </Button>
+                            
+                            {/* CRO Button */}
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => openCRODialog(booking)}
+                              title="Enter/Edit CRO Details"
+                              data-testid={`cro-booking-${booking.booking_number}`}
+                            >
+                              <FileText className="w-4 h-4" />
+                            </Button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* EXPORT TABLE - Job Orders */}
+        <div className="data-grid">
+          <div className="data-grid-header" style={{ background: 'rgba(251, 191, 36, 0.1)', borderBottom: '2px solid rgb(251, 191, 36)' }}>
+            <h3 className="font-medium text-amber-400">
+              🟡 Export Bookings  ({existingExportBookings.length} booked, {unbookedJobs.length} unbooked)
+            </h3>
+          </div>
+          {loading ? (
+            <div className="p-8 text-center text-muted-foreground">Loading...</div>
+          ) : exportBookings.length === 0 ? (
+            <div className="empty-state">
+              <Package className="empty-state-icon text-amber-400" />
+              <p className="empty-state-title">No export bookings</p>
+              <p className="empty-state-description">Create a booking for job orders</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="erp-table w-full">
+                <thead>
+                  <tr>
+                    <th>Booking #</th>
+                    <th>Job #</th>
+                    <th>Customer</th>
+                    <th>Incoterm</th>
+                    <th>Shipping Line</th>
+                    <th>Container</th>
+                    <th>CRO #</th>
+                    <th>Vessel</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {exportBookings.map((booking) => {
+                    const isUnbooked = booking.isUnbookedJob;
+                    const incoterm = (booking.incoterm || '').toUpperCase();
+                    const isFOB = incoterm === 'FOB';
+                    
+                    return (
+                      <tr 
+                        key={booking.id} 
+                        data-testid={`booking-row-${booking.booking_number || booking.job_number}`}
+                        className={booking.status === 'pending_details' || isUnbooked ? 'bg-amber-500/5' : ''}
                       >
-                        <FileText className="w-4 h-4" />
-                      </Button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+                        <td className="font-medium">
+                          {isUnbooked ? (
+                            <span className="text-muted-foreground text-xs">-</span>
+                          ) : (
+                            booking.booking_number
+                          )}
+                        </td>
+                        <td className="text-xs font-mono text-amber-400">
+                          {Array.isArray(booking.job_numbers) 
+                            ? booking.job_numbers.join(', ') 
+                            : (typeof booking.job_numbers === 'string' 
+                              ? booking.job_numbers 
+                              : (booking.job_number || '-'))}
+                        </td>
+                        <td className="text-sm">{booking.customer_name || '-'}</td>
+                        <td>
+                          <Badge 
+                            variant="outline" 
+                            className={`text-xs ${
+                              incoterm === 'FOB' ? 'text-blue-400 border-blue-400' : 
+                              'text-green-400 border-green-400'
+                            }`}
+                          >
+                            {incoterm || '-'}
+                          </Badge>
+                        </td>
+                        <td className="text-sm">{booking.shipping_line || '-'}</td>
+                        <td>
+                          {booking.container_count && booking.container_type 
+                            ? `${booking.container_count}x ${booking.container_type.toUpperCase()}`
+                            : '-'}
+                        </td>
+                        <td className={booking.cro_number ? 'text-emerald-400 font-mono' : 'text-amber-400'}>
+                          {booking.cro_number || 'Pending'}
+                        </td>
+                        <td className="text-xs">
+                          {booking.vessel_name ? (
+                            <div>
+                              <p>{booking.vessel_name}</p>
+                              <p className="text-muted-foreground">{formatDate(booking.vessel_date)}</p>
+                            </div>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {isUnbooked ? (
+                            <Badge variant="outline" className="text-xs">
+                              {incoterm} - Unbooked
+                            </Badge>
+                          ) : (
+                            <Badge className={getStatusColor(booking.status)}>
+                              {booking.status?.replace(/_/g, ' ')}
+                            </Badge>
+                          )}
+                        </td>
+                        <td>
+                          {canCreate && (
+                            <>
+                              {isUnbooked ? (
+                                // Unbooked job buttons
+                                <>
+                                  {!isFOB && (
+                                    // For CFR/CIF/CIP: Show booking details button first
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      onClick={() => {
+                                        // Pre-fill form with job and open create dialog
+                                        setForm(prev => ({
+                                          ...prev,
+                                          job_order_ids: booking.job_order_ids,
+                                          booking_source: 'SELLER'
+                                        }));
+                                        setBookingType('export');
+                                        setCreateOpen(true);
+                                      }}
+                                      title="Create Booking Details"
+                                      data-testid={`create-booking-${booking.job_number}`}
+                                    >
+                                      <Edit2 className="w-4 h-4" />
+                                    </Button>
+                                  )}
+                                  {/* For FOB: Only CRO button (creates booking with CRO) */}
+                                  {/* For CFR/CIF/CIP: CRO button (after booking created) */}
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                                    onClick={() => {
+                                      if (isFOB) {
+                                        // FOB: Create booking with CRO
+                                        setForm(prev => ({
+                                          ...prev,
+                                          job_order_ids: booking.job_order_ids,
+                                          booking_source: 'CUSTOMER',
+                                          cro_number: '',
+                                          vessel_name: '',
+                                          vessel_date: '',
+                                          cutoff_date: '',
+                                          shipping_line: '',
+                                          container_type: '20ft',
+                                          container_count: 1
+                                        }));
+                                        setBookingType('export');
+                                        setCreateOpen(true);
+                                      } else {
+                                        // CFR/CIF/CIP: Open CRO dialog after booking exists
+                                        // For now, show message to create booking first
+                                        toast.info('Please create booking details first, then add CRO');
+                                      }
+                                    }}
+                                    title={isFOB ? "Enter CRO Details (Create Booking)" : "Enter CRO Details"}
+                                    data-testid={`cro-job-${booking.job_number}`}
+                                  >
+                                    <FileText className="w-4 h-4" />
+                                  </Button>
+                                </>
+                              ) : (
+                                // Existing booking buttons
+                                <>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => openEditDialog(booking)}
+                                    title="Edit Booking Details"
+                                    data-testid={`edit-booking-${booking.booking_number}`}
+                                  >
+                                    <Edit2 className="w-4 h-4" />
+                                  </Button>
+                                  
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => openCRODialog(booking)}
+                                    title="Enter/Edit CRO Details"
+                                    data-testid={`cro-booking-${booking.booking_number}`}
+                                  >
+                                    <FileText className="w-4 h-4" />
+                                  </Button>
+                                </>
+                              )}
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* CRO Dialog */}
@@ -1325,6 +1887,159 @@ export default function ShippingPage() {
             <Button variant="outline" onClick={() => setCroOpen(false)}>Cancel</Button>
             <Button onClick={handleCROUpdate} data-testid="save-cro-btn">Save CRO & Generate Schedule</Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Booking Details Dialog */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Booking Details - {selectedBooking?.booking_number}</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleEditSubmit} className="space-y-4 py-4">
+            <Card className="bg-muted/30">
+              <CardContent className="py-3 text-sm">
+                <div className="grid grid-cols-2 gap-2">
+                  <div><span className="text-muted-foreground">PO:</span> {selectedBooking?.po_number || 'N/A'}</div>
+                  <div><span className="text-muted-foreground">Supplier:</span> {selectedBooking?.supplier_name || 'N/A'}</div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Alert for required fields */}
+            {selectedBooking?.status === 'pending_details' && (
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 flex items-start gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                <div className="text-sm">
+                  <p className="font-medium text-amber-500">Booking Details Required</p>
+                  <p className="text-muted-foreground">Please fill in all required fields marked with *</p>
+                </div>
+              </div>
+            )}
+
+            <div className="form-grid">
+              <div className="form-field">
+                <Label>Shipping Line *</Label>
+                <Input
+                  value={editForm.shipping_line}
+                  onChange={(e) => setEditForm({...editForm, shipping_line: e.target.value})}
+                  placeholder="e.g., MAERSK, MSC, HAPAG"
+                  required
+                />
+              </div>
+              <div className="form-field">
+                <Label>Container Type *</Label>
+                <Select
+                  value={editForm.container_type}
+                  onValueChange={(value) => setEditForm({...editForm, container_type: value})}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CONTAINER_TYPES.map(type => (
+                      <SelectItem key={type} value={type}>{type.toUpperCase().replace('_', ' ')}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="form-grid">
+              <div className="form-field">
+                <Label>Container Count *</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  value={editForm.container_count || ''}
+                  onChange={(e) => setEditForm({...editForm, container_count: parseInt(e.target.value)})}
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="form-grid">
+              <div className="form-field">
+                <Label>Port of Loading *</Label>
+                <Input
+                  value={editForm.port_of_loading}
+                  onChange={(e) => setEditForm({...editForm, port_of_loading: e.target.value})}
+                  placeholder="e.g., Shanghai, Singapore"
+                  required
+                />
+              </div>
+              <div className="form-field">
+                <Label>Port of Discharge *</Label>
+                <Input
+                  value={editForm.port_of_discharge}
+                  onChange={(e) => setEditForm({...editForm, port_of_discharge: e.target.value})}
+                  placeholder="e.g., Mombasa, Dubai"
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="form-field">
+              <Label>Cargo Description</Label>
+              <Textarea
+                value={editForm.cargo_description}
+                onChange={(e) => setEditForm({...editForm, cargo_description: e.target.value})}
+                placeholder="Describe the cargo..."
+                rows={2}
+              />
+            </div>
+
+            <div className="form-grid">
+              <div className="form-field">
+                <Label>Cargo Weight (MT) *</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={editForm.cargo_weight || ''}
+                  onChange={(e) => setEditForm({...editForm, cargo_weight: parseFloat(e.target.value)})}
+                  required
+                />
+                <p className="text-xs text-muted-foreground mt-1">Weight in Metric Tons</p>
+              </div>
+              <div className="form-field">
+                <Label className="flex items-center gap-2">
+                  <Checkbox
+                    checked={editForm.is_dg}
+                    onCheckedChange={(checked) => setEditForm({...editForm, is_dg: checked})}
+                  />
+                  Dangerous Goods (DG)
+                </Label>
+                {editForm.is_dg && (
+                  <Input
+                    value={editForm.dg_class}
+                    onChange={(e) => setEditForm({...editForm, dg_class: e.target.value})}
+                    placeholder="DG Class (e.g., UN1203, Class 3)"
+                    className="mt-2"
+                  />
+                )}
+              </div>
+            </div>
+
+            <div className="form-field">
+              <Label>Notes</Label>
+              <Textarea
+                value={editForm.notes}
+                onChange={(e) => setEditForm({...editForm, notes: e.target.value})}
+                placeholder="Additional notes..."
+                rows={2}
+              />
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setEditOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit">
+                Save Booking Details
+              </Button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
 

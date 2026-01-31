@@ -18,26 +18,44 @@ class CostingService:
         packaging: str, 
         incoterm: Optional[str] = None,
         country_of_destination: Optional[str] = None,
-        transport_mode: Optional[str] = None
+        transport_mode: Optional[str] = None,
+        local_type: Optional[str] = None,
+        container_type: Optional[str] = None,
+        is_dg: Optional[bool] = None
     ) -> str:
         """
         Determine costing type based on order characteristics
-        Returns: EXPORT_CONTAINERIZED, EXPORT_BULK, EXPORT_GCC_ROAD, or LOCAL_DISPATCH
+        Returns: EXPORT_CONTAINERIZED, EXPORT_BULK, EXPORT_GCC_ROAD, EXPORT_ROAD, EXPORT_40FT_DG, EXPORT_40FT_NON_DG, EXPORT_20FT_DG, EXPORT_20FT_NON_DG, LOCAL_DISPATCH, LOCAL_PURCHASE_SALE, LOCAL_BULK_TO_PLANT, or LOCAL_DRUM_TO_PLANT
         """
         order_type_upper = (order_type or "").upper()
         packaging_upper = (packaging or "Bulk").upper()
         
-        # GCC countries by road = special export type
-        gcc_countries = ["SAUDI ARABIA", "BAHRAIN", "KUWAIT", "OMAN", "QATAR"]
-        country_upper = (country_of_destination or "").upper()
-        is_gcc = country_upper in gcc_countries
+        # Export orders with road transport mode
         is_road = transport_mode and transport_mode.upper() == "ROAD"
         
-        if order_type_upper == "EXPORT" and is_gcc and is_road:
-            return "EXPORT_GCC_ROAD"  # NEW costing type
+        if order_type_upper == "EXPORT" and is_road:
+            # GCC countries by road = special export type
+            gcc_countries = ["SAUDI ARABIA", "BAHRAIN", "KUWAIT", "OMAN", "QATAR"]
+            country_upper = (country_of_destination or "").upper()
+            is_gcc = country_upper in gcc_countries
+            
+            if is_gcc:
+                return "EXPORT_GCC_ROAD"  # GCC road export
+            else:
+                return "EXPORT_ROAD"  # General export road
         
-        # Local orders always use LOCAL_DISPATCH
+        # Local orders: check local_type for different costing types
         if order_type_upper == "LOCAL":
+            local_type_lower = (local_type or "").lower()
+            if local_type_lower == "direct_to_customer":
+                return "LOCAL_PURCHASE_SALE"
+            elif local_type_lower == "bulk_to_plant":
+                return "LOCAL_BULK_TO_PLANT"
+            elif local_type_lower == "packaged_to_plant":
+                return "LOCAL_DRUM_TO_PLANT"
+            elif local_type_lower in ("gcc_road_bulk", "gcc_road"):
+                # GCC by road (bulk or drums) – use same costing sheet as EXPORT_GCC_ROAD
+                return "EXPORT_GCC_ROAD"
             return "LOCAL_DISPATCH"
         
         # Export orders: check if bulk or packaged
@@ -47,6 +65,21 @@ class CostingService:
                 return "EXPORT_BULK"
             else:
                 # Packaged (drums, pallets, containers)
+                # Check for DG container types (only for sea/ocean transport)
+                is_sea = transport_mode and transport_mode.upper() in ["SEA", "OCEAN"]
+                if is_sea and container_type:
+                    container_type_upper = container_type.upper()
+                    if container_type_upper == "40FT" or container_type_upper == "40":
+                        if is_dg:
+                            return "EXPORT_40FT_DG"
+                        else:
+                            return "EXPORT_40FT_NON_DG"
+                    elif container_type_upper == "20FT" or container_type_upper == "20":
+                        if is_dg:
+                            return "EXPORT_20FT_DG"
+                        else:
+                            return "EXPORT_20FT_NON_DG"
+                # Default to EXPORT_CONTAINERIZED for other cases
                 return "EXPORT_CONTAINERIZED"
         
         # Default to LOCAL_DISPATCH if unclear

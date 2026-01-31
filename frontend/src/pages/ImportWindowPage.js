@@ -146,8 +146,16 @@ const ImportWindowPage = () => {
             size="sm"
           >
             {tab.label}
-            <Badge className="ml-2 bg-white/20">{tab.count}</Badge>
-          </Button>
+              <Badge 
+              className={`ml-2 ${
+                activeTab === tab.id 
+                  ? 'bg-white/20 text-white' 
+                  : 'bg-muted text-foreground'
+              }`}
+            >
+            {tab.count}
+          </Badge>
+        </Button>
         ))}
         <Button variant="outline" size="sm" onClick={loadData}>
           <RefreshCw className="w-4 h-4 mr-2" />

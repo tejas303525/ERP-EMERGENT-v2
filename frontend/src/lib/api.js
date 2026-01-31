@@ -232,6 +232,9 @@ export const inventoryItemAPI = {
   getAll: (itemType) => api.get('/inventory-items', { params: { item_type: itemType } }),
   getAvailability: (id) => api.get(`/inventory-items/${id}/availability`),
   create: (data) => api.post('/inventory-items', data),
+  update: (id, data) => api.put(`/inventory-items/${id}`, data),
+  delete: (id) => api.delete(`/inventory-items/${id}`),
+  adjustStock: (id, adjustment) => api.put(`/inventory-items/${id}/adjust-stock`, adjustment),
 };
 
 // Purchase Orders
@@ -239,6 +242,7 @@ export const purchaseOrderAPI = {
   getAll: (status) => api.get('/purchase-orders', { params: { status } }),
   getOne: (id) => api.get(`/purchase-orders/${id}`),
   getPendingApproval: () => api.get('/purchase-orders/pending-approval'),
+  getReadyForImportBooking: () => api.get('/purchase-orders/ready-for-import-booking'),
   create: (data) => api.post('/purchase-orders', data),
   createLine: (data) => api.post('/purchase-order-lines', data),
   updateStatus: (id, status) => api.put(`/purchase-orders/${id}/status`, null, { params: { status } }),
@@ -283,6 +287,10 @@ export const pdfAPI = {
   getQuotationUrl: (quotationId, print = false) => `${API_BASE}/pdf/quotation/${quotationId}${print ? '?print=true' : ''}`,
   getCROUrl: (bookingId) => `${API_BASE}/pdf/cro/${bookingId}`,
   getBlendReportUrl: (reportId) => `${API_BASE}/pdf/blend-report/${reportId}`,
+  getDeliveryNoteUrl: (deliveryOrderId) => {
+    const token = localStorage.getItem('erp_token');
+    return `${API_BASE}/pdf/delivery-note/${deliveryOrderId}${token ? `?token=${token}` : ''}`;
+  },
 };
 
 // Notifications (Event-Based Bell)
@@ -349,6 +357,16 @@ export const userAPI = {
   update: (id, data) => api.put(`/users/${id}`, data),
   changePassword: (id, newPassword) => api.put(`/users/${id}/password`, { new_password: newPassword }),
   delete: (id) => api.delete(`/users/${id}`),
+};
+
+// Role Management
+export const roleAPI = {
+  getAll: () => api.get('/roles'),
+  getById: (id) => api.get(`/roles/${id}`),
+  create: (data) => api.post('/roles', data),
+  update: (id, data) => api.put(`/roles/${id}`, data),
+  delete: (id) => api.delete(`/roles/${id}`),
+  getAvailablePages: () => api.get('/pages/available'),
 };
 
 // Costing & Margin Validation

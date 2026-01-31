@@ -12,7 +12,6 @@ const FinanceApprovalPage = () => {
   const [pendingPOs, setPendingPOs] = useState([]);
   const [approvedPOs, setApprovedPOs] = useState([]);
   const [pendingQuotations, setPendingQuotations] = useState([]);
-  const [pendingTransportCharges, setPendingTransportCharges] = useState([]);
   const [emailOutbox, setEmailOutbox] = useState({ smtp_configured: false, emails: [] });
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('quotations');
@@ -29,24 +28,18 @@ const FinanceApprovalPage = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [pendingPORes, approvedPORes, quotationsRes, emailRes, transportChargesRes] = await Promise.all([
+      const [pendingPORes, approvedPORes, quotationsRes, emailRes] = await Promise.all([
         purchaseOrderAPI.getPendingApproval(),
         purchaseOrderAPI.getAll('APPROVED'),
         quotationAPI.getPendingFinanceApproval().catch((err) => {
           console.error('Failed to load quotations:', err);
           return { data: [] };
         }),
-        emailAPI.getOutbox(),
-        // Fetch transports with charges pending approval (backend should return transports with transport_charges > 0 and charges_approved = false)
-        api.get('/transport/charges/pending-approval').catch((err) => {
-          console.error('Failed to load transport charges:', err);
-          return { data: [] };
-        })
+        emailAPI.getOutbox()
       ]);
       setPendingPOs(pendingPORes.data);
       setApprovedPOs(approvedPORes.data);
       setPendingQuotations(quotationsRes.data || []);
-      setPendingTransportCharges(transportChargesRes.data || []);
       setEmailOutbox(emailRes.data);
     } catch (error) {
       console.error('Failed to load data:', error);
@@ -103,26 +96,6 @@ const FinanceApprovalPage = () => {
       loadData();
     } catch (error) {
       toast.error('Failed to approve quotation: ' + (error.response?.data?.detail || error.message));
-    }
-  };
-
-  const handleApproveTransportCharges = async (transportId) => {
-    try {
-      await api.put(`/transport/${transportId}/charges/approve`);
-      toast.success('Transport charges approved');
-      loadData();
-    } catch (error) {
-      toast.error('Failed to approve transport charges: ' + (error.response?.data?.detail || error.message));
-    }
-  };
-
-  const handleRejectTransportCharges = async (transportId, reason) => {
-    try {
-      await api.put(`/transport/${transportId}/charges/reject`, null, { params: { reason } });
-      toast.success('Transport charges rejected');
-      loadData();
-    } catch (error) {
-      toast.error('Failed to reject transport charges: ' + (error.response?.data?.detail || error.message));
     }
   };
 
@@ -201,7 +174,6 @@ const FinanceApprovalPage = () => {
         {[
           { id: 'quotations', label: 'Quotations (PFI)', count: pendingQuotations.length, icon: FileText },
           { id: 'pending', label: 'Purchase Orders', count: pendingPOs.length, icon: DollarSign },
-          { id: 'transport_charges', label: 'Transport Charges', count: pendingTransportCharges.length, icon: Truck },
           { id: 'approved', label: 'Approved POs (Ready to Send)', count: approvedPOs.length, icon: Send },
           { id: 'outbox', label: 'Email Outbox', count: emailOutbox.emails?.length || 0, icon: Mail },
         ].map((tab) => (
@@ -298,89 +270,6 @@ const FinanceApprovalPage = () => {
             </div>
           )}
 
-          {/* Transport Charges Tab */}
-          {activeTab === 'transport_charges' && (
-            <div className="space-y-4">
-              {pendingTransportCharges.length === 0 ? (
-                <div className="glass p-8 rounded-lg border border-border text-center">
-                  <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-4 opacity-50" />
-                  <p className="text-muted-foreground">No transport charges pending approval</p>
-                </div>
-              ) : (
-                pendingTransportCharges.map((transport) => (
-                  <div key={transport.id} className="glass p-4 rounded-lg border border-border">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-2">
-                          <Truck className="w-5 h-5 text-indigo-500" />
-                          <span className="font-mono font-medium">{transport.transport_number || '-'}</span>
-                          <Badge className={transport.type === 'INWARD' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'}>
-                            {transport.type || transport.ref_type || 'TRANSPORT'}
-                          </Badge>
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mt-3">
-                          {transport.po_number && (
-                            <div>
-                              <p className="text-muted-foreground text-xs">PO Number</p>
-                              <p className="font-medium text-blue-400">{transport.po_number}</p>
-                            </div>
-                          )}
-                          {transport.job_number && (
-                            <div>
-                              <p className="text-muted-foreground text-xs">Job Number</p>
-                              <p className="font-medium text-amber-400">{transport.job_number}</p>
-                            </div>
-                          )}
-                          {transport.transporter_name && (
-                            <div>
-                              <p className="text-muted-foreground text-xs">Transporter</p>
-                              <p className="font-medium">{transport.transporter_name}</p>
-                            </div>
-                          )}
-                          <div>
-                            <p className="text-muted-foreground text-xs">Transport Charges</p>
-                            <p className="font-bold text-green-400 text-lg">
-                              {transport.currency || 'USD'} {transport.transport_charges?.toFixed(2) || '0.00'}
-                            </p>
-                          </div>
-                        </div>
-                        {transport.notes && (
-                          <div className="mt-2 text-sm text-muted-foreground">
-                            <p><strong>Notes:</strong> {transport.notes}</p>
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex gap-2 ml-4">
-                        <Button 
-                          size="sm" 
-                          onClick={() => handleApproveTransportCharges(transport.id)}
-                          className="bg-green-500 hover:bg-green-600"
-                        >
-                          <Check className="w-4 h-4 mr-1" />
-                          Approve
-                        </Button>
-                        <Button 
-                          size="sm" 
-                          variant="outline" 
-                          className="border-red-500/50 text-red-400 hover:bg-red-500/10"
-                          onClick={() => {
-                            const reason = prompt('Enter rejection reason:');
-                            if (reason) {
-                              handleRejectTransportCharges(transport.id, reason);
-                            }
-                          }}
-                        >
-                          <X className="w-4 h-4 mr-1" />
-                          Reject
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-
           {/* Email Outbox Tab */}
           {activeTab === 'outbox' && (
             <div className="space-y-4">
@@ -470,9 +359,11 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
     try {
       setLoadingCosting(true);
       const response = await api.get(`/costing/QUOTATION/${quotation.id}`);
+      console.log('Costing data loaded for quotation', quotation.id, ':', response.data);
       setCosting(response.data);
     } catch (error) {
       console.error('Failed to load costing:', error);
+      console.error('Error details:', error.response?.data);
       // Don't show error toast - costing might not exist yet
     } finally {
       setLoadingCosting(false);
@@ -488,15 +379,175 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
 
   // Function to generate cost breakdown rows
   const getCostBreakdown = () => {
-    if (!costing) return [];
-    
+    if (!costing) {
+      console.log('getCostBreakdown: No costing data available');
+      return [];
+    }
+
+    console.log('getCostBreakdown: Processing costing', costing);
+
+    const hasCustom = !!costing.custom_breakdown;
+    const isLocalGccByRoad =
+      costing.costing_type === 'EXPORT_GCC_ROAD' &&
+      quotation.order_type === 'local' &&
+      (quotation.local_type === 'gcc_road_bulk' || quotation.local_type === 'gcc_road') &&
+      hasCustom;
+
+    const isLocalCustomType =
+      ['LOCAL_PURCHASE_SALE', 'LOCAL_BULK_TO_PLANT', 'LOCAL_DRUM_TO_PLANT'].includes(
+        costing.costing_type
+      );
+
+    // For GCC-by-road and custom local sheets, build rows from saved custom_breakdown
+    // Or from the costing object itself if custom_breakdown is not set
+    if (isLocalGccByRoad || isLocalCustomType) {
+      const cb = costing.custom_breakdown || costing; // Fallback to costing object itself
+      const rows = [];
+      let srNo = 1;
+
+      // For GCC-by-road we use a fixed list of charge fields for nice labels
+      if (isLocalGccByRoad) {
+        const chargeDefs = [
+          { field: 'transportation', label: 'Transportation' },
+          { field: 'border_charges', label: 'Border Charges' },
+          { field: 'mofa', label: 'MOFA' },
+          { field: 'rak_chamber', label: 'RAK Chamber' },
+          { field: 'epda', label: 'EPDA' },
+          { field: 'sira', label: 'SIRA' },
+          { field: 'moh', label: 'MOH' },
+          { field: 'certificate_of_origin', label: 'Certificate of Origin' },
+          { field: 'steel_drum_210_reconditioned', label: 'Steel Drum 210 Ltr-Reconditioned' },
+          { field: 'steel_drum_210_new', label: 'Steel Drum 210 Ltr-New' },
+          { field: 'hdpe_drum_210_reconditioned', label: 'HDPE Drum 210 Ltr-Reconditioned' },
+          { field: 'hdpe_drum_210_new', label: 'HDPE Drum 210 Ltr-New' },
+          { field: 'hdpe_drum_250_new', label: 'HDPE Drum 250 Ltr-New' },
+          { field: 'open_top_drum_210_reconditioned', label: 'Open Top Drum 210 Ltr-Reconditioned' },
+          { field: 'ibc', label: 'IBC' },
+          { field: 'flexi', label: 'Flexi' },
+          { field: 'pallets', label: 'Pallets' },
+        ];
+
+        chargeDefs.forEach(({ field, label }) => {
+          const rate = cb[`${field}_rate`] || 0;
+          const units = cb[`${field}_units`] || 0;
+          const total = cb[`${field}_total`] || rate * units;
+          if (total && total !== 0) {
+            rows.push({ srNo: srNo++, description: label, rate, units, total });
+          }
+        });
+      } else if (isLocalCustomType) {
+        // Generic handling for custom local sheets: use any *_total that has a rate or units
+        Object.keys(cb).forEach((key) => {
+          if (!key.endsWith('_total')) return;
+          const base = key.slice(0, -6); // remove "_total"
+          const rateKey = `${base}_rate`;
+          const unitsKey = `${base}_units`;
+          const total = cb[key] || 0;
+          const rate = cb[rateKey];
+          const units = cb[unitsKey];
+
+          if (total && (rate !== undefined || units !== undefined)) {
+            const pretty = base
+              .replace(/_/g, ' ')
+              .replace(/\b\w/g, (ch) => ch.toUpperCase());
+            rows.push({
+              srNo: srNo++,
+              description: pretty,
+              rate: rate ?? total,
+              units: units ?? 1,
+              total,
+            });
+          }
+        });
+
+        // For LOCAL_PURCHASE_SALE, if no detail rows were found, show summary fields
+        if (costing.costing_type === 'LOCAL_PURCHASE_SALE' && rows.length === 0) {
+          // Show product cost and cost per MT as the main line items
+          if (cb.product_cost && cb.product_cost > 0) {
+            rows.push({
+              srNo: srNo++,
+              description: 'Product Cost',
+              rate: cb.product_cost,
+              units: 1,
+              total: cb.product_cost,
+            });
+          }
+          if (cb.cost_per_mt && cb.cost_per_mt > 0) {
+            rows.push({
+              srNo: srNo++,
+              description: 'Cost Per MT',
+              rate: cb.cost_per_mt,
+              units: 1,
+              total: cb.cost_per_mt,
+            });
+          }
+        }
+
+        // Add summary-style rows if present (for other costing types or additional details)
+        if (cb.product_cost && costing.costing_type !== 'LOCAL_PURCHASE_SALE') {
+          rows.push({
+            srNo: srNo++,
+            description: 'Product Cost (Cost/MT)',
+            rate: cb.product_cost,
+            units: 1,
+            total: cb.product_cost,
+          });
+        }
+        if (cb.import_shipment_charges) {
+          rows.push({
+            srNo: srNo++,
+            description: 'Import Shipment Charges',
+            rate: cb.import_shipment_charges,
+            units: 1,
+            total: cb.import_shipment_charges,
+          });
+        }
+        if (cb.export_shipment_charges) {
+          rows.push({
+            srNo: srNo++,
+            description: 'Export Shipment Charges',
+            rate: cb.export_shipment_charges,
+            units: 1,
+            total: cb.export_shipment_charges,
+          });
+        }
+
+        // Add key product detail metrics if present
+        if (cb.loaded_weight_mt) {
+          rows.push({
+            srNo: srNo++,
+            description: 'Loaded Weight (MT)',
+            rate: cb.loaded_weight_mt,
+            units: 1,
+            total: cb.loaded_weight_mt,
+          });
+        }
+        if (cb.cost_per_mt && costing.costing_type !== 'LOCAL_PURCHASE_SALE') {
+          rows.push({
+            srNo: srNo++,
+            description: 'Cost Per MT ($)',
+            rate: cb.cost_per_mt,
+            units: 1,
+            total: cb.cost_per_mt,
+          });
+        }
+      }
+
+      return rows;
+    }
+
     const rows = [];
     let srNo = 1;
     const containerCount = quotation.container_count || 1;
     const currency = quotation.currency || 'USD';
 
+    // Helper function to check if a cost value should be included
+    const shouldIncludeCost = (value) => {
+      return value !== undefined && value !== null && value !== 0;
+    };
+
     // Raw Material Cost
-    if (costing.raw_material_cost > 0) {
+    if (shouldIncludeCost(costing.raw_material_cost)) {
       rows.push({
         srNo: srNo++,
         description: 'Raw Material Cost',
@@ -507,7 +558,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
     }
 
     // Packaging Costs (drums)
-    if (costing.packaging_cost > 0) {
+    if (shouldIncludeCost(costing.packaging_cost)) {
       const packagingType = costing.packaging_type || 'DRUM';
       const packagingName = packagingType === 'BULK' ? 'Packaging (Bulk)' : 
                            packagingType === 'DRUM' ? 'Drum Cost' : 
@@ -522,7 +573,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
     }
 
     // Transport Costs
-    if (costing.local_transport_cost > 0) {
+    if (shouldIncludeCost(costing.local_transport_cost)) {
       rows.push({
         srNo: srNo++,
         description: 'Transportation',
@@ -532,7 +583,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
       });
     }
 
-    if (costing.inland_transport_cost > 0) {
+    if (shouldIncludeCost(costing.inland_transport_cost)) {
       rows.push({
         srNo: srNo++,
         description: 'Inland Transport',
@@ -543,7 +594,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
     }
 
     // Export-specific charges
-    if (costing.thc_cost > 0) {
+    if (shouldIncludeCost(costing.thc_cost)) {
       const containerType = quotation.container_type || '40ft';
       const isDG = costing.is_dg ? 'DG' : '';
       const description = containerType === '40ft' ? `THC 40ft ${isDG}`.trim() : `THC ${containerType} ${isDG}`.trim();
@@ -556,7 +607,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
       });
     }
 
-    if (costing.isps_cost > 0) {
+    if (shouldIncludeCost(costing.isps_cost)) {
       rows.push({
         srNo: srNo++,
         description: 'ISPS',
@@ -566,7 +617,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
       });
     }
 
-    if (costing.bl_cost > 0) {
+    if (shouldIncludeCost(costing.bl_cost)) {
       rows.push({
         srNo: srNo++,
         description: 'BL Charges',
@@ -576,7 +627,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
       });
     }
 
-    if (costing.documentation_cost > 0) {
+    if (shouldIncludeCost(costing.documentation_cost)) {
       rows.push({
         srNo: srNo++,
         description: 'Document Processing Charges',
@@ -586,7 +637,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
       });
     }
 
-    if (costing.ocean_freight_cost > 0) {
+    if (shouldIncludeCost(costing.ocean_freight_cost)) {
       rows.push({
         srNo: srNo++,
         description: 'Ocean Freight',
@@ -596,7 +647,7 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
       });
     }
 
-    if (costing.port_charges > 0) {
+    if (shouldIncludeCost(costing.port_charges)) {
       rows.push({
         srNo: srNo++,
         description: 'Port Charges',
@@ -606,11 +657,28 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
       });
     }
 
+    console.log('getCostBreakdown: Generated', rows.length, 'cost rows');
     return rows;
   };
 
   const costRows = getCostBreakdown();
-  const totalCost = costing?.total_cost || 0;
+  const usesCustomTotal =
+    costing &&
+    ((costing.costing_type === 'EXPORT_GCC_ROAD' &&
+      quotation.order_type === 'local' &&
+      (quotation.local_type === 'gcc_road_bulk' || quotation.local_type === 'gcc_road') &&
+      costing.custom_breakdown) ||
+      ['LOCAL_PURCHASE_SALE', 'LOCAL_BULK_TO_PLANT', 'LOCAL_DRUM_TO_PLANT'].includes(
+        costing.costing_type
+      ));
+
+  // Calculate total cost: prefer costing.total_cost if available, otherwise calculate from custom_breakdown or sum costRows
+  const customTotalFromRows = costRows.reduce((sum, row) => sum + (row.total || 0), 0);
+  
+  // Use costing.total_cost directly - the backend calculates this correctly for all costing types
+  const totalCost = costing?.total_cost && costing.total_cost > 0
+    ? costing.total_cost
+    : (usesCustomTotal ? customTotalFromRows : 0);
 
   return (
     <div className="glass p-4 rounded-lg border border-border" data-testid={`quotation-${quotation.id}`}>
@@ -637,7 +705,17 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
             )}
           </div>
           <p className="text-muted-foreground text-sm">Customer: {quotation.customer_name}</p>
-          <p className="text-sm text-muted-foreground">Type: {quotation.order_type?.toUpperCase()}</p>
+          <p className="text-sm text-muted-foreground">
+            Type: {quotation.order_type?.toUpperCase()}
+            {quotation.local_type && (
+              <span className="ml-2 text-xs text-muted-foreground">
+                ({quotation.local_type === 'direct_to_customer' ? 'Direct to Customer' : 
+                  quotation.local_type === 'bulk_to_plant' ? 'Bulk to Plant' :
+                  quotation.local_type === 'packaged_to_plant' ? 'Drum to Plant' :
+                  quotation.local_type})
+              </span>
+            )}
+          </p>
           <p className="text-green-400 font-medium text-lg mt-1">
             {quotation.currency} {quotation.total?.toFixed(2)}
           </p>
@@ -703,59 +781,53 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
         </div>
       )}
 
-      {/* Cost Breakdown Table */}
+      {/* Net Profit/Loss Display */}
       {quotation.cost_confirmed && (
         <div className="mt-4 border-t border-border pt-3">
           <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
             <Calculator className="w-4 h-4" />
-            Cost Breakdown
+            Profit & Loss
           </h4>
+          
           {loadingCosting ? (
             <div className="text-center py-4 text-muted-foreground">Loading costing...</div>
-          ) : costing && costRows.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/30">
-                  <tr>
-                    <th className="p-2 text-left text-xs font-medium text-muted-foreground">Sr. No.</th>
-                    <th className="p-2 text-left text-xs font-medium text-muted-foreground">Description</th>
-                    <th className="p-2 text-right text-xs font-medium text-muted-foreground">Rate</th>
-                    <th className="p-2 text-right text-xs font-medium text-muted-foreground">No. of Units/Container</th>
-                    <th className="p-2 text-right text-xs font-medium text-muted-foreground">Total Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {costRows.map((row) => (
-                    <tr key={row.srNo} className="border-b border-border/30 hover:bg-muted/10">
-                      <td className="p-2 font-mono text-xs">{row.srNo}</td>
-                      <td className="p-2">{row.description}</td>
-                      <td className="p-2 text-right font-mono">{quotation.currency} {row.rate.toFixed(2)}</td>
-                      <td className="p-2 text-right font-mono">{row.units}</td>
-                      <td className="p-2 text-right font-mono font-medium">{quotation.currency} {row.total.toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot className="bg-muted/20">
-                  <tr>
-                    <td colSpan={4} className="p-2 text-right font-semibold">Total Cost:</td>
-                    <td className="p-2 text-right font-bold">{quotation.currency} {totalCost.toFixed(2)}</td>
-                  </tr>
-                  <tr>
-                    <td colSpan={4} className="p-2 text-right font-semibold">Selling Price:</td>
-                    <td className="p-2 text-right font-bold text-green-400">{quotation.currency} {quotation.total?.toFixed(2) || '0.00'}</td>
-                  </tr>
-                  <tr>
-                    <td colSpan={4} className="p-2 text-right font-semibold">Margin:</td>
-                    <td className={`p-2 text-right font-bold ${costing.margin_amount >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      {quotation.currency} {costing.margin_amount?.toFixed(2) || '0.00'} ({costing.margin_percentage?.toFixed(2) || 0}%)
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
+          ) : costing ? (
+            <div className="bg-muted/20 border border-border rounded-lg p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  {(() => {
+                    const profit = (quotation.total || 0) - totalCost;
+                    const profitPercentage = quotation.total > 0 ? (profit / quotation.total) * 100 : 0;
+                    return (
+                      <>
+                        <p className="text-xs text-muted-foreground mb-1">Net {profit >= 0 ? 'Profit' : 'Loss'}</p>
+                        <p className={`text-2xl font-bold ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {profit >= 0 ? '+' : ''}{quotation.currency} {profit.toFixed(2)}
+                        </p>
+                        <p className={`text-sm mt-1 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {profitPercentage >= 0 ? '+' : ''}{profitPercentage.toFixed(2)}% margin
+                        </p>
+                      </>
+                    );
+                  })()}
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-muted-foreground mb-1">Selling Price</p>
+                  <p className="text-lg font-semibold text-green-400">
+                    {quotation.currency} {quotation.total?.toFixed(2) || '0.00'}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">Total Cost</p>
+                  <p className="text-sm font-medium">
+                    {quotation.currency} {totalCost.toFixed(2)}
+                  </p>
+                </div>
+              </div>
             </div>
           ) : (
-            <div className="text-center py-4 text-muted-foreground text-sm">
-              Cost breakdown not available. Click "Check Cost" to calculate.
+            <div className="text-center py-4 text-amber-400 text-sm border border-amber-500/30 bg-amber-500/10 rounded p-4">
+              <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />
+              <p className="font-medium">No costing data found</p>
+              <p className="text-xs text-muted-foreground mt-1">Click "Check Cost" button above to create costing calculation</p>
             </div>
           )}
         </div>
@@ -968,11 +1040,20 @@ const POCard = ({ po, onApprove, onReject, onView, onSend, showApprovalActions, 
           </div>
           {po.lines.map((line, idx) => (
             <div key={idx} className="grid grid-cols-4 gap-2 text-sm py-1">
-              <span className="col-span-2 truncate">{line.item_name}</span>
+              <span className="col-span-2 truncate">{line.display_name || line.item_name}</span>
               <span>{line.qty} {line.uom}</span>
               <span>{line.unit_price?.toFixed(2) || '-'}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* PFI Reference at the bottom */}
+      {po.pfi_number && (
+        <div className="mt-4 border-t border-border pt-3">
+          <p className="text-sm text-muted-foreground">
+            <span className="font-medium">Reference PFI:</span> <span className="text-blue-400 font-semibold">{po.pfi_number}</span>
+          </p>
         </div>
       )}
 
@@ -1035,6 +1116,12 @@ const POViewModal = ({ po, onClose }) => {
                   </span>
                 </div>
               </div>
+              {po.pfi_number && (
+                <div>
+                  <label className="text-xs text-muted-foreground">Reference PFI</label>
+                  <p className="font-medium">{po.pfi_number}</p>
+                </div>
+              )}
               <div>
                 <label className="text-xs text-muted-foreground">Supplier</label>
                 <p className="font-medium">{po.supplier_name}</p>
@@ -1081,7 +1168,14 @@ const POViewModal = ({ po, onClose }) => {
                   <tbody>
                     {po.lines.map((line, idx) => (
                       <tr key={idx} className="border-b border-border/50">
-                        <td className="p-2">{line.item_name}</td>
+                        <td className="p-2">
+                          {line.display_name || line.item_name}
+                          {line.packaging_qty && line.packaging_name && (
+                            <div className="text-xs text-muted-foreground mt-1">
+                              Packaging: {line.packaging_qty} x {line.packaging_name}
+                            </div>
+                          )}
+                        </td>
                         <td className="p-2 font-mono text-sm">{line.item_sku || '-'}</td>
                         <td className="p-2 text-right font-mono">{line.qty}</td>
                         <td className="p-2">{line.uom}</td>

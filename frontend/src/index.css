@@ -1,32 +1,33 @@
-@import url('https://fonts.googleapis.com/css2?family=Chivo:wght@400;700;900&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --background: 240 10% 3.9%;
-  --foreground: 0 0% 98%;
-  --card: 240 10% 7%;
-  --card-foreground: 0 0% 98%;
-  --popover: 240 10% 7%;
-  --popover-foreground: 0 0% 98%;
-  --primary: 199 89% 48%;
-  --primary-foreground: 222.2 47.4% 11.2%;
-  --secondary: 240 5% 15%;
-  --secondary-foreground: 0 0% 98%;
-  --muted: 240 5% 15%;
-  --muted-foreground: 240 5% 64.9%;
-  --accent: 240 5% 15%;
-  --accent-foreground: 0 0% 98%;
-  --destructive: 0 84% 60%;
-  --destructive-foreground: 0 0% 98%;
-  --border: 240 5% 17%;
-  --input: 240 5% 17%;
-  --ring: 199 89% 48%;
+  /* Enterprise Design System - SAP/Oracle Style */
+  --background: 0 0% 100%; /* White #FFFFFF */
+  --foreground: 222.2 47.4% 11.2%; /* Dark text */
+  --card: 0 0% 100%; /* White #FFFFFF */
+  --card-foreground: 222.2 47.4% 11.2%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222.2 47.4% 11.2%;
+  --primary: 217 91% 60%; /* Blue #2563EB */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 220 13% 96%; /* Light gray #F6F7F9 */
+  --secondary-foreground: 222.2 47.4% 11.2%;
+  --muted: 220 13% 96%; /* Light gray #F6F7F9 */
+  --muted-foreground: 215.4 16.3% 46.9%;
+  --accent: 220 13% 96%;
+  --accent-foreground: 222.2 47.4% 11.2%;
+  --destructive: 0 72% 51%; /* Red #DC2626 */
+  --destructive-foreground: 0 0% 100%;
+  --border: 220 13% 91%; /* Border #E5E7EB */
+  --input: 220 13% 91%;
+  --ring: 217 91% 60%; /* Blue #2563EB */
   --radius: 0.25rem;
-  --success: 160 84% 39%;
-  --warning: 38 92% 50%;
+  --success: 142 71% 45%; /* Green #16A34A */
+  --warning: 38 92% 50%; /* Amber #F59E0B */
 }
 
 * {
@@ -39,17 +40,18 @@ html {
 
 body {
   margin: 0;
-  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Inter', 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 400;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: hsl(var(--background));
+  background-color: #F6F7F9; /* Light gray secondary background */
   color: hsl(var(--foreground));
 }
 
 h1, h2, h3, h4, h5, h6 {
-  font-family: 'Chivo', sans-serif;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-family: 'Inter', 'IBM Plex Sans', sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .font-mono, code, .data-cell {
@@ -67,7 +69,7 @@ h1, h2, h3, h4, h5, h6 {
 
 @layer utilities {
   .glass {
-    @apply backdrop-blur-md bg-background/80 border border-border/50;
+    @apply bg-white border border-gray-200 shadow-sm;
   }
   
   .glow-primary {
@@ -94,50 +96,54 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 ::-webkit-scrollbar-track {
-  background: hsl(var(--muted));
+  background: #f3f4f6;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--border));
+  background: #d1d5db;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground));
+  background: #9ca3af;
 }
 
-/* Table styles */
+/* Enterprise Table styles */
 .erp-table th {
-  @apply text-xs uppercase tracking-wider font-medium text-muted-foreground bg-muted/50 px-4 py-3;
+  @apply text-xs uppercase tracking-wider font-semibold text-gray-700 bg-white px-4 py-3 border-b border-gray-200;
 }
 
 .erp-table td {
-  @apply px-4 py-3 text-sm font-mono;
+  @apply px-4 py-3 text-sm text-gray-900 border-b border-gray-200 bg-white;
 }
 
 .erp-table tr {
-  @apply border-b border-border hover:bg-muted/30 transition-colors;
+  @apply hover:bg-gray-50;
 }
 
-/* Status badges */
+.erp-table tr:nth-child(even) td {
+  @apply bg-gray-50;
+}
+
+/* Enterprise Status badges - Minimal design */
 .status-pending {
-  @apply bg-zinc-500/20 text-zinc-400 border border-zinc-500/30;
+  @apply bg-gray-100 text-gray-700 border border-gray-200 px-2 py-0.5 rounded text-xs font-medium;
 }
 
 .status-approved, .status-passed, .status-paid {
-  @apply bg-emerald-500/20 text-emerald-400 border border-emerald-500/30;
+  @apply bg-green-50 text-green-700 border border-green-200 px-2 py-0.5 rounded text-xs font-medium;
 }
 
 .status-rejected, .status-failed {
-  @apply bg-red-500/20 text-red-400 border border-red-500/30;
+  @apply bg-red-50 text-red-700 border border-red-200 px-2 py-0.5 rounded text-xs font-medium;
 }
 
 .status-active, .status-in_production {
-  @apply bg-sky-500/20 text-sky-400 border border-sky-500/30;
+  @apply bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded text-xs font-medium;
 }
 
 .status-warning, .status-partial {
-  @apply bg-amber-500/20 text-amber-400 border border-amber-500/30;
+  @apply bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded text-xs font-medium;
 }
 
 /* Card hover effect */
@@ -195,4 +201,21 @@ input:focus, select:focus, textarea:focus {
   animation: none;
   opacity: 1;
   background-color: rgba(59, 130, 246, 0.15);
+}
+
+/* Light theme priority indicators */
+.priority-low {
+  @apply text-gray-500;
+}
+
+.priority-normal {
+  @apply text-blue-600;
+}
+
+.priority-high {
+  @apply text-amber-600;
+}
+
+.priority-urgent {
+  @apply text-red-600;
 }

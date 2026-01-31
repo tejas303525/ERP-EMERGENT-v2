@@ -5,6 +5,7 @@ This simulates the complete flow and verifies the fix.
 """
 
 import asyncio
+import pytest
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 from dotenv import load_dotenv
@@ -17,6 +18,7 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
+@pytest.mark.asyncio
 async def test_net_weight_preservation():
     """Test that net_weight_kg is preserved through the entire flow"""
     

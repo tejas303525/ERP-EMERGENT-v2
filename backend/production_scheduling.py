@@ -173,6 +173,8 @@ class PurchaseOrderCreate(BaseModel):
     currency: str = "USD"
     total_amount: float = 0
     rfq_id: Optional[str] = None
+    quotation_id: Optional[str] = None  # Reference to quotation/PFI
+    pfi_number: Optional[str] = None  # PFI number for display
     notes: Optional[str] = None
     incoterm: str = "EXW"
     payment_terms: str = "Net 30"
@@ -204,6 +206,9 @@ class PurchaseOrderLineCreate(BaseModel):
     unit_price: float = 0
     required_by: Optional[str] = None  # ISO date
     promised_delivery_date: Optional[str] = None  # ETA from supplier
+    procurement_type: Optional[str] = None  # Bulk or Drummed
+    packaging_item_id: Optional[str] = None  # Packaging inventory item ID when procurement_type is Drummed
+    packaging_qty: Optional[float] = None  # Quantity of packaging units needed
 
 class PurchaseOrderLine(PurchaseOrderLineCreate):
     model_config = ConfigDict(extra="ignore")

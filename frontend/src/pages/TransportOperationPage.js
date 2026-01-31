@@ -291,7 +291,7 @@ const TransportRow = ({ transport, onStatusChange }) => {
         </div>
       </td>
       <td className="p-3">{transport.quantity || '-'}</td>
-      <td className="p-3">{transport.product_name || '-'}</td>
+      <td className="p-3">{transport.products_summary || transport.product_name || '-'}</td>
       <td className="p-3">
         <div className="flex items-center gap-2">
           <span>{vehicleType}</span>

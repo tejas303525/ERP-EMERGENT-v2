@@ -1,19 +1,20 @@
-/* ERP Specific Styles */
+/* Enterprise ERP Styles - SAP/Oracle Style */
 
 .sidebar {
-  background: linear-gradient(180deg, hsl(240 10% 5%) 0%, hsl(240 10% 3.9%) 100%);
+  background: #FFFFFF;
+  border-right: 1px solid #E5E7EB;
 }
 
 .sidebar-item {
-  @apply flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground rounded-sm transition-colors duration-150;
+  @apply flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 rounded-none transition-colors duration-150;
 }
 
 .sidebar-item:hover {
-  @apply bg-muted/50 text-foreground;
+  @apply bg-[#F6F7F9] text-gray-900;
 }
 
 .sidebar-item.active {
-  @apply bg-primary/10 text-primary border-l-2 border-primary;
+  @apply bg-[#F6F7F9] text-[#2563EB] border-l-2 border-[#2563EB] font-medium;
 }
 
 .stat-card {
@@ -37,11 +38,11 @@
 }
 
 .data-grid {
-  @apply bg-card border border-border rounded-sm overflow-hidden;
+  @apply bg-white border border-[#E5E7EB] overflow-hidden;
 }
 
 .data-grid-header {
-  @apply bg-muted/30 border-b border-border px-4 py-3 flex items-center justify-between;
+  @apply bg-white border-b border-[#E5E7EB] px-4 py-3 flex items-center justify-between;
 }
 
 .module-header {
@@ -57,7 +58,7 @@
 }
 
 .form-section {
-  @apply bg-card border border-border rounded-sm p-6 mb-6;
+  @apply bg-white border border-[#E5E7EB] p-6 mb-6;
 }
 
 .form-section-title {
@@ -104,21 +105,21 @@
   @apply text-sm text-muted-foreground/70 max-w-sm;
 }
 
-/* Priority indicators */
+/* Priority indicators - updated for light theme */
 .priority-low {
-  @apply text-zinc-400;
+  @apply text-gray-500;
 }
 
 .priority-normal {
-  @apply text-sky-400;
+  @apply text-blue-600;
 }
 
 .priority-high {
-  @apply text-amber-400;
+  @apply text-amber-600;
 }
 
 .priority-urgent {
-  @apply text-red-400;
+  @apply text-red-600;
 }
 
 /* Module specific colors */

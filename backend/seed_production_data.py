@@ -181,14 +181,160 @@ async def seed_inventory_items():
         }
     ]
     
-    # PACK materials
+    # PACK materials - All packaging materials from requirements
     pack_materials = [
+        {
+            "id": generate_id(),
+            "sku": "PACK-DRUM-8MM",
+            "name": "New Drums - 8 mm",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 200,
+            "net_weight_kg_default": 180.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-DRUM-9MM",
+            "name": "New Drums - 9 mm",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 200,
+            "net_weight_kg_default": 180.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-DRUM-RECON",
+            "name": "Recon Drums",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 200,
+            "net_weight_kg_default": 180.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-HDPE-210L",
+            "name": "HDPE Drums 210ltrs",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 210,
+            "net_weight_kg_default": 190.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-HDPE-250L",
+            "name": "HDPE Drums 250 litre",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 250,
+            "net_weight_kg_default": 225.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-IBC-NEW",
+            "name": "IBCS New",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 1000,
+            "net_weight_kg_default": 850.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-IBC-RECON",
+            "name": "IBCS Recon",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 1000,
+            "net_weight_kg_default": 850.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-FLEXI-BAG",
+            "name": "Flexi Bags",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 20000,
+            "net_weight_kg_default": 20000.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-LUBE-1L",
+            "name": "Lubricant packaging 1 litre",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 1,
+            "net_weight_kg_default": 0.9,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-LUBE-4L",
+            "name": "Lubricant packaging 4 litre",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 4,
+            "net_weight_kg_default": 3.6,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-LUBE-5L",
+            "name": "Lubricant packaging 5 litre",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 5,
+            "net_weight_kg_default": 4.5,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-LUBE-20L",
+            "name": "Lubricant packaging 20 litre",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 20,
+            "net_weight_kg_default": 18.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        {
+            "id": generate_id(),
+            "sku": "PACK-PALLET",
+            "name": "Pallets",
+            "item_type": "PACK",
+            "uom": "EA",
+            "capacity_liters": 0,
+            "net_weight_kg_default": 0.0,
+            "is_active": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        },
+        # Legacy items for backward compatibility
         {
             "id": generate_id(),
             "sku": "PACK-DRUM-STEEL",
             "name": "Steel Drum Shell",
             "item_type": "PACK",
             "uom": "EA",
+            "capacity_liters": 200,
+            "net_weight_kg_default": 180.0,
             "is_active": True,
             "created_at": datetime.now(timezone.utc).isoformat()
         },
@@ -205,15 +351,6 @@ async def seed_inventory_items():
             "id": generate_id(),
             "sku": "PACK-LABEL",
             "name": "Product Label",
-            "item_type": "PACK",
-            "uom": "EA",
-            "is_active": True,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        },
-        {
-            "id": generate_id(),
-            "sku": "PACK-PALLET",
-            "name": "Wooden Pallet",
             "item_type": "PACK",
             "uom": "EA",
             "is_active": True,

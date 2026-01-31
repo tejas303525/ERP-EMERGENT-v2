@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
 import { formatDate, getStatusColor, getPriorityColor } from '../lib/utils';
-import { Plus, Factory, Eye, Play, Trash2, AlertTriangle, Check, Loader2, Printer, Download, Search, RefreshCw, FileText } from 'lucide-react';
+import { Plus, Factory, Eye, Play, Trash2, AlertTriangle, Check, Loader2, Printer, Download, Search, RefreshCw, FileText, Package } from 'lucide-react';
 import api from '../lib/api';
 import {
   Pagination,
@@ -257,6 +257,27 @@ export default function JobOrdersPage() {
       toast.error('Failed to load data');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const syncPackaging = async (jobId) => {
+    try {
+      const response = await api.post(`/job-orders/${jobId}/sync-packaging`);
+      if (response.data.success) {
+        toast.success(response.data.message);
+        // Reload the data to show updated packaging info
+        loadData();
+        // If viewing this job, refresh the view
+        if (selectedJob && selectedJob.id === jobId) {
+          const jobRes = await jobOrderAPI.getOne(jobId);
+          setSelectedJob(jobRes.data);
+        }
+      } else {
+        toast.error(response.data.message || 'Failed to sync packaging');
+      }
+    } catch (error) {
+      console.error('Failed to sync packaging:', error);
+      toast.error('Failed to sync packaging');
     }
   };
 
@@ -775,31 +796,48 @@ export default function JobOrdersPage() {
 
   // Refresh BOM availability for a job order
   const refreshBomAvailability = async (job) => {
-    if (!job?.bom || job.bom.length === 0) {
-      setBomAvailability({});
-      return;
-    }
-    
     setLoadingAvailability(true);
     const availabilityMap = {};
     
     try {
-      // Fetch current availability for each BOM item
-      const availabilityPromises = job.bom.map(async (item) => {
+      // Get BOM items
+      const bomItems = job?.bom || [];
+      
+      // Get packaging items from material_shortages
+      const packagingItems = (job?.material_shortages || []).filter(s => s.item_type === 'PACK');
+      
+      // Combine all items to check
+      const allItemsToCheck = [
+        ...bomItems.map(item => ({
+          itemId: item.product_id || item.material_item_id,
+          type: 'BOM'
+        })),
+        ...packagingItems.map(item => ({
+          itemId: item.item_id,
+          type: 'PACK'
+        }))
+      ];
+      
+      if (allItemsToCheck.length === 0) {
+        setBomAvailability({});
+        setLoadingAvailability(false);
+        return;
+      }
+      
+      // Fetch current availability for each item
+      const availabilityPromises = allItemsToCheck.map(async (item) => {
         try {
-          // Use product_id from BOM item to check availability
-          const itemId = item.product_id || item.material_item_id;
-          if (!itemId) return null;
+          if (!item.itemId) return null;
           
-          const availRes = await api.get(`/inventory-items/${itemId}/availability`);
+          const availRes = await api.get(`/inventory-items/${item.itemId}/availability`);
           return {
-            itemId: itemId,
+            itemId: item.itemId,
             available: availRes.data?.available || 0
           };
         } catch (err) {
-          console.warn(`Failed to check availability for ${item.product_name}:`, err);
+          console.warn(`Failed to check availability for ${item.itemId}:`, err);
           return {
-            itemId: item.product_id || item.material_item_id,
+            itemId: item.itemId,
             available: 0
           };
         }
@@ -814,7 +852,7 @@ export default function JobOrdersPage() {
       
       setBomAvailability(availabilityMap);
     } catch (error) {
-      console.error('Failed to refresh BOM availability:', error);
+      console.error('Failed to refresh availability:', error);
       setBomAvailability({});
     } finally {
       setLoadingAvailability(false);
@@ -2044,6 +2082,125 @@ export default function JobOrdersPage() {
                         })}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Packaging Requirements Section */}
+              {selectedJob.material_shortages && selectedJob.material_shortages.filter(s => s.item_type === 'PACK').length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="font-medium flex items-center gap-2">
+                      <Package className="w-4 h-4" />
+                      Packaging Requirements
+                    </h4>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => refreshBomAvailability(selectedJob)}
+                      disabled={loadingAvailability}
+                      className="h-7"
+                    >
+                      <RefreshCw className={`w-3 h-3 mr-1 ${loadingAvailability ? 'animate-spin' : ''}`} />
+                      Refresh
+                    </Button>
+                  </div>
+                  <div className="data-grid max-h-64 overflow-y-auto">
+                    <table className="erp-table w-full">
+                      <thead>
+                        <tr>
+                          <th>Packaging Material</th>
+                          <th>SKU</th>
+                          <th>Required</th>
+                          <th>Available</th>
+                          <th>Shortage</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedJob.material_shortages
+                          .filter(s => s.item_type === 'PACK')
+                          .map((shortage, idx) => {
+                            // Use refreshed availability if available
+                            const currentAvailable = bomAvailability[shortage.item_id] !== undefined 
+                              ? bomAvailability[shortage.item_id] 
+                              : (shortage.available || 0);
+                            const requiredQty = shortage.required_qty || 0;
+                            const currentShortage = Math.max(0, requiredQty - currentAvailable);
+                            const hasShortage = currentShortage > 0;
+                            
+                            return (
+                              <tr key={idx} className={hasShortage ? 'bg-red-500/10' : ''}>
+                                <td className="font-medium">{shortage.item_name}</td>
+                                <td className="font-mono text-xs">{shortage.item_sku}</td>
+                                <td className="font-mono">{requiredQty.toFixed(0)} {shortage.uom}</td>
+                                <td className={`font-mono ${hasShortage ? 'text-red-400' : 'text-green-400'}`}>
+                                  {loadingAvailability ? (
+                                    <Loader2 className="w-4 h-4 animate-spin inline" />
+                                  ) : (
+                                    `${currentAvailable.toFixed(0)} ${shortage.uom}`
+                                  )}
+                                </td>
+                                <td className={`font-mono font-bold ${hasShortage ? 'text-red-400' : 'text-green-400'}`}>
+                                  {loadingAvailability ? (
+                                    <Loader2 className="w-4 h-4 animate-spin inline" />
+                                  ) : (
+                                    hasShortage ? `${currentShortage.toFixed(0)} ${shortage.uom}` : '✓'
+                                  )}
+                                </td>
+                                <td>
+                                  {hasShortage ? (
+                                    <Badge className="status-rejected">
+                                      <AlertTriangle className="w-3 h-3 mr-1" />
+                                      Short
+                                    </Badge>
+                                  ) : (
+                                    <Badge className="status-approved">
+                                      <Check className="w-3 h-3 mr-1" />
+                                      Available
+                                    </Badge>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                  
+                  {/* Packaging Summary */}
+                  {selectedJob.packaging && selectedJob.packaging !== 'Bulk' && (
+                    <div className="mt-2 p-3 bg-muted/20 rounded-lg border border-border">
+                      <div className="flex items-center gap-2 text-sm">
+                        <Package className="w-4 h-4 text-muted-foreground" />
+                        <span className="text-muted-foreground">Packaging Type:</span>
+                        <span className="font-medium">{selectedJob.packaging}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Show message if no packaging required */}
+              {(!selectedJob.material_shortages || selectedJob.material_shortages.filter(s => s.item_type === 'PACK').length === 0) && 
+               selectedJob.packaging && selectedJob.packaging !== 'Bulk' && (
+                <div className="p-4 border border-amber-500/30 rounded-lg bg-amber-500/5">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-2">
+                      <Package className="w-4 h-4 text-amber-400" />
+                      <span className="text-sm text-amber-400">
+                        Packaging: {selectedJob.packaging} - Stock check not available. Run sync to update.
+                      </span>
+                    </div>
+                    <Button 
+                      size="sm" 
+                      variant="outline"
+                      onClick={() => syncPackaging(selectedJob.id)}
+                      className="border-amber-500/30 hover:bg-amber-500/10"
+                    >
+                      <RefreshCw className="w-3 h-3 mr-1" />
+                      Sync
+                    </Button>
                   </div>
                 </div>
               )}

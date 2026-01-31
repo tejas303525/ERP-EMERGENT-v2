@@ -12,10 +12,9 @@ import {
   RefreshCw, Eye, FileText, Download, Bell, CheckCircle
 } from 'lucide-react';
 import { toast } from 'sonner';
-import api from '../lib/api';
+import api, { pdfAPI } from '../lib/api';
 
 const SecurityQCPage = () => {
-  const [activeTab, setActiveTab] = useState('inward');
   const [inwardTransports, setInwardTransports] = useState([]);
   const [outwardTransports, setOutwardTransports] = useState([]);
   const [pendingChecklists, setPendingChecklists] = useState([]);
@@ -31,6 +30,7 @@ const SecurityQCPage = () => {
   const [allTransports, setAllTransports] = useState([]); // Store all transports including completed
 
   useEffect(() => {
+    setDismissedNotifications(new Set());
     loadData();
     loadVehicleBookingNotifications();
   }, []);
@@ -56,6 +56,7 @@ const SecurityQCPage = () => {
     setVehicleBookingNotifications(notifications);
   };
 
+ 
   const dismissVehicleNotification = (key) => {
     // Remove from localStorage
     localStorage.removeItem(key);
@@ -202,20 +203,49 @@ const SecurityQCPage = () => {
     return alerts;
   }, [allTransports, qcInspections]);
 
+  // Auto-dismiss notifications after 2 seconds
+  useEffect(() => {
+    const timers = [];
+    
+    // Auto-dismiss vehicle booking notifications
+    activeNotifications.forEach((notification) => {
+      const timer = setTimeout(() => {
+        dismissVehicleNotification(notification.key);
+      }, 200);
+      timers.push(timer);
+    });
+    
+    // Auto-dismiss inspection alerts
+    inspectionStatusAlerts.forEach((alert, idx) => {
+      const alertKey = `inspection-${alert.transport.id}-${idx}`;
+      if (!dismissedNotifications.has(alertKey)) {
+        const timer = setTimeout(() => {
+          setDismissedNotifications(prev => new Set([...prev, alertKey]));
+        }, 2000);
+        timers.push(timer);
+      }
+    });
+    
+    // Cleanup timers
+    return () => {
+      timers.forEach(timer => clearTimeout(timer));
+    };
+  }, [activeNotifications, inspectionStatusAlerts, dismissedNotifications]);
+
   return (
     <div className="p-6 max-w-[1800px] mx-auto" data-testid="security-qc-page">
       {/* Vehicle Booking Notifications */}
       {activeNotifications.length > 0 && (
         <div className="mb-4 space-y-2">
           {activeNotifications.map((notification) => (
-            <Card key={notification.key} className="bg-emerald-500/10 border-emerald-500/30">
-              <CardContent className="p-4">
+            <Card key={notification.key} className="bg-emerald-500/10 border-emerald-500/30 transition-opacity duration-300">
+              <CardContent className="p-2">
                 <div className="flex items-start justify-between">
-                  <div className="flex items-start gap-3 flex-1">
-                    <Bell className="w-5 h-5 text-emerald-400 mt-0.5" />
+                  <div className="flex items-start gap-2 flex-1">
+                    <Bell className="w-4 h-4 text-emerald-400 mt-0.5" />
                     <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <p className="font-semibold text-emerald-400">Vehicle Booked</p>
+                      <div className="flex items-center gap-1 mb-0.5">
+                        <p className="text-xs font-semibold text-emerald-400">Vehicle Booked</p>
                         <Badge className="bg-emerald-500/20 text-emerald-400">
                           {notification.transport_number}
                         </Badge>
@@ -225,7 +255,7 @@ const SecurityQCPage = () => {
                           </Badge>
                         )}
                       </div>
-                      <div className="text-sm text-muted-foreground space-y-1">
+                      <div className="text-xs text-muted-foreground space-y-0.5">
                         {notification.transporter_name && (
                           <p>Transporter: {notification.transporter_name}</p>
                         )}
@@ -250,7 +280,7 @@ const SecurityQCPage = () => {
                         {notification.customer_name && (
                           <p>Customer: {notification.customer_name}</p>
                         )}
-                        <p className="text-emerald-400 font-medium">
+                        <p className="text-xs text-emerald-400 font-medium">
                           Transport is booked and vehicle is assigned - Ready for security check
                         </p>
                       </div>
@@ -278,7 +308,7 @@ const SecurityQCPage = () => {
             const { transport, inspectionStatus } = alert;
             const isDone = inspectionStatus.status === 'DONE';
             const jobNumber = transport.job_number || transport.job_numbers?.[0] || transport.do_number || transport.po_number || '-';
-            const productName = transport.product_name || transport.products_summary || transport.product_names?.[0] || transport.po_items?.[0]?.product_name || transport.po_items?.[0]?.item_name || '-';
+            const productName = transport.product_name || transport.products_summary || transport.product_names?.[0] || transport.po_items?.[0]?.display_name || transport.po_items?.[0]?.item_name || '-';
             const deliveryNote = transport.delivery_note_number || transport.delivery_order_number || '-';
             const alertKey = `inspection-${transport.id}-${idx}`;
             
@@ -290,26 +320,26 @@ const SecurityQCPage = () => {
             return (
               <Card 
                 key={alertKey} 
-                className={isDone ? 'bg-green-500/10 border-green-500/30' : 'bg-amber-500/10 border-amber-500/30'}
+                className={`${isDone ? 'bg-green-500/10 border-green-500/30' : 'bg-amber-500/10 border-amber-500/30'} transition-opacity duration-300`}
               >
-                <CardContent className="p-4">
+                <CardContent className="p-2">
                   <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-3 flex-1">
+                    <div className="flex items-start gap-2 flex-1">
                       {isDone ? (
-                        <CheckCircle className="w-5 h-5 text-green-400 mt-0.5" />
+                        <CheckCircle className="w-4 h-4 text-green-400 mt-0.5" />
                       ) : (
-                        <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5" />
+                        <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5" />
                       )}
                       <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-1">
-                          <p className={`font-semibold ${isDone ? 'text-green-400' : 'text-amber-400'}`}>
+                        <div className="flex items-center gap-1 mb-0.5">
+                          <p className={`text-xs font-semibold ${isDone ? 'text-green-400' : 'text-amber-400'}`}>
                             QC Inspection Status
                           </p>
                           <Badge className={isDone ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'}>
                             {inspectionStatus.status === 'DONE' ? 'Done' : inspectionStatus.status === 'IN_PROGRESS' ? 'In Progress' : 'Not Done'}
                           </Badge>
                         </div>
-                        <div className="text-sm text-muted-foreground space-y-1 grid grid-cols-2 gap-2">
+                        <div className="text-xs text-muted-foreground space-y-0.5 grid grid-cols-2 gap-1">
                           <div>
                             <span className="text-muted-foreground">Job Order:</span>
                             <span className="ml-2 font-mono text-amber-400">{jobNumber}</span>
@@ -330,7 +360,7 @@ const SecurityQCPage = () => {
                           </div>
                         </div>
                         {inspectionStatus.inspection && (
-                          <p className={`text-sm mt-2 font-medium ${isDone ? 'text-green-400' : 'text-amber-400'}`}>
+                          <p className={`text-xs mt-1 font-medium ${isDone ? 'text-green-400' : 'text-amber-400'}`}>
                             {isDone 
                               ? `✓ Inspection ${inspectionStatus.inspection.status} - ${inspectionStatus.inspection.qc_number || ''}`
                               : '⚠ Inspection pending or in progress'}
@@ -389,52 +419,22 @@ const SecurityQCPage = () => {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-2 mb-6 flex-wrap">
-        <Button
-          variant={activeTab === 'inward' ? 'default' : 'outline'}
-          onClick={() => setActiveTab('inward')}
-          className={inwardPending > 0 ? 'border-blue-500/50' : ''}
-          data-testid="tab-inward"
-        >
-          <ArrowDownToLine className="w-4 h-4 mr-2" />
-          Inward Transport
-          {inwardPending > 0 && (
-            <span className="ml-2 px-1.5 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400">
-              {inwardPending}
-            </span>
-          )}
-        </Button>
-        <Button
-          variant={activeTab === 'outward' ? 'default' : 'outline'}
-          onClick={() => setActiveTab('outward')}
-          className={outwardPending > 0 ? 'border-amber-500/50' : ''}
-          data-testid="tab-outward"
-        >
-          <ArrowUpFromLine className="w-4 h-4 mr-2" />
-          Outward Transport
-          {outwardPending > 0 && (
-            <span className="ml-2 px-1.5 py-0.5 text-xs rounded bg-amber-500/20 text-amber-400">
-              {outwardPending}
-            </span>
-          )}
-        </Button>
-        <Button
-          variant={activeTab === 'rfq' ? 'default' : 'outline'}
-          onClick={() => setActiveTab('rfq')}
-          data-testid="tab-rfq"
-        >
-          <FileText className="w-4 h-4 mr-2" />
-          RFQ Window
-        </Button>
-        <Button
-          variant={activeTab === 'delivery_docs' ? 'default' : 'outline'}
-          onClick={() => setActiveTab('delivery_docs')}
-          data-testid="tab-delivery-docs"
-        >
-          <FileText className="w-4 h-4 mr-2" />
-          Delivery Notes & Orders
-        </Button>
+      {/* Workflow Overview */}
+      <div className="mb-6 p-4 glass rounded-lg border border-purple-500/30">
+        <div className="grid grid-cols-3 gap-4 text-sm">
+          <div>
+            <span className="text-blue-400 font-medium">Inward:</span>
+            <span className="text-muted-foreground"> Security + Weight → QC → GRN → Payables</span>
+          </div>
+          <div>
+            <span className="text-amber-400 font-medium">Outward:</span>
+            <span className="text-muted-foreground"> Security + Weight → QC → DO → Receivables</span>
+          </div>
+          <div>
+            <span className="text-purple-400 font-medium">RFQ:</span>
+            <span className="text-muted-foreground"> Monitor quotation requests to suppliers</span>
+          </div>
+        </div>
       </div>
 
       {loading ? (
@@ -442,61 +442,101 @@ const SecurityQCPage = () => {
           <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <>
-          {/* Inward Transport Tab */}
-          {activeTab === 'inward' && (
-            <InwardTransportTab
-              transports={inwardTransports}
-              onOpenChecklist={(t) => openChecklistModal(t, 'INWARD')}
-              onViewDetails={(t) => {
-                setSelectedTransport(t);
-                setChecklistType('INWARD');
-                setShowViewModal(true);
-              }}
-              onViewVehicle={(t) => {
-                setSelectedTransport(t);
-                setShowVehicleModal(true);
-              }}
-              onRefresh={loadData}
-              getDeliveryDocumentUrl={getDeliveryDocumentUrl}
-            />
-          )}
+        <div className="grid grid-cols-3 gap-4">
+          {/* LEFT COLUMN - INWARD TRANSPORT */}
+          <div className="glass rounded-lg border border-blue-500/30">
+            <div className="p-4 border-b border-border bg-blue-500/10 sticky top-0 z-10">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <ArrowDownToLine className="w-5 h-5 text-blue-400" />
+                    Inward Transport
+                    {inwardPending > 0 && (
+                      <Badge className="ml-2 bg-blue-500/20 text-blue-400">
+                        {inwardPending} Pending
+                      </Badge>
+                    )}
+                  </h2>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Security → QC → GRN → Payables
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="p-4">
+              <InwardTransportTab
+                transports={inwardTransports}
+                onOpenChecklist={(t) => openChecklistModal(t, 'INWARD')}
+                onViewDetails={(t) => {
+                  setSelectedTransport(t);
+                  setChecklistType('INWARD');
+                  setShowViewModal(true);
+                }}
+                onViewVehicle={(t) => {
+                  setSelectedTransport(t);
+                  setShowVehicleModal(true);
+                }}
+                onRefresh={loadData}
+                getDeliveryDocumentUrl={getDeliveryDocumentUrl}
+              />
+            </div>
+          </div>
 
-          {/* Outward Transport Tab */}
-          {activeTab === 'outward' && (
-            <OutwardTransportTab
-              transports={outwardTransports}
-              onOpenChecklist={(t) => openChecklistModal(t, 'OUTWARD')}
-              onViewDetails={(t) => {
-                setSelectedTransport(t);
-                setChecklistType('OUTWARD');
-                setShowViewModal(true);
-              }}
-              onRefresh={loadData}
-              getDeliveryDocumentUrl={getDeliveryDocumentUrl}
-            />
-          )}
+          {/* RIGHT COLUMN - OUTWARD TRANSPORT */}
+          <div className="glass rounded-lg border border-amber-500/30">
+            <div className="p-4 border-b border-border bg-amber-500/10 sticky top-0 z-10">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <ArrowUpFromLine className="w-5 h-5 text-amber-400" />
+                    Outward Transport
+                    {outwardPending > 0 && (
+                      <Badge className="ml-2 bg-amber-500/20 text-amber-400">
+                        {outwardPending} Pending
+                      </Badge>
+                    )}
+                  </h2>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Security → QC → Delivery Order → Receivables
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="p-4">
+              <OutwardTransportTab
+                transports={outwardTransports}
+                onOpenChecklist={(t) => openChecklistModal(t, 'OUTWARD')}
+                onViewDetails={(t) => {
+                  setSelectedTransport(t);
+                  setChecklistType('OUTWARD');
+                  setShowViewModal(true);
+                }}
+                onRefresh={loadData}
+                getDeliveryDocumentUrl={getDeliveryDocumentUrl}
+              />
+            </div>
+          </div>
 
-          {/* RFQ Window Tab */}
-          {activeTab === 'rfq' && (
-            <RFQWindowTab />
-          )}
-
-          {/* Delivery Notes & Orders Tab */}
-          {activeTab === 'delivery_docs' && (
-            <DeliveryDocsTab
-              inwardTransports={inwardTransports}
-              outwardTransports={outwardTransports}
-              onViewDetails={(t) => {
-                setSelectedTransport(t);
-                setChecklistType(t.po_number ? 'INWARD' : 'OUTWARD');
-                setShowViewModal(true);
-              }}
-              onRefresh={loadData}
-              getDeliveryDocumentUrl={getDeliveryDocumentUrl}
-            />
-          )}
-        </>
+          {/* THIRD COLUMN - RFQ WINDOW */}
+          <div className="glass rounded-lg border border-purple-500/30">
+            <div className="p-4 border-b border-border bg-purple-500/10 sticky top-0 z-10">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-purple-400" />
+                    RFQ Status
+                  </h2>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Request for Quotations
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="p-4">
+              <RFQWindowTab />
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Checklist Modal */}
@@ -575,7 +615,7 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onView
               <thead className="bg-muted/30">
                 <tr>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">pO / Ref</th>
+                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO / Ref</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
                   <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle</th>
@@ -604,8 +644,8 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onView
                         )}
                       </td>
                       <td className="p-3 text-blue-400">{transport.po_number || transport.transport_number || '-'}</td>
-                      <td className="p-3 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.product_name || i.item_name).join(', ') || '-'}>
-                        {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.product_name || i.item_name).join(', ') || '-'}
+                      <td className="p-3 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}>
+                        {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}
                       </td>
                       <td className="p-3">{transport.supplier_name || '-'}</td>
                       <td className="p-3">{transport.vehicle_number || '-'}</td>
@@ -1347,7 +1387,7 @@ const VehicleInfoModal = ({ transport, onClose, getDeliveryDocumentUrl }) => {
               <div>
                 <Label className="text-muted-foreground text-xs">Products</Label>
                 <p className="text-sm">
-                  {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.product_name || i.item_name).join(', ') || '-'}
+                  {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}
                 </p>
               </div>
             </div>
@@ -1404,7 +1444,36 @@ const VehicleInfoModal = ({ transport, onClose, getDeliveryDocumentUrl }) => {
                 {transport.delivery_note_number && (
                   <div>
                     <Label className="text-muted-foreground text-xs">Delivery Note Number</Label>
-                    <p className="font-mono font-medium text-blue-400">{transport.delivery_note_number}</p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <p className="font-mono font-medium text-blue-400">{transport.delivery_note_number}</p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={async () => {
+                          try {
+                            // Fetch delivery order by DO number
+                            const response = await api.get('/delivery-orders');
+                            const deliveryOrder = response.data.find(
+                              (d) => d.do_number === transport.delivery_note_number
+                            );
+                            
+                            if (deliveryOrder) {
+                              // Use the pdfAPI helper
+                              const pdfUrl = pdfAPI.getDeliveryNoteUrl(deliveryOrder.id);
+                              window.open(pdfUrl, '_blank');
+                            } else {
+                              toast.error('Delivery note PDF not found');
+                            }
+                          } catch (error) {
+                            console.error('Failed to open delivery note PDF:', error);
+                            toast.error('Failed to open delivery note PDF');
+                          }
+                        }}
+                      >
+                        <Eye className="w-4 h-4 mr-2" />
+                        View PDF
+                      </Button>
+                    </div>
                   </div>
                 )}
                 {transport.delivery_note_document && (

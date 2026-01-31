@@ -53,7 +53,8 @@ export default function ProductionSchedulePage() {
     required_qty: 0,
     quantity_produced: 0,
     batch_number: '',
-    pending_qty: 0 // Pending quantity (remaining to be produced)
+    pending_qty: 0, // Pending quantity (remaining to be produced)
+    production_type: 'drummed' // Production type: 'drummed' or 'bulk'
   });
 
   // Calendar view states
@@ -199,7 +200,8 @@ export default function ProductionSchedulePage() {
       required_qty: job.quantity, // Keep total for display
       quantity_produced: 0,
       batch_number: '',
-      pending_qty: pendingQty // Store pending quantity (remaining to be produced)
+      pending_qty: pendingQty, // Store pending quantity (remaining to be produced)
+      production_type: 'drummed' // Default to drummed
     });
     setLogModalOpen(true);
   };
@@ -802,37 +804,105 @@ export default function ProductionSchedulePage() {
                 onChange={(e) => setLogForm({...logForm, production_date: e.target.value})}
               />
             </div>
+            
+            {/* Production Type Dropdown */}
             <div>
-              <Label>Total Required Qty</Label>
-              <Input value={logForm.required_qty} disabled />
+              <Label>Production Type *</Label>
+              <select
+                className="w-full bg-background border border-border rounded px-3 py-2"
+                value={logForm.production_type}
+                onChange={(e) => setLogForm({
+                  ...logForm, 
+                  production_type: e.target.value,
+                  quantity_produced: 0
+                })}
+              >
+                <option value="drummed">Drummed</option>
+                <option value="bulk">Bulk</option>
+              </select>
             </div>
-            <div>
-              <Label>Pending Qty (Remaining to Produce)</Label>
-              <Input value={logForm.pending_qty || 0} disabled className="text-amber-400 font-medium" />
-            </div>
-            <div>
-              <Label>Quantity Produced * (Max: {logForm.pending_qty || 0})</Label>
-              <Input
-                type="number"
-                min="0"
-                max={logForm.pending_qty || 0}
-                step="0.01"
-                value={logForm.quantity_produced}
-                onChange={(e) => {
-                  const value = parseFloat(e.target.value) || 0;
-                  const maxValue = logForm.pending_qty || 0;
-                  // Prevent entering more than pending quantity
-                  const finalValue = value > maxValue ? maxValue : value;
-                  setLogForm({...logForm, quantity_produced: finalValue});
-                }}
-                className={logForm.quantity_produced > (logForm.pending_qty || 0) ? 'border-red-500' : ''}
-              />
-              {logForm.quantity_produced > (logForm.pending_qty || 0) && (
-                <p className="text-xs text-red-400 mt-1">
-                  Cannot exceed pending quantity ({logForm.pending_qty || 0})
-                </p>
-              )}
-            </div>
+
+            {/* Conditional rendering based on production_type */}
+            {logForm.production_type === 'bulk' ? (
+              <>
+                {/* BULK MODE */}
+                <div>
+                  <Label>Total Required Qty (KG)</Label>
+                  <Input value={logForm.required_qty} disabled />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    ≈ {(logForm.required_qty / 1000).toFixed(3)} MT
+                  </p>
+                </div>
+                <div>
+                  <Label>Pending Qty (KG)</Label>
+                  <Input value={logForm.pending_qty || 0} disabled className="text-amber-400 font-medium" />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    ≈ {((logForm.pending_qty || 0) / 1000).toFixed(3)} MT
+                  </p>
+                </div>
+                <div>
+                  <Label>Quantity Produced (KG) * (Max: {logForm.pending_qty || 0})</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max={logForm.pending_qty || 0}
+                    step="0.01"
+                    value={logForm.quantity_produced}
+                    onChange={(e) => {
+                      const value = parseFloat(e.target.value) || 0;
+                      const maxValue = logForm.pending_qty || 0;
+                      const finalValue = value > maxValue ? maxValue : value;
+                      setLogForm({...logForm, quantity_produced: finalValue});
+                    }}
+                    placeholder="Enter quantity in KG"
+                    className={logForm.quantity_produced > (logForm.pending_qty || 0) ? 'border-red-500' : ''}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    ≈ {(logForm.quantity_produced / 1000).toFixed(3)} MT
+                  </p>
+                  {logForm.quantity_produced > (logForm.pending_qty || 0) && (
+                    <p className="text-xs text-red-400 mt-1">
+                      Cannot exceed pending quantity ({logForm.pending_qty || 0} KG)
+                    </p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                {/* DRUMMED MODE (Current Implementation) */}
+                <div>
+                  <Label>Total Required Qty</Label>
+                  <Input value={logForm.required_qty} disabled />
+                </div>
+                <div>
+                  <Label>Pending Qty (Remaining to Produce)</Label>
+                  <Input value={logForm.pending_qty || 0} disabled className="text-amber-400 font-medium" />
+                </div>
+                <div>
+                  <Label>Quantity Produced * (Max: {logForm.pending_qty || 0})</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max={logForm.pending_qty || 0}
+                    step="0.01"
+                    value={logForm.quantity_produced}
+                    onChange={(e) => {
+                      const value = parseFloat(e.target.value) || 0;
+                      const maxValue = logForm.pending_qty || 0;
+                      const finalValue = value > maxValue ? maxValue : value;
+                      setLogForm({...logForm, quantity_produced: finalValue});
+                    }}
+                    className={logForm.quantity_produced > (logForm.pending_qty || 0) ? 'border-red-500' : ''}
+                  />
+                  {logForm.quantity_produced > (logForm.pending_qty || 0) && (
+                    <p className="text-xs text-red-400 mt-1">
+                      Cannot exceed pending quantity ({logForm.pending_qty || 0})
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
+
             <div>
               <Label>Batch Number (Recorded) *</Label>
               <Input
@@ -841,21 +911,27 @@ export default function ProductionSchedulePage() {
                 placeholder="Enter batch number"
               />
             </div>
+            
             {logForm.required_qty > 0 && (
               <div className="bg-muted/30 p-3 rounded">
                 <div className="text-sm">
                   <div className="flex justify-between mb-1">
                     <span>Total Required:</span>
-                    <span className="font-medium">{logForm.required_qty}</span>
+                    <span className="font-medium">
+                      {logForm.required_qty} {logForm.production_type === 'bulk' && '(KG)'}
+                    </span>
                   </div>
                   <div className="flex justify-between mb-1">
                     <span>This Entry:</span>
-                    <span className="font-medium">{logForm.quantity_produced}</span>
+                    <span className="font-medium">
+                      {logForm.quantity_produced} {logForm.production_type === 'bulk' && '(KG)'}
+                    </span>
                   </div>
                   <div className="flex justify-between">
                     <span>Remaining After This Entry:</span>
                     <span className="font-medium text-amber-400">
                       {Math.max(0, (logForm.pending_qty || 0) - logForm.quantity_produced)}
+                      {logForm.production_type === 'bulk' && ' (KG)'}
                     </span>
                   </div>
                 </div>

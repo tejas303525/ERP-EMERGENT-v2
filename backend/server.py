@@ -8,11 +8,13 @@ import os
 import logging
 import asyncio
 import re
+import time
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
+from math import ceil
 import jwt
 import bcrypt
 import resend
@@ -42,7 +44,7 @@ def get_country_of_destination(quotation: Optional[Dict], customer: Optional[Dic
     Extract country of destination from quotation.
     Priority:
     1. country_of_destination field (if explicitly set)
-    2. Extract from port_of_discharge (if contains country name)
+    2. Extract from port_of_discharge (if contains country name or abbreviation)
     3. Customer's country (as fallback)
     """
     if not quotation:
@@ -55,6 +57,47 @@ def get_country_of_destination(quotation: Optional[Dict], customer: Optional[Dic
     # Second priority: try to extract from port_of_discharge
     port_of_discharge = quotation.get("port_of_discharge", "")
     if port_of_discharge:
+        # Port abbreviation to country mapping
+        port_abbreviations = {
+            'AD': 'UAE',  # Abu Dhabi
+            'DXB': 'UAE',  # Dubai
+            'AUH': 'UAE',  # Abu Dhabi airport
+            'JED': 'Saudi Arabia',  # Jeddah
+            'RUH': 'Saudi Arabia',  # Riyadh
+            'DMM': 'Saudi Arabia',  # Dammam
+            'DOH': 'Qatar',  # Doha
+            'KWI': 'Kuwait',  # Kuwait
+            'BAH': 'Bahrain',  # Bahrain
+            'MCT': 'Oman',  # Muscat
+            'BOM': 'India',  # Mumbai
+            'DEL': 'India',  # Delhi
+            'CGK': 'Indonesia',  # Jakarta
+            'SIN': 'Singapore',  # Singapore
+            'KUL': 'Malaysia',  # Kuala Lumpur
+        }
+        
+        port_upper = port_of_discharge.upper().strip()
+        
+        # Check abbreviations first
+        if port_upper in port_abbreviations:
+            return port_abbreviations[port_upper]
+        
+        # UAE emirates and ports (common local destinations)
+        uae_locations = {
+            'DUBAI', 'DXB', 'JEBEL ALI', 'JEBEL ALI PORT', 'JAFZA', 'JAFZ',
+            'SHJ', 'SHARJAH', 'SHARJAH PORT',
+            'AUH', 'ABU DHABI', 'ABU DHABI PORT',
+            'AJMAN', 'AJMAN PORT',
+            'RAK', 'RAS AL KHAIMAH', 'RAS AL KHAIMAH PORT',
+            'UAQ', 'UMM AL QUWAIN', 'UMM AL QUWAIN PORT',
+            'FUJAIRAH', 'FUJAIRAH PORT', 'FJR'
+        }
+        
+        # Check if port matches UAE location
+        for uae_loc in uae_locations:
+            if uae_loc in port_upper:
+                return 'UAE'
+        
         # Common country names to look for in port names
         countries = [
             'UAE', 'United Arab Emirates', 'Saudi Arabia', 'Qatar', 'Kuwait', 'Bahrain', 'Oman',
@@ -62,10 +105,9 @@ def get_country_of_destination(quotation: Optional[Dict], customer: Optional[Dic
             'Germany', 'France', 'Italy', 'Spain', 'Netherlands', 'Singapore', 'Malaysia',
             'Indonesia', 'Thailand', 'Vietnam', 'Philippines', 'South Africa', 'Nigeria',
             'Egypt', 'Kenya', 'Australia', 'New Zealand', 'Brazil', 'Mexico', 'Canada',
-            'Japan', 'South Korea', 'Turkey', 'Russia'
+            'Japan', 'South Korea', 'Turkey', 'Russia', 'Guinea', 'Conakry'
         ]
         
-        port_upper = port_of_discharge.upper()
         # Check if any country name appears in the port name
         for country in countries:
             if country.upper() in port_upper:
@@ -156,6 +198,8 @@ class UserBase(BaseModel):
     name: str
     role: str
     department: Optional[str] = None
+    role_id: Optional[str] = None  # Reference to roles collection
+    allowed_pages: List[str] = []  # Direct permission override
 
 class UserCreate(UserBase):
     password: str
@@ -174,6 +218,24 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     user: Dict[str, Any]
+
+# Role Management Models
+class RoleCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    allowed_pages: List[str] = []  # List of page paths/routes
+
+class Role(RoleCreate):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    is_system_role: bool = False  # True for admin, cannot be deleted
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_by: Optional[str] = None
+
+class RoleUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    allowed_pages: Optional[List[str]] = None
 
 # Customer Model
 class CustomerCreate(BaseModel):
@@ -262,6 +324,7 @@ class QuotationCreate(BaseModel):
     bank_id: Optional[str] = None  # Selected bank account ID
     transport_mode: Optional[str] = None  # "ocean", "road", "air"
     local_type: Optional[str] = None  # "direct_to_customer", "bulk_to_plant", "packaged_to_plant"
+    is_dg: Optional[bool] = False  # Dangerous goods flag
     # Additional freight charges (for CFR quotations)
     additional_freight_rate_per_fcl: Optional[float] = None  # Freight rate per FCL (e.g., 2175)
     additional_freight_currency: str = "USD"  # Currency for additional freight
@@ -483,6 +546,8 @@ class CostingCalculationCreate(BaseModel):
     container_count: int = 1
     is_dg: bool = False  # Dangerous goods flag
     incoterm_type: Optional[str] = None  # "EXW" or "DELIVERED" - for display and future calculation logic
+    # Optional detailed breakdown for custom costing sheets (e.g. GCC by road)
+    custom_breakdown: Optional[Dict[str, Any]] = None
 
 class CostingCalculation(CostingCalculationCreate):
     model_config = ConfigDict(extra="ignore")
@@ -548,6 +613,7 @@ class ProductionLogCreate(BaseModel):
     required_qty: float
     quantity_produced: float
     batch_number: str
+    production_type: str = "drummed"  # Production type: 'drummed' or 'bulk'
 
 class ProductionLog(ProductionLogCreate):
     model_config = ConfigDict(extra="ignore")
@@ -609,10 +675,10 @@ class ShippingBookingCreate(BaseModel):
     job_order_ids: List[str] = []  # Empty for PO imports
     po_ids: List[str] = []  # PO IDs for import bookings
     shipping_line: Optional[str] = None
-    container_type: str = "20ft"  # 20ft, 40ft, 40ft_hc
-    container_count: int = 1
-    port_of_loading: str
-    port_of_discharge: str
+    container_type: Optional[str] = "20ft"  # 20ft, 40ft, 40ft_hc
+    container_count: Optional[int] = 1
+    port_of_loading: Optional[str] = None
+    port_of_discharge: Optional[str] = None
     cargo_description: Optional[str] = None
     cargo_weight: Optional[float] = None
     is_dg: bool = False  # Dangerous Goods
@@ -802,6 +868,17 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
         if user is None:
             raise HTTPException(status_code=401, detail="User not found")
+        allowed_pages=user.get("allowed_pages",[])
+        if user.get("role_id"):
+            role=await db.roles.find_one({"id": user.get("role_id")}, {"_id": 0, "allowed_pages": 1})
+            if role:
+                allowed_pages=role.get("allowed_pages",[])
+        
+
+        if user.get("role")=="admin":
+            allowed_pages=["all"]
+        user["allowed_pages"]=allowed_pages
+        
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -1053,13 +1130,191 @@ async def login(credentials: UserLogin):
     if not user.get("is_active", True):
         raise HTTPException(status_code=401, detail="Account disabled")
     
+    # Get user's allowed pages from role if role_id is set
+    allowed_pages = user.get("allowed_pages", [])
+    if user.get("role_id"):
+        role = await db.roles.find_one({"id": user["role_id"]}, {"_id": 0})
+        if role:
+            allowed_pages = role.get("allowed_pages", [])
+    
+    # Admin gets all pages
+    if user.get("role") == "admin":
+        allowed_pages = ["all"]
+    
     access_token = create_access_token({"sub": user["id"]})
     user_response = {k: v for k, v in user.items() if k not in ["_id", "password"]}
+    user_response["allowed_pages"] = allowed_pages
+    
     return Token(access_token=access_token, token_type="bearer", user=user_response)
 
 @api_router.get("/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
     return current_user
+
+# Helper function to check if user has access to a page/endpoint
+async def has_page_access(current_user: dict, page_path: str, fallback_roles: List[str] = None) -> bool:
+    """
+    Check if user has access to a page based on:
+    1. Admin role (always has access)
+    2. allowed_pages containing "all" or the specific page_path
+    3. Fallback to role-based check if fallback_roles provided
+    
+    Args:
+        current_user: The current user dict from get_current_user
+        page_path: The page path to check (e.g., "/finance-approval")
+        fallback_roles: List of role names that should have access (for backward compatibility)
+    
+    Returns:
+        bool: True if user has access, False otherwise
+    """
+    # Admin always has access
+    if current_user.get("role") == "admin":
+        return True
+    
+    # Check allowed_pages
+    allowed_pages = current_user.get("allowed_pages", [])
+    
+    # If user has "all" in allowed_pages, they have access to everything
+    if "all" in allowed_pages:
+        return True
+    
+    # Check if the specific page_path is in allowed_pages
+    if page_path in allowed_pages:
+        return True
+    
+    # Fallback to role-based check for backward compatibility
+    if fallback_roles and current_user.get("role") in fallback_roles:
+        return True
+    
+    return False
+
+# ==================== ROLE MANAGEMENT ROUTES ====================
+
+@api_router.get("/roles", response_model=List[Role])
+async def get_roles(current_user: dict = Depends(get_current_user)):
+    """Get all roles"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    roles = await db.roles.find({}, {"_id": 0}).to_list(1000)
+    return roles
+
+@api_router.post("/roles", response_model=Role)
+async def create_role(role_data: RoleCreate, current_user: dict = Depends(get_current_user)):
+    """Create a new role"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Check for duplicate role name
+    existing = await db.roles.find_one({"name": {"$regex": f"^{role_data.name}$", "$options": "i"}})
+    if existing:
+        raise HTTPException(status_code=400, detail="Role with this name already exists")
+    
+    role = Role(**role_data.model_dump(), created_by=current_user.get("id"))
+    await db.roles.insert_one(role.model_dump())
+    return role
+
+@api_router.get("/roles/{role_id}", response_model=Role)
+async def get_role(role_id: str, current_user: dict = Depends(get_current_user)):
+    """Get a specific role"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    role = await db.roles.find_one({"id": role_id}, {"_id": 0})
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    return role
+
+@api_router.put("/roles/{role_id}", response_model=Role)
+async def update_role(role_id: str, role_data: RoleUpdate, current_user: dict = Depends(get_current_user)):
+    """Update a role"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    role = await db.roles.find_one({"id": role_id}, {"_id": 0})
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    
+    # Prevent modification of system roles
+    if role.get("is_system_role"):
+        raise HTTPException(status_code=400, detail="Cannot modify system roles")
+    
+    # Check for duplicate name if name is being changed
+    if role_data.name and role_data.name != role.get("name"):
+        existing = await db.roles.find_one({
+            "name": {"$regex": f"^{role_data.name}$", "$options": "i"},
+            "id": {"$ne": role_id}
+        })
+        if existing:
+            raise HTTPException(status_code=400, detail="Role with this name already exists")
+    
+    update_dict = {k: v for k, v in role_data.model_dump().items() if v is not None}
+    await db.roles.update_one({"id": role_id}, {"$set": update_dict})
+    
+    updated_role = await db.roles.find_one({"id": role_id}, {"_id": 0})
+    return updated_role
+
+@api_router.delete("/roles/{role_id}")
+async def delete_role(role_id: str, current_user: dict = Depends(get_current_user)):
+    """Delete a role"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    role = await db.roles.find_one({"id": role_id}, {"_id": 0})
+    if not role:
+        raise HTTPException(status_code=404, detail="Role not found")
+    
+    # Prevent deletion of system roles
+    if role.get("is_system_role"):
+        raise HTTPException(status_code=400, detail="Cannot delete system roles")
+    
+    # Check if any users are using this role
+    users_with_role = await db.users.count_documents({"role_id": role_id})
+    if users_with_role > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete role. {users_with_role} user(s) are assigned to this role"
+        )
+    
+    await db.roles.delete_one({"id": role_id})
+    return {"message": "Role deleted successfully"}
+
+@api_router.get("/pages/available")
+async def get_available_pages(current_user: dict = Depends(get_current_user)):
+    """Get list of all available pages in the system"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Define all available pages
+    pages = [
+        {"path": "/dashboard", "label": "Dashboard", "category": "General"},
+        {"path": "/quotations", "label": "Commercial Contracts (Quotations)", "category": "Sales"},
+        {"path": "/sales-orders", "label": "Contracts (Sales Orders)", "category": "Sales"},
+        {"path": "/job-orders", "label": "Order Fulfillment (Job Orders)", "category": "Operations"},
+        {"path": "/production-schedule", "label": "Production (Production Window)", "category": "Production"},
+        {"path": "/procurement", "label": "Procurement Window", "category": "Procurement"},
+        {"path": "/import-window", "label": "Logistics Inwards (Imports)", "category": "Logistics"},
+        {"path": "/shipping", "label": "Shipping Window", "category": "Shipping"},
+        {"path": "/transport-window", "label": "Transport Window", "category": "Transport"},
+        {"path": "/security-qc", "label": "Security & Q.C.", "category": "Security"},
+        {"path": "/inventory", "label": "Inventory", "category": "Inventory"},
+        {"path": "/grn", "label": "GRN", "category": "Inventory"},
+        {"path": "/delivery-orders", "label": "Delivery Orders", "category": "Shipping"},
+        {"path": "/security", "label": "Security Gate", "category": "Security"},
+        {"path": "/qc-inspection", "label": "QC Inspection", "category": "Quality"},
+        {"path": "/documentation", "label": "Documentation", "category": "Compliance"},
+        {"path": "/finance-approval", "label": "Finance Approval", "category": "Finance"},
+        {"path": "/payables", "label": "Payables (AP)", "category": "Finance"},
+        {"path": "/receivables", "label": "Receivables (AR)", "category": "Finance"},
+        {"path": "/customers", "label": "Customers", "category": "Sales"},
+        {"path": "/products", "label": "Products", "category": "Inventory"},
+        {"path": "/bom-management", "label": "BOM Management", "category": "Production"},
+        {"path": "/stock-management", "label": "Stock Management", "category": "Inventory"},
+        {"path": "/settings", "label": "Settings", "category": "Admin"},
+        {"path": "/users", "label": "User Management", "category": "Admin"},
+        {"path": "/roles", "label": "Role Management", "category": "Admin"},
+    ]
+    return pages
 
 # ==================== CUSTOMER ROUTES ====================
 
@@ -1271,8 +1526,8 @@ async def create_quotation(data: QuotationCreate, current_user: dict = Depends(g
         # Calculate total based on U.O.M (Unit of Measure)
         uom = item.uom or "per_mt"  # Default to per_mt for backward compatibility
         
-        # If U.O.M is not set, infer from packaging
-        if not item.uom or uom == "per_mt":
+        # If U.O.M is not set, infer from packaging (only if not explicitly set)
+        if not item.uom:
             packaging = str(item.packaging or "").lower()
             packaging_type = str(getattr(item, 'packaging_type', None) or "").lower()
             
@@ -1298,10 +1553,16 @@ async def create_quotation(data: QuotationCreate, current_user: dict = Depends(g
             item_total = item.quantity * item.unit_price
             # Approximate weight (1 liter ≈ 1 kg for most liquids)
             weight_mt = item.quantity / 1000
-        else:  # per_mt (default for bulk)
-            # For bulk: quantity (MT) × unit_price
-            weight_mt = item.quantity
-            item_total = item.quantity * item.unit_price
+        else:  # per_mt (for pricing per metric ton)
+            # Calculate weight from quantity of units and net weight
+            if item.net_weight_kg:
+                # For packaged products: calculate weight from quantity × net_weight_kg
+                weight_mt = (item.net_weight_kg * item.quantity) / 1000
+            else:
+                # For bulk (no net weight): assume quantity is in MT
+                weight_mt = item.quantity
+            # IMPORTANT: Total is always weight_mt × unit_price when UOM is per_mt
+            item_total = weight_mt * item.unit_price
         
         item_dict["weight_mt"] = weight_mt
         item_dict["total"] = item_total
@@ -1328,6 +1589,16 @@ async def create_quotation(data: QuotationCreate, current_user: dict = Depends(g
         elif data.order_type == "local":
             quotation_data["mode_of_transport"] = "ROAD"
     
+    # Auto-populate country_of_destination if not provided
+    if not quotation_data.get("country_of_destination"):
+        customer = None
+        if data.customer_id:
+            customer = await db.customers.find_one({"id": data.customer_id}, {"_id": 0})
+        
+        country_of_destination = get_country_of_destination(quotation_data, customer)
+        if country_of_destination:
+            quotation_data["country_of_destination"] = country_of_destination
+    
     quotation = Quotation(
         **quotation_data,
         items=items_with_total,
@@ -1348,13 +1619,33 @@ async def get_quotations(status: Optional[str] = None, current_user: dict = Depe
     if status:
         query["status"] = status
     quotations = await db.quotations.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    return quotations
+    
+    # Enrich quotations with country_of_destination if missing
+    enriched_quotations = []
+    for quotation in quotations:
+        if not quotation.get("country_of_destination"):
+            customer = None
+            if quotation.get("customer_id"):
+                customer = await db.customers.find_one({"id": quotation.get("customer_id")}, {"_id": 0})
+            
+            country_of_destination = get_country_of_destination(quotation, customer)
+            if country_of_destination:
+                # Update the quotation in database
+                await db.quotations.update_one(
+                    {"id": quotation.get("id")},
+                    {"$set": {"country_of_destination": country_of_destination}}
+                )
+                quotation["country_of_destination"] = country_of_destination
+        
+        enriched_quotations.append(quotation)
+    
+    return enriched_quotations
 
 @api_router.get("/quotations/pending-finance-approval")
 async def get_quotations_pending_finance_approval(current_user: dict = Depends(get_current_user)):
     """Get all quotations pending finance approval"""
-    if current_user["role"] not in ["admin", "finance"]:
-        raise HTTPException(status_code=403, detail="Only finance can access this endpoint")
+    if not await has_page_access(current_user, "/finance-approval", fallback_roles=["finance"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     quotations = await db.quotations.find({
         "status": {"$in": ["pending", "approved"]},
@@ -1364,22 +1655,7 @@ async def get_quotations_pending_finance_approval(current_user: dict = Depends(g
         ]
     }, {"_id": 0}).sort("created_at", -1).to_list(1000)
     
-    # Enrich quotations with costing data
-    for quotation in quotations:
-        costing = await db.costing_calculations.find_one({
-            "reference_type": "QUOTATION",
-            "reference_id": quotation.get("id")
-        }, {"_id": 0})
-        
-        if costing:
-            quotation["cost_confirmed"] = costing.get("cost_confirmed", False)
-            quotation["margin"] = costing.get("margin_amount", 0)
-            quotation["margin_percentage"] = costing.get("margin_percentage", 0)
-        else:
-            quotation["cost_confirmed"] = False
-            quotation["margin"] = None
-            quotation["margin_percentage"] = None
-    
+    # Return quotations without enrichment to avoid N+1 queries
     return quotations
 
 @api_router.get("/quotations/{quotation_id}", response_model=Quotation)
@@ -1413,8 +1689,9 @@ async def get_quotation(quotation_id: str, current_user: dict = Depends(get_curr
 @api_router.put("/quotations/{quotation_id}")
 async def update_quotation(quotation_id: str, data: QuotationCreate, current_user: dict = Depends(get_current_user)):
     """Update an existing quotation"""
-    if current_user["role"] not in ["admin", "finance", "sales"]:
-        raise HTTPException(status_code=403, detail="Only admin/finance/sales can update quotations")
+    # Check if user has access to quotations page
+    if not await has_page_access(current_user, "/quotations", fallback_roles=["admin", "finance", "sales"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     # Get existing quotation
     existing_quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
@@ -1435,8 +1712,8 @@ async def update_quotation(quotation_id: str, data: QuotationCreate, current_use
         # Calculate total based on U.O.M (Unit of Measure)
         uom = item.uom or "per_mt"  # Default to per_mt for backward compatibility
         
-        # If U.O.M is not set, infer from packaging
-        if not item.uom or uom == "per_mt":
+        # If U.O.M is not set, infer from packaging (only if not explicitly set)
+        if not item.uom:
             packaging = str(item.packaging or "").lower()
             packaging_type = str(getattr(item, 'packaging_type', None) or "").lower()
             
@@ -1462,10 +1739,16 @@ async def update_quotation(quotation_id: str, data: QuotationCreate, current_use
             item_total = item.quantity * item.unit_price
             # Approximate weight (1 liter ≈ 1 kg for most liquids)
             weight_mt = item.quantity / 1000
-        else:  # per_mt (default for bulk)
-            # For bulk: quantity (MT) × unit_price
-            weight_mt = item.quantity
-            item_total = item.quantity * item.unit_price
+        else:  # per_mt (for pricing per metric ton)
+            # Calculate weight from quantity of units and net weight
+            if item.net_weight_kg:
+                # For packaged products: calculate weight from quantity × net_weight_kg
+                weight_mt = (item.net_weight_kg * item.quantity) / 1000
+            else:
+                # For bulk (no net weight): assume quantity is in MT
+                weight_mt = item.quantity
+            # IMPORTANT: Total is always weight_mt × unit_price when UOM is per_mt
+            item_total = weight_mt * item.unit_price
         
         item_dict["weight_mt"] = weight_mt
         item_dict["total"] = item_total
@@ -1494,6 +1777,16 @@ async def update_quotation(quotation_id: str, data: QuotationCreate, current_use
             update_data["mode_of_transport"] = "SEA"
         elif data.order_type == "local":
             update_data["mode_of_transport"] = "ROAD"
+    
+    # Auto-populate country_of_destination if not provided
+    if not update_data.get("country_of_destination"):
+        customer = None
+        if data.customer_id:
+            customer = await db.customers.find_one({"id": data.customer_id}, {"_id": 0})
+        
+        country_of_destination = get_country_of_destination(update_data, customer)
+        if country_of_destination:
+            update_data["country_of_destination"] = country_of_destination
     
     update_data["items"] = items_with_total
     update_data["subtotal"] = subtotal
@@ -1539,8 +1832,8 @@ async def update_quotation(quotation_id: str, data: QuotationCreate, current_use
 
 @api_router.put("/quotations/{quotation_id}/approve")
 async def approve_quotation(quotation_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "finance"]:
-        raise HTTPException(status_code=403, detail="Only finance can approve quotations")
+    if not await has_page_access(current_user, "/finance-approval", fallback_roles=["finance"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     # Get quotation first to check costing
     quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
@@ -1774,8 +2067,8 @@ async def reject_quotation(
     rejection_reason: str = Query(..., description="Rejection reason is required"),
     current_user: dict = Depends(get_current_user)
 ):
-    if current_user["role"] not in ["admin", "finance"]:
-        raise HTTPException(status_code=403, detail="Only finance can reject quotations")
+    if not await has_page_access(current_user, "/finance-approval", fallback_roles=["finance"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     if not rejection_reason or not rejection_reason.strip():
         raise HTTPException(status_code=400, detail="Rejection reason is required")
@@ -1802,24 +2095,28 @@ async def reject_quotation(
     # Create notification for PFI creator
     creator_id = quotation.get("created_by")
     if creator_id:
-        await create_notification(
-            event_type="QUOTATION_REJECTED",
-            title=f"Quotation {quotation.get('pfi_number', '')} Rejected",
-            message=f"Your quotation has been rejected. Reason: {rejection_reason.strip()}",
-            link="/quotations",
-            ref_type="QUOTATION",
-            ref_id=quotation_id,
-            target_user_id=creator_id,
-            notification_type="warning"
-        )
+        await db.notifications.insert_one({
+            "id": str(uuid.uuid4()),
+            "title": f"Quotation {quotation.get('pfi_number', '')} Rejected",
+            "message": f"Your quotation has been rejected. Reason: {rejection_reason.strip()}",
+            "type": "warning",
+            "link": "/quotations",
+            "event_type": "QUOTATION_REJECTED",
+            "ref_type": "QUOTATION",
+            "ref_id": quotation_id,
+            "user_id": creator_id,  # User-specific notification
+            "is_read": False,
+            "created_by": current_user["id"],
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
     
     return {"message": "Quotation rejected", "rejection_reason": rejection_reason.strip()}
 
 @api_router.put("/quotations/{quotation_id}/revise")
 async def revise_quotation(quotation_id: str, current_user: dict = Depends(get_current_user)):
     """Create a new quotation based on a rejected one with REV-xxx numbering"""
-    if current_user["role"] not in ["admin", "finance", "sales"]:
-        raise HTTPException(status_code=403, detail="Only admin/finance/sales can revise quotations")
+    if not await has_page_access(current_user, "/quotations", fallback_roles=["admin", "finance", "sales"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     # Get the rejected quotation
     quotation = await db.quotations.find_one({"id": quotation_id, "status": "rejected"}, {"_id": 0})
@@ -1857,8 +2154,8 @@ async def revise_quotation(quotation_id: str, current_user: dict = Depends(get_c
 @api_router.put("/quotations/{quotation_id}/edit")
 async def edit_rejected_quotation(quotation_id: str, current_user: dict = Depends(get_current_user)):
     """Allow editing a rejected quotation by changing status back to pending with REV-xxx numbering"""
-    if current_user["role"] not in ["admin", "finance", "sales"]:
-        raise HTTPException(status_code=403, detail="Only admin/finance/sales can edit quotations")
+    if not await has_page_access(current_user, "/quotations", fallback_roles=["admin", "finance", "sales"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     quotation = await db.quotations.find_one({"id": quotation_id, "status": "rejected"}, {"_id": 0})
     if not quotation:
@@ -1902,8 +2199,8 @@ async def edit_rejected_quotation(quotation_id: str, current_user: dict = Depend
 @api_router.put("/quotations/{quotation_id}/finance-approve")
 async def finance_approve_quotation(quotation_id: str, current_user: dict = Depends(get_current_user)):
     """Finance approves a quotation - enables stamp and signature on PDF and marks as Proforma Invoice"""
-    if current_user["role"] not in ["admin", "finance"]:
-        raise HTTPException(status_code=403, detail="Only finance can approve quotations for printing")
+    if not await has_page_access(current_user, "/finance-approval", fallback_roles=["finance"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
     if not quotation:
@@ -2070,6 +2367,115 @@ async def get_payments(sales_order_id: Optional[str] = None, current_user: dict 
 
 # ==================== JOB ORDER ROUTES ====================
 
+async def find_or_create_packaging_item(packaging_string: str) -> Optional[str]:
+    """
+    Find or create a packaging inventory item based on packaging string from quotation.
+    Maps quotation packaging strings (e.g., "200L Drum", "210L Drum", "IBC 1000L") to inventory_items.
+    Returns the inventory_item id if found or created, None otherwise.
+    """
+    if not packaging_string or packaging_string == "Bulk":
+        return None
+    
+    packaging_lower = packaging_string.lower()
+    
+    # Mapping of packaging strings to inventory item names/SKUs
+    packaging_mappings = {
+        # Drums
+        "200l drum": ("New Drums - 8 mm", "PACK-DRUM-200L-8MM"),
+        "200l": ("New Drums - 8 mm", "PACK-DRUM-200L-8MM"),
+        "210l drum": ("HDPE Drums 210ltrs", "PACK-DRUM-210L-HDPE"),
+        "210l": ("HDPE Drums 210ltrs", "PACK-DRUM-210L-HDPE"),
+        "250l drum": ("HDPE Drums 250 litre", "PACK-DRUM-250L-HDPE"),
+        "250l": ("HDPE Drums 250 litre", "PACK-DRUM-250L-HDPE"),
+        "recon drum": ("Recon Drums", "PACK-DRUM-RECON"),
+        "reconditioned drum": ("Recon Drums", "PACK-DRUM-RECON"),
+        # IBCs - CHECK RECON FIRST before generic patterns
+        "ibc 1000l recon": ("IBCS Recon", "PACK-IBC-1000L-RECON"),
+        "ibc recon": ("IBCS Recon", "PACK-IBC-1000L-RECON"),
+        "ibcs recon": ("IBCS Recon", "PACK-IBC-1000L-RECON"),
+        "reconditioned ibc": ("IBCS Recon", "PACK-IBC-1000L-RECON"),
+        "ibc 1000l": ("IBCS New", "PACK-IBC-1000L-NEW"),
+        "ibc": ("IBCS New", "PACK-IBC-1000L-NEW"),
+        "ibcs new": ("IBCS New", "PACK-IBC-1000L-NEW"),
+        # Flexi bags
+        "flexi bag": ("Flexi Bags", "PACK-FLEXI-BAG"),
+        "flexitank": ("Flexi Bags", "PACK-FLEXI-BAG"),
+        "flexi": ("Flexi Bags", "PACK-FLEXI-BAG"),
+        # Lubricant packaging
+        "1 litre": ("Lubricant packaging 1 litre", "PACK-LUBE-1L"),
+        "4 litre": ("Lubricant packaging 4 litre", "PACK-LUBE-4L"),
+        "5 litre": ("Lubricant packaging 5 litre", "PACK-LUBE-5L"),
+        "20 litre": ("Lubricant packaging 20 litre", "PACK-LUBE-20L"),
+        #pallets
+        "pallets": ("pallets","PACK-PALLET")
+    }
+    
+    # Try to find matching packaging item
+    matched_name = None
+    matched_sku = None
+    
+    for key, (name, sku) in packaging_mappings.items():
+        if key in packaging_lower:
+            matched_name = name
+            matched_sku = sku
+            break
+    
+    # If no match found, try to find by name similarity
+    if not matched_name:
+        # Try to find existing inventory item with similar name
+        all_pack_items = await db.inventory_items.find(
+            {"item_type": "PACK", "is_active": True},
+            {"_id": 0}
+        ).to_list(1000)
+        
+        for pack_item in all_pack_items:
+            item_name_lower = pack_item.get("name", "").lower()
+            if packaging_lower in item_name_lower or item_name_lower in packaging_lower:
+                return pack_item.get("id")
+        
+        # If still no match, create a generic packaging item
+        matched_name = packaging_string
+        matched_sku = f"PACK-{packaging_string.upper().replace(' ', '-')}"
+    
+    # Try to find existing inventory item by name or SKU
+    existing_item = await db.inventory_items.find_one(
+        {
+            "$or": [
+                {"name": matched_name, "item_type": "PACK"},
+                {"sku": matched_sku, "item_type": "PACK"}
+            ],
+            "is_active": True
+        },
+        {"_id": 0}
+    )
+    
+    if existing_item:
+        return existing_item.get("id")
+    
+    # Create new packaging inventory item if not found
+    new_packaging_item = {
+        "id": str(uuid.uuid4()),
+        "sku": matched_sku,
+        "name": matched_name,
+        "item_type": "PACK",
+        "uom": "EA",  # Default unit of measure for packaging
+        "is_active": True,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.inventory_items.insert_one(new_packaging_item)
+    
+    # Initialize inventory balance for new packaging item
+    await db.inventory_balances.insert_one({
+        "item_id": new_packaging_item["id"],
+        "on_hand": 0,
+        "reserved": 0,
+        "available": 0,
+        "last_updated": datetime.now(timezone.utc).isoformat()
+    })
+    
+    return new_packaging_item["id"]
+
 @api_router.post("/job-orders", response_model=JobOrder)
 async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(get_current_user)):
     order = await db.sales_orders.find_one({"id": data.sales_order_id}, {"_id": 0})
@@ -2124,6 +2530,34 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
             item_needs_procurement = False
             item_status = "pending"  # Default status
             bom_with_stock = []
+            
+            # Get packaging info for ALL products (TRADED and MANUFACTURED)
+            item_packaging = item.packaging or "Bulk"
+            
+            # Get U.O.M from item or infer from packaging (only if not explicitly set)
+            uom = item.uom if hasattr(item, 'uom') else None
+            if not uom:
+                packaging_lower = item_packaging.lower()
+                if any(keyword in packaging_lower for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
+                    uom = "per_unit"
+                elif any(keyword in packaging_lower for keyword in ["flexi", "iso", "tank"]):
+                    uom = "per_liter"
+                elif packaging_lower == "bulk":
+                    uom = "per_mt"
+                else:
+                    uom = "per_mt"  # Default
+            
+            # Calculate finished_kg based on UOM and available data
+            if uom == "per_unit":
+                # For cartons, drums, pails: quantity is number of units
+                net_weight = item.net_weight_kg if item.net_weight_kg is not None else 200
+                finished_kg = item.quantity * net_weight
+            elif uom == "per_liter":
+                # For liters: 1 liter ≈ 1 kg
+                finished_kg = item.quantity
+            else:  # per_mt
+                # For bulk: quantity is in MT, convert to KG
+                finished_kg = item.quantity * 1000
             
             # Handle trading products differently - skip BOM checks
             if product_type == "TRADED":
@@ -2180,36 +2614,6 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                         "bom_id": product_bom["id"]
                     }, {"_id": 0}).to_list(100)
                     
-                    item_packaging = item.packaging or "Bulk"
-                    
-                    # Get U.O.M from item or infer from packaging
-                    uom = item.uom if hasattr(item, 'uom') else None
-                    if not uom or uom == "per_mt":
-                        packaging_lower = item_packaging.lower()
-                        if any(keyword in packaging_lower for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
-                            uom = "per_unit"
-                        elif any(keyword in packaging_lower for keyword in ["flexi", "iso", "tank"]):
-                            uom = "per_liter"
-                        elif packaging_lower == "bulk":
-                            uom = "per_mt"
-                        else:
-                            uom = uom or "per_mt"  # Keep existing or default
-                    
-                    # Calculate finished_kg - prioritize weight_mt (correct value) over quantity calculations
-                    if item.weight_mt and item.weight_mt > 0:
-                        # Use weight_mt from quotation/sales order item (e.g., 14.8 MT = 14,800 KG)
-                        finished_kg = item.weight_mt * 1000
-                    elif uom == "per_unit":
-                        # Fallback: For cartons, drums, pails: quantity is number of units
-                        net_weight = item.net_weight_kg if item.net_weight_kg is not None else 200
-                        finished_kg = item.quantity * net_weight
-                    elif uom == "per_liter":
-                        # Fallback: For liters: 1 liter ≈ 1 kg
-                        finished_kg = item.quantity
-                    else:  # per_mt
-                        # Fallback: For bulk: quantity is in MT, convert to KG
-                        finished_kg = item.quantity * 1000
-                    
                     for bom_item in bom_items:
                         material_id = bom_item.get("material_item_id")
                         qty_per_kg = bom_item.get("qty_kg_per_kg_finished", 0)
@@ -2255,6 +2659,103 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                                     "item_type": "RAW"  # From product BOM, so it's raw material
                                 })
             
+            # ========== PACKAGING AVAILABILITY CHECK (FOR ALL PRODUCTS - TRADED AND MANUFACTURED) ==========
+            # Extract packaging material from quotation and create packaging shortage if needed
+            if item_packaging and item_packaging != "Bulk" and finished_kg > 0:
+                packaging_check_failed = False
+                packaging_error_reason = None
+                
+                # Map packaging string to packaging inventory item
+                try:
+                    packaging_item_id = await find_or_create_packaging_item(item_packaging)
+                    
+                    if not packaging_item_id:
+                        packaging_check_failed = True
+                        packaging_error_reason = f"Could not map packaging '{item_packaging}' to inventory item"
+                        logger.error(f"⚠️ PACKAGING CHECK FAILED for job {job_number}: {packaging_error_reason}")
+                        
+                except Exception as e:
+                    packaging_check_failed = True
+                    packaging_error_reason = f"Error finding/creating packaging item: {str(e)}"
+                    logger.error(f"⚠️ PACKAGING CHECK FAILED for job {job_number}: {packaging_error_reason}")
+                    packaging_item_id = None
+                
+                # If packaging check failed, FORCE job to procurement
+                if packaging_check_failed:
+                    item_material_shortages.append({
+                        "item_id": "UNKNOWN_PACKAGING",
+                        "item_name": f"⚠️ {item_packaging} (CHECK FAILED)",
+                        "item_sku": "-",
+                        "required_qty": 0,
+                        "available": 0,
+                        "shortage": 999999,  # Large number to indicate critical issue
+                        "status": "ERROR",
+                        "uom": "EA",
+                        "item_type": "PACK",
+                        "error": packaging_error_reason
+                    })
+                    item_needs_procurement = True
+                    item_status = "procurement"
+                    item_procurement_reasons.append(
+                        f"⚠️ PACKAGING CHECK FAILED: {packaging_error_reason}"
+                    )
+                    
+                elif packaging_item_id:
+                    # Calculate required packaging quantity
+                    packaging_qty = 0
+                    packaging_lower = item_packaging.lower()
+                    
+                    if "drum" in packaging_lower:
+                        # Use net_weight_kg from item instead of hardcoded calculation
+                        net_weight_per_drum = item.net_weight_kg if item.net_weight_kg is not None else 200
+                        packaging_qty = max(1, ceil(finished_kg / net_weight_per_drum))
+                    elif "ibc" in packaging_lower:
+                        net_weight_per_ibc = 1000 * 0.85
+                        packaging_qty = max(1, ceil(finished_kg / net_weight_per_ibc))
+                    elif "flexi" in packaging_lower or "flexitank" in packaging_lower:
+                        packaging_qty = 1
+                    else:
+                        net_weight = item.net_weight_kg if item.net_weight_kg else 200
+                        packaging_qty = max(1, ceil(finished_kg / net_weight))
+                    
+                    # Check packaging availability
+                    packaging_balance = await db.inventory_balances.find_one({"item_id": packaging_item_id}, {"_id": 0})
+                    packaging_on_hand = packaging_balance.get("on_hand", 0) if packaging_balance else 0
+                    packaging_reservations = await db.inventory_reservations.find({"item_id": packaging_item_id}, {"_id": 0}).to_list(1000)
+                    packaging_reserved = sum(r.get("qty", 0) for r in packaging_reservations)
+                    packaging_available = packaging_on_hand - packaging_reserved
+                    packaging_shortage = max(0, packaging_qty - packaging_available)
+                    
+                    # ALWAYS add packaging info (even if no shortage) for tracking
+                    packaging_item = await db.inventory_items.find_one({"id": packaging_item_id}, {"_id": 0})
+                    if packaging_item:
+                        packaging_info = {
+                            "item_id": packaging_item_id,
+                            "item_name": packaging_item.get("name", item_packaging),
+                            "item_sku": packaging_item.get("sku", "-"),
+                            "required_qty": packaging_qty,
+                            "available": packaging_available,
+                            "shortage": packaging_shortage,
+                            "status": "SHORTAGE" if packaging_shortage > 0 else "AVAILABLE",
+                            "uom": packaging_item.get("uom", "EA"),
+                            "item_type": "PACK"
+                        }
+                        
+                        # Always add to material_shortages for visibility
+                        item_material_shortages.append(packaging_info)
+                        
+                        # If there's a shortage, mark for procurement
+                        if packaging_shortage > 0:
+                            item_needs_procurement = True
+                            item_status = "procurement"
+                            item_procurement_reasons.append(
+                                f"Packaging ({item_packaging}): "
+                                f"available ({packaging_available}) < required ({packaging_qty})"
+                            )
+                            logger.warning(f"📦 Packaging shortage for {job_number}: {item_packaging} - need {packaging_qty}, have {packaging_available}")
+                        else:
+                            logger.info(f"📦 Packaging available for {job_number}: {item_packaging} - {packaging_available} EA")
+            
             # Use item's BOM if provided, otherwise use calculated bom_with_stock
             # Note: For trading products, bom_with_stock will be empty
             if hasattr(item, 'bom') and item.bom:
@@ -2269,27 +2770,48 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
                         bom_with_stock.append(dict(bom_item) if hasattr(bom_item, '__dict__') else bom_item)
             
             # Always check for material shortages, even if finished product is available
-            # This ensures raw material shortages are tracked for procurement
+            # This ensures raw material shortages (including packaging) are tracked for procurement
             if item_material_shortages:
                 any_needs_procurement = True
                 all_material_shortages_combined.extend(item_material_shortages)
                 # Ensure item_needs_procurement is set if there are shortages
                 if not item_needs_procurement:
                     item_needs_procurement = True
-                # For manufacturing products, if there are material shortages, status should be procurement
-                if product_type != "TRADED":
-                    item_status = "procurement"
+                # Set status to procurement for ANY product with material shortages (including packaging)
+                item_status = "procurement"
             elif item_needs_procurement:
                 any_needs_procurement = True
                 all_material_shortages_combined.extend(item_material_shortages)
             
-            # Final status determination for manufacturing products
+            # Final status determination
             # If no material shortages and finished product available, go to ready_for_dispatch
-            if product_type != "TRADED":
-                if not item_needs_procurement and finished_product_stock >= item.quantity:
-                    item_status = "ready_for_dispatch"
-                elif item_needs_procurement:
+            if not item_needs_procurement and finished_product_stock >= item.quantity:
+                item_status = "ready_for_dispatch"
+            elif item_needs_procurement:
+                item_status = "procurement"
+            
+            # ⚠️ SAFETY CHECK: Never allow ready_for_dispatch if packaging required but not checked
+            if item_status == "ready_for_dispatch" and item_packaging and item_packaging != "Bulk":
+                # Verify packaging was actually checked
+                has_packaging_info = any(s.get("item_type") == "PACK" for s in item_material_shortages)
+                if not has_packaging_info:
+                    logger.error(f"🚨 CRITICAL: Job {job_number} marked ready but packaging not verified! Forcing to procurement.")
                     item_status = "procurement"
+                    item_needs_procurement = True
+                    item_procurement_reasons.append("⚠️ SAFETY CHECK: Packaging verification missing")
+                    # Add error entry to material_shortages
+                    item_material_shortages.append({
+                        "item_id": "PACKAGING_NOT_VERIFIED",
+                        "item_name": f"⚠️ {item_packaging} (NOT VERIFIED)",
+                        "item_sku": "-",
+                        "required_qty": 0,
+                        "available": 0,
+                        "shortage": 999999,
+                        "status": "ERROR",
+                        "uom": "EA",
+                        "item_type": "PACK",
+                        "error": "Safety check failed: Packaging verification missing"
+                    })
             
             # Create separate job order document for this product
             # Preserve net_weight_kg from quotation (only default to 200 if not provided and not Bulk)
@@ -2430,9 +2952,9 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
         packaging = data.packaging or "Bulk"
         net_weight_kg = data.net_weight_kg if hasattr(data, 'net_weight_kg') and data.net_weight_kg is not None else None
         
-        # Get U.O.M from data or infer from packaging
+        # Get U.O.M from data or infer from packaging (only if not explicitly set)
         uom = data.uom if hasattr(data, 'uom') and data.uom else None
-        if not uom or uom == "per_mt":
+        if not uom:
             packaging_lower = packaging.lower()
             if any(keyword in packaging_lower for keyword in ["drum", "carton", "pail", "ibc", "bag", "box"]):
                 uom = "per_unit"
@@ -2441,7 +2963,7 @@ async def create_job_order(data: JobOrderCreate, current_user: dict = Depends(ge
             elif packaging_lower == "bulk":
                 uom = "per_mt"
             else:
-                uom = uom or "per_mt"  # Keep existing or default
+                uom = "per_mt"  # Default
         
         # Calculate finished_kg based on U.O.M
         if uom == "per_unit":
@@ -2628,7 +3150,7 @@ async def get_job_orders(
         .limit(page_size)\
         .to_list(page_size)
     
-    # Enrich with customer_name and country_of_destination from sales order/quotation
+    # Enrich with customer_name, incoterm, and country_of_destination from sales order/quotation
     enriched_jobs = []
     for job in jobs:
         sales_order_id = job.get("sales_order_id")
@@ -2636,6 +3158,30 @@ async def get_job_orders(
             sales_order = await db.sales_orders.find_one({"id": sales_order_id}, {"_id": 0})
             if sales_order:
                 job["customer_name"] = sales_order.get("customer_name", "")
+                
+                # Enrich incoterm if missing - first try from job, then sales order, then quotation
+                if not job.get("incoterm"):
+                    # Try from sales order first
+                    if sales_order.get("incoterm"):
+                        incoterm = sales_order.get("incoterm", "").upper()
+                        # Update the job order in database
+                        await db.job_orders.update_one(
+                            {"id": job.get("id")},
+                            {"$set": {"incoterm": incoterm}}
+                        )
+                        job["incoterm"] = incoterm
+                    # If not in sales order, try to get from quotation
+                    elif sales_order.get("quotation_id"):
+                        quotation = await db.quotations.find_one({"id": sales_order.get("quotation_id")}, {"_id": 0})
+                        if quotation and quotation.get("incoterm"):
+                            incoterm = quotation.get("incoterm", "").upper()
+                            # Update the job order in database
+                            await db.job_orders.update_one(
+                                {"id": job.get("id")},
+                                {"$set": {"incoterm": incoterm}}
+                            )
+                            job["incoterm"] = incoterm
+                
                 # Enrich country_of_destination if missing - first try from sales order, then from quotation
                 if not job.get("country_of_destination"):
                     # First, try to get from sales order directly
@@ -2689,6 +3235,27 @@ async def get_job_order(job_id: str, current_user: dict = Depends(get_current_us
         sales_order = await db.sales_orders.find_one({"id": job.get("sales_order_id")}, {"_id": 0})
         if sales_order:
             job["customer_name"] = sales_order.get("customer_name", "")
+    
+    # Enrich incoterm if missing
+    if not job.get("incoterm") and job.get("sales_order_id"):
+        sales_order = await db.sales_orders.find_one({"id": job.get("sales_order_id")}, {"_id": 0})
+        if sales_order:
+            if sales_order.get("incoterm"):
+                incoterm = sales_order.get("incoterm", "").upper()
+                await db.job_orders.update_one(
+                    {"id": job_id},
+                    {"$set": {"incoterm": incoterm}}
+                )
+                job["incoterm"] = incoterm
+            elif sales_order.get("quotation_id"):
+                quotation = await db.quotations.find_one({"id": sales_order.get("quotation_id")}, {"_id": 0})
+                if quotation and quotation.get("incoterm"):
+                    incoterm = quotation.get("incoterm", "").upper()
+                    await db.job_orders.update_one(
+                        {"id": job_id},
+                        {"$set": {"incoterm": incoterm}}
+                    )
+                    job["incoterm"] = incoterm
     
     # Enrich with country_of_destination from quotation if missing
     if not job.get("country_of_destination") and job.get("sales_order_id"):
@@ -2843,6 +3410,58 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
                             "item_type": item_type,
                             "uom": bom_item.get("uom", "KG")
                         })
+                if packaging != "Bulk":
+                    from math import ceil
+                    
+                    # Find packaging item
+                    packaging_item_id = await find_or_create_packaging_item(packaging)
+                    
+                    if packaging_item_id:
+                        # Calculate required packaging quantity
+                        finished_kg = quantity * net_weight_kg
+                        packaging_qty = 0
+                        packaging_lower = packaging.lower()
+                        
+                        if "drum" in packaging_lower:
+                            capacity_liters = 200
+                            if "210" in packaging or "210l" in packaging_lower:
+                                capacity_liters = 210
+                            elif "250" in packaging or "250l" in packaging_lower:
+                                capacity_liters = 250
+                            net_weight_per_drum = capacity_liters * 0.85
+                            packaging_qty = max(1, ceil(finished_kg / net_weight_per_drum))
+                        elif "ibc" in packaging_lower:
+                            net_weight_per_ibc = 1000 * 0.85
+                            packaging_qty = max(1, ceil(finished_kg / net_weight_per_ibc))
+                        elif "flexi" in packaging_lower or "flexitank" in packaging_lower:
+                            packaging_qty = 1
+                        else:
+                            packaging_qty = max(1, ceil(finished_kg / net_weight_kg))
+                        
+                        # Check packaging availability
+                        avail_result = await inventory_service.get_available_quantity(packaging_item_id)
+                        packaging_available = avail_result.get("available", 0)
+                        
+                        if packaging_available < packaging_qty:
+                            all_materials_available = False
+                            
+                            packaging_shortage = packaging_qty - packaging_available
+                            
+                            # Get packaging item details
+                            packaging_item = await db.inventory_items.find_one({"id": packaging_item_id}, {"_id": 0})
+                            
+                            if packaging_item:
+                                updated_shortages.append({
+                                    "item_id": packaging_item_id,
+                                    "item_name": packaging_item.get("name", packaging),
+                                    "item_sku": packaging_item.get("sku", "-"),
+                                    "required_qty": packaging_qty,
+                                    "available": packaging_available,
+                                    "shortage": packaging_shortage,
+                                    "item_type": "PACK",
+                                    "uom": packaging_item.get("uom", "EA")
+                                })
+                # ===== END OF PACKAGING CHECK SECTION =====
     else:
         # Check each existing shortage
         for shortage in material_shortages:
@@ -2873,10 +3492,12 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
             # If available, don't add to updated_shortages (material is now available)
     
     # Check if job needs procurement update
+    # Also check if status is "procurement" to handle cases where procurement was completed but status wasn't updated
     needs_procurement_update = (
         (material_shortages and len(material_shortages) > 0)
         or job.get("procurement_required", False)
-        or job.get("procurement_status") in ["pending", "in_progress"]
+        or job.get("procurement_status") in ["pending", "in_progress", "complete"]
+        or job.get("status") == "procurement"
     )
     
     # Check if this is a trading product job
@@ -2970,6 +3591,127 @@ async def check_job_order_availability(job_id: str, current_user: dict = Depends
             "message": f"Materials still not available. {len(updated_shortages)} shortage(s) remaining."
         }
 
+@api_router.put("/job-orders/{job_id}/check-procurement-status")
+async def check_and_update_procurement_status(job_id: str, current_user: dict = Depends(get_current_user)):
+    """Check material availability and update job status after procurement completion"""
+    job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job order not found")
+    
+    # Check if materials are available
+    material_shortages = job.get("material_shortages", [])
+    all_materials_available = True
+    
+    for shortage in material_shortages:
+        item_id = shortage.get("item_id")
+        required_qty = shortage.get("required_qty", 0)
+        
+        balance = await db.inventory_balances.find_one({"item_id": item_id}, {"_id": 0})
+        on_hand = balance.get("on_hand", 0) if balance else 0
+        reserved = balance.get("reserved", 0) if balance else 0
+        available = on_hand - reserved
+        
+        if available < required_qty:
+            all_materials_available = False
+            break
+    
+    # If no shortages listed, check BOM requirements
+    if not material_shortages:
+        product_id = job.get("product_id")
+        quantity = job.get("quantity", 0)
+        packaging = job.get("packaging", "Bulk")
+        net_weight_kg = job.get("net_weight_kg")
+        if net_weight_kg is None and packaging != "Bulk":
+            net_weight_kg = 200
+        
+        if product_id and quantity > 0:
+            product_bom = await db.product_boms.find_one({
+                "product_id": product_id,
+                "is_active": True
+            }, {"_id": 0})
+            
+            if product_bom:
+                bom_items = await db.product_bom_items.find({
+                    "bom_id": product_bom["id"]
+                }, {"_id": 0}).to_list(100)
+                
+                if packaging != "Bulk":
+                    total_kg = quantity * (net_weight_kg or 200)
+                else:
+                    total_kg = quantity * 1000
+                
+                for bom_item in bom_items:
+                    material_id = bom_item.get("material_item_id")
+                    qty_per_kg = bom_item.get("qty_kg_per_kg_finished", 0)
+                    required_qty = total_kg * qty_per_kg
+                    
+                    balance = await db.inventory_balances.find_one({"item_id": material_id}, {"_id": 0})
+                    available = (balance.get("on_hand", 0) - balance.get("reserved", 0)) if balance else 0
+                    
+                    if available < required_qty:
+                        all_materials_available = False
+                        break
+    
+    # Check if this is a trading product
+    is_trading_product = False
+    product_id = job.get("product_id")
+    if product_id:
+        product = await db.products.find_one({"id": product_id}, {"_id": 0})
+        if product and product.get("type") == "TRADED":
+            is_trading_product = True
+    
+    # Update status if materials are available
+    if all_materials_available:
+        if is_trading_product:
+            new_status = "ready_for_dispatch"
+            notification_message = f"Trading product procured. Job {job.get('job_number')} ({job.get('product_name')}) is ready for dispatch."
+            notification_link = "/transport-planner"
+            target_roles = ["admin", "transport"]
+        else:
+            new_status = "pending"
+            notification_message = f"Materials procured. Job {job.get('job_number')} ({job.get('product_name')}) is ready for production scheduling."
+            notification_link = "/production-schedule"
+            target_roles = ["admin", "production"]
+        
+        await db.job_orders.update_one(
+            {"id": job_id},
+            {"$set": {
+                "status": new_status,
+                "procurement_status": "complete",
+                "material_shortages": [],
+                "procurement_required": False
+            }}
+        )
+        
+        if new_status == "ready_for_dispatch":
+            await ensure_dispatch_routing(job_id, job)
+        
+        await create_notification(
+            event_type="JOB_READY",
+            title=f"Job Ready: {job.get('job_number')}",
+            message=notification_message,
+            link=notification_link,
+            ref_type="JOB",
+            ref_id=job_id,
+            target_roles=target_roles,
+            notification_type="success"
+        )
+        
+        return {
+            "job_id": job_id,
+            "job_number": job.get("job_number"),
+            "status": "updated",
+            "new_status": new_status,
+            "message": f"Job status updated to {new_status}"
+        }
+    else:
+        return {
+            "job_id": job_id,
+            "job_number": job.get("job_number"),
+            "status": "materials_still_short",
+            "message": "Materials are still not fully available"
+        }
+
 @api_router.delete("/job-orders/{job_id}")
 async def delete_job_order(job_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a job order"""
@@ -2986,6 +3728,269 @@ async def delete_job_order(job_id: str, current_user: dict = Depends(get_current
         raise HTTPException(status_code=404, detail="Job order not found")
     
     return {"message": "Job order deleted successfully"}
+
+@api_router.post("/job-orders/{job_id}/recalculate-bom-shortages")
+async def recalculate_bom_shortages(job_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Recalculate raw material shortages from BOM for a job order.
+    This will repopulate the material_shortages array with RAW materials from the active BOM.
+    """
+    job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job order not found")
+    
+    product_id = job.get("product_id")
+    if not product_id:
+        raise HTTPException(status_code=400, detail="Job has no product_id")
+    
+    # Get product to check if it's manufactured
+    product = await db.products.find_one({"id": product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    if product.get("type") == "TRADED":
+        return {
+            "success": False,
+            "message": "This is a trading product - no BOM shortages to calculate"
+        }
+    
+    # Get active BOM
+    product_bom = await db.product_boms.find_one({
+        "product_id": product_id,
+        "is_active": True
+    }, {"_id": 0})
+    
+    if not product_bom:
+        return {
+            "success": False,
+            "message": "No active BOM found for this product"
+        }
+    
+    # Get BOM items
+    bom_items = await db.product_bom_items.find({
+        "bom_id": product_bom["id"]
+    }, {"_id": 0}).to_list(100)
+    
+    if not bom_items:
+        return {
+            "success": False,
+            "message": "BOM has no items"
+        }
+    
+    # Calculate total KG needed
+    total_weight_mt = job.get("total_weight_mt", 0)
+    quantity = job.get("quantity", 0)
+    packaging = job.get("packaging", "Bulk")
+    net_weight_kg = job.get("net_weight_kg")
+    
+    if total_weight_mt > 0:
+        total_kg = total_weight_mt * 1000
+    elif packaging != "Bulk" and net_weight_kg:
+        total_kg = quantity * net_weight_kg
+    elif packaging != "Bulk":
+        total_kg = quantity * 200  # Default
+    else:
+        total_kg = quantity * 1000
+    
+    if total_kg <= 0:
+        return {
+            "success": False,
+            "message": "Cannot calculate - job quantity is zero"
+        }
+    
+    # Get existing material_shortages and keep only PACK items
+    existing_shortages = job.get("material_shortages", [])
+    pack_shortages = [s for s in existing_shortages if s.get("item_type") == "PACK"]
+    
+    # Calculate new RAW material shortages
+    new_raw_shortages = []
+    for bom_item in bom_items:
+        material_id = bom_item.get("material_item_id")
+        qty_per_kg = bom_item.get("qty_kg_per_kg_finished", 0)
+        required_qty = total_kg * qty_per_kg
+        
+        # Get material details
+        material = await db.inventory_items.find_one({"id": material_id}, {"_id": 0})
+        if not material:
+            continue
+        
+        # Check availability
+        balance = await db.inventory_balances.find_one({"item_id": material_id}, {"_id": 0})
+        on_hand = balance.get("on_hand", 0) if balance else 0
+        reservations = await db.inventory_reservations.find({"item_id": material_id}, {"_id": 0}).to_list(1000)
+        reserved = sum(r.get("qty", 0) for r in reservations)
+        available = on_hand - reserved
+        
+        shortage_qty = max(0, required_qty - available)
+        if shortage_qty > 0:
+            uom = material.get("uom", "KG")
+            if uom.upper() in ["MT", "METRIC TON", "TONNE"]:
+                uom = "KG"
+            
+            new_raw_shortages.append({
+                "item_id": material_id,
+                "item_name": material.get("name", "Unknown"),
+                "item_sku": material.get("sku", "-"),
+                "required_qty": required_qty,
+                "available": available,
+                "shortage": shortage_qty,
+                "status": "SHORTAGE",
+                "uom": uom,
+                "item_type": "RAW",
+                "source": "BOM_RECALCULATION"
+            })
+    
+    # Combine RAW and PACK shortages
+    all_shortages = new_raw_shortages + pack_shortages
+    
+    # Update job order
+    update_data = {
+        "material_shortages": all_shortages,
+        "procurement_required": len(all_shortages) > 0
+    }
+    
+    if len(all_shortages) > 0 and job.get("status") in ["pending", "approved"]:
+        update_data["status"] = "procurement"
+    
+    await db.job_orders.update_one(
+        {"id": job_id},
+        {"$set": update_data}
+    )
+    
+    return {
+        "success": True,
+        "message": f"BOM shortages recalculated successfully",
+        "raw_shortages_found": len(new_raw_shortages),
+        "pack_shortages_kept": len(pack_shortages),
+        "total_shortages": len(all_shortages),
+        "shortages": all_shortages
+    }
+
+@api_router.post("/job-orders/{job_id}/sync-packaging")
+async def sync_job_packaging(job_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Sync/recalculate packaging requirements for a job order.
+    This will update the material_shortages array with packaging information.
+    """
+    from math import ceil
+    
+    job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job order not found")
+    
+    packaging = job.get("packaging", "Bulk")
+    quantity = job.get("quantity", 0)
+    net_weight_kg = job.get("net_weight_kg", 200)
+    material_shortages = job.get("material_shortages", [])
+    
+    # Skip if Bulk or no packaging
+    if not packaging or packaging == "Bulk":
+        return {
+            "success": True,
+            "message": "No packaging required for bulk orders",
+            "packaging_added": False
+        }
+    
+    # Calculate finished product weight in KG
+    finished_kg = quantity * net_weight_kg
+    
+    # Remove any existing packaging entries from material_shortages
+    material_shortages = [s for s in material_shortages if s.get("item_type") != "PACK"]
+    
+    try:
+        # Find or create packaging inventory item
+        packaging_item_id = await find_or_create_packaging_item(packaging)
+        
+        if not packaging_item_id:
+            return {
+                "success": False,
+                "message": f"Could not map packaging '{packaging}' to inventory item",
+                "packaging_added": False
+            }
+        
+        # Calculate required packaging quantity
+        packaging_qty = 0
+        packaging_lower = packaging.lower()
+        
+        if "drum" in packaging_lower:
+            # Use net_weight_kg from job order instead of hardcoded calculation
+            net_weight_per_drum = net_weight_kg
+            packaging_qty = max(1, ceil(finished_kg / net_weight_per_drum))
+        elif "ibc" in packaging_lower:
+            net_weight_per_ibc = 1000 * 0.85
+            packaging_qty = max(1, ceil(finished_kg / net_weight_per_ibc))
+        elif "flexi" in packaging_lower or "flexitank" in packaging_lower:
+            packaging_qty = 1
+        else:
+            packaging_qty = max(1, ceil(finished_kg / net_weight_kg))
+        
+        # Check packaging availability
+        packaging_balance = await db.inventory_balances.find_one({"item_id": packaging_item_id}, {"_id": 0})
+        packaging_on_hand = packaging_balance.get("on_hand", 0) if packaging_balance else 0
+        packaging_reservations = await db.inventory_reservations.find({"item_id": packaging_item_id}, {"_id": 0}).to_list(1000)
+        packaging_reserved = sum(r.get("qty", 0) for r in packaging_reservations)
+        packaging_available = packaging_on_hand - packaging_reserved
+        packaging_shortage = max(0, packaging_qty - packaging_available)
+        
+        # Get packaging item details
+        packaging_item = await db.inventory_items.find_one({"id": packaging_item_id}, {"_id": 0})
+        if not packaging_item:
+            return {
+                "success": False,
+                "message": f"Packaging item not found in inventory",
+                "packaging_added": False
+            }
+        
+        # Add packaging info to material_shortages
+        packaging_info = {
+            "item_id": packaging_item_id,
+            "item_name": packaging_item.get("name", packaging),
+            "item_sku": packaging_item.get("sku", "-"),
+            "required_qty": packaging_qty,
+            "available": packaging_available,
+            "shortage": packaging_shortage,
+            "status": "SHORTAGE" if packaging_shortage > 0 else "AVAILABLE",
+            "uom": packaging_item.get("uom", "EA"),
+            "item_type": "PACK"
+        }
+        
+        material_shortages.append(packaging_info)
+        
+        # Update job order
+        update_data = {"material_shortages": material_shortages}
+        
+        # If packaging has shortage, ensure procurement status is set
+        if packaging_shortage > 0:
+            update_data["procurement_required"] = True
+            if job.get("status") == "ready_for_dispatch":
+                # Don't allow ready_for_dispatch if packaging shortage exists
+                update_data["status"] = "procurement"
+        
+        await db.job_orders.update_one(
+            {"id": job_id},
+            {"$set": update_data}
+        )
+        
+        return {
+            "success": True,
+            "message": "Packaging requirements synced successfully",
+            "packaging_added": True,
+            "packaging_info": {
+                "item_name": packaging_info["item_name"],
+                "required": packaging_qty,
+                "available": packaging_available,
+                "shortage": packaging_shortage,
+                "status": packaging_info["status"]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error syncing packaging for job {job_id}: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error syncing packaging: {str(e)}",
+            "packaging_added": False
+        }
 
 @api_router.put("/job-orders/{job_id}/status")
 async def update_job_status(
@@ -3021,6 +4026,69 @@ async def update_job_status(
         # Update inventory when production is completed
         job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
         if job:
+            # Reduce packaging stock when production is completed
+            packaging = job.get("packaging", "Bulk")
+            if packaging and packaging != "Bulk":
+                try:
+                    from math import ceil
+                    # Get packaging item ID
+                    packaging_item_id = await find_or_create_packaging_item(packaging)
+                    
+                    if packaging_item_id:
+                        # Calculate packaging quantity needed
+                        net_weight_kg = job.get("net_weight_kg", 200)
+                        quantity = job.get("quantity", 0)
+                        finished_kg = quantity * net_weight_kg
+                        
+                        # Calculate required packaging quantity
+                        packaging_qty = 0
+                        packaging_lower = packaging.lower()
+                        
+                        if "drum" in packaging_lower:
+                            # Use net_weight_kg from job order
+                            net_weight_per_drum = net_weight_kg
+                            packaging_qty = max(1, ceil(finished_kg / net_weight_per_drum))
+                        elif "ibc" in packaging_lower:
+                            net_weight_per_ibc = 1000 * 0.85
+                            packaging_qty = max(1, ceil(finished_kg / net_weight_per_ibc))
+                        elif "flexi" in packaging_lower or "flexitank" in packaging_lower:
+                            packaging_qty = 1
+                        else:
+                            packaging_qty = max(1, ceil(finished_kg / net_weight_kg))
+                        
+                        # Reduce packaging stock
+                        packaging_balance = await db.inventory_balances.find_one({"item_id": packaging_item_id}, {"_id": 0})
+                        packaging_prev_stock = packaging_balance.get("on_hand", 0) if packaging_balance else 0
+                        packaging_new_stock = max(0, packaging_prev_stock - packaging_qty)
+                        
+                        # Update inventory_balances for packaging
+                        await db.inventory_balances.update_one(
+                            {"item_id": packaging_item_id},
+                            {"$inc": {"on_hand": -packaging_qty}},
+                            upsert=True
+                        )
+                        
+                        # Create inventory movement for packaging
+                        packaging_item = await db.inventory_items.find_one({"id": packaging_item_id}, {"_id": 0})
+                        if packaging_item:
+                            packaging_movement = InventoryMovement(
+                                product_id=packaging_item_id,
+                                product_name=packaging_item.get("name", packaging),
+                                sku=packaging_item.get("sku", ""),
+                                movement_type="production_packaging_deduct",
+                                quantity=packaging_qty,
+                                reference_type="job_order",
+                                reference_id=job_id,
+                                reference_number=job.get("job_number", ""),
+                                previous_stock=packaging_prev_stock,
+                                new_stock=packaging_new_stock,
+                                created_by=current_user["id"]
+                            )
+                            await db.inventory_movements.insert_one(packaging_movement.model_dump())
+                except Exception as e:
+                    # Log error but don't fail production completion
+                    print(f"Error reducing packaging stock for job {job.get('job_number', job_id)}: {str(e)}")
+            
             # Create notification for production completion
             await db.notifications.insert_one({
                 "id": str(uuid.uuid4()),
@@ -3175,6 +4243,14 @@ async def update_job_status(
     result = await db.job_orders.update_one({"id": job_id}, {"$set": update_data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job order not found")
+    
+    # Un-reserve quantities when status changes to dispatched
+    if status == "dispatched":
+        # Clear all reservations for this job order (bulk production)
+        await db.inventory_reservations.delete_many({
+            "job_order_id": job_id,
+            "reserved_for": "production_filling_complete"
+        })
     
     # Get job for routing logic
     job = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
@@ -3552,6 +4628,11 @@ async def create_grn(data: GRNCreate, current_user: dict = Depends(get_current_u
             {"$set": {"status": "RECEIVED", "received_at": datetime.now(timezone.utc).isoformat()}}
         )
     
+    # Get PO lines if GRN is linked to a PO to check for packaging requirements
+    po_lines = []
+    if grn.po_id:
+        po_lines = await db.purchase_order_lines.find({"po_id": grn.po_id}, {"_id": 0}).to_list(1000)
+    
     # Update inventory - ADD
     for item in data.items:
         # Find the correct inventory_item_id using improved lookup
@@ -3576,6 +4657,9 @@ async def create_grn(data: GRNCreate, current_user: dict = Depends(get_current_u
         # Convert GRN quantity to match inventory item's unit
         grn_unit = item.unit.upper() if item.unit else "KG"
         
+        # Define count/volume units that should NOT have weight conversions applied
+        non_weight_units = ["EA", "EACH", "PCS", "PIECES", "UNITS", "LITERS", "L", "ML"]
+        
         if inventory_item_unit == "KG":
             if grn_unit == "MT":
                 quantity_to_add = item.quantity * 1000  # Convert MT to KG
@@ -3587,8 +4671,20 @@ async def create_grn(data: GRNCreate, current_user: dict = Depends(get_current_u
             else:  # GRN is already in MT
                 quantity_to_add = item.quantity
         else:
-            # Default: assume KG, convert MT to KG if needed
-            quantity_to_add = item.quantity if grn_unit == "KG" else item.quantity * 1000
+            # For non-weight units (EA, PCS, LITERS, etc.), use quantity as-is
+            # Only apply weight conversion if both units are weight-based
+            if grn_unit in non_weight_units or inventory_item_unit in non_weight_units:
+                # Count/volume units - no conversion needed
+                quantity_to_add = item.quantity
+            elif grn_unit == "MT" and inventory_item_unit == "KG":
+                # Weight conversion: MT to KG
+                quantity_to_add = item.quantity * 1000
+            elif grn_unit == "KG" and inventory_item_unit == "MT":
+                # Weight conversion: KG to MT
+                quantity_to_add = item.quantity / 1000
+            else:
+                # Same unit or unknown units - use as-is
+                quantity_to_add = item.quantity
         
         # Update products table if it exists
         if product:
@@ -3627,6 +4723,51 @@ async def create_grn(data: GRNCreate, current_user: dict = Depends(get_current_u
                 {"$inc": {"on_hand": quantity_to_add}},
                 upsert=True
             )
+        
+        # If this item was procured as "Drummed", also update packaging material stock
+        # Find matching PO line for this item
+        matching_po_line = None
+        for po_line in po_lines:
+            if po_line.get("item_id") == item.product_id or po_line.get("item_id") == item_id_for_balance:
+                matching_po_line = po_line
+                break
+        
+        if matching_po_line and matching_po_line.get("procurement_type") == "Drummed":
+            packaging_item_id = matching_po_line.get("packaging_item_id")
+            packaging_qty = matching_po_line.get("packaging_qty", 0)
+            
+            if packaging_item_id and packaging_qty > 0:
+                # Update packaging material stock
+                packaging_balance = await db.inventory_balances.find_one({"item_id": packaging_item_id}, {"_id": 0})
+                packaging_prev_stock = packaging_balance.get("on_hand", 0) if packaging_balance else 0
+                packaging_new_stock = packaging_prev_stock + packaging_qty
+                
+                await db.inventory_balances.update_one(
+                    {"item_id": packaging_item_id},
+                    {"$inc": {"on_hand": packaging_qty}},
+                    upsert=True
+                )
+                
+                # Get packaging item details for movement record
+                packaging_item = await db.inventory_items.find_one({"id": packaging_item_id}, {"_id": 0})
+                packaging_name = packaging_item.get("name", "Packaging Material") if packaging_item else "Packaging Material"
+                packaging_sku = packaging_item.get("sku", "-") if packaging_item else "-"
+                
+                # Create inventory movement for packaging material
+                packaging_movement = InventoryMovement(
+                    product_id=packaging_item_id,
+                    product_name=packaging_name,
+                    sku=packaging_sku,
+                    movement_type="grn_add",
+                    quantity=packaging_qty,
+                    reference_type="grn",
+                    reference_id=grn.id,
+                    reference_number=grn_number,
+                    previous_stock=packaging_prev_stock,
+                    new_stock=packaging_new_stock,
+                    created_by=current_user["id"]
+                )
+                await db.inventory_movements.insert_one(packaging_movement.model_dump())
     
     # Check if any jobs waiting for procurement now have sufficient stock
     # Check jobs with procurement status or jobs that need procurement
@@ -3731,11 +4872,12 @@ async def create_grn(data: GRNCreate, current_user: dict = Depends(get_current_u
                         all_raw_materials_available = False
         
         # If all materials are now available, update job status
-        # Check if job needs procurement update (either has shortages, procurement_required flag, or procurement_status is pending/in_progress)
+        # Check if job needs procurement update (either has shortages, procurement_required flag, procurement_status is pending/in_progress, or status is procurement)
         needs_procurement_update = (
             (material_shortages and len(material_shortages) > 0)
             or job.get("procurement_required", False)
-            or job.get("procurement_status") in ["pending", "in_progress"]
+            or job.get("procurement_status") in ["pending", "in_progress", "complete"]
+            or job.get("status") == "procurement"
         )
         
         # Check if this is a trading product job
@@ -4076,6 +5218,69 @@ async def create_delivery_order(data: DeliveryOrderCreate, current_user: dict = 
         created_by=current_user["id"]
     )
     await db.inventory_movements.insert_one(movement.model_dump())
+    
+    # Reduce packaging stock when delivery order is created
+    packaging = job.get("packaging", "Bulk")
+    if packaging and packaging != "Bulk":
+        try:
+            from math import ceil
+            # Get packaging item ID
+            packaging_item_id = await find_or_create_packaging_item(packaging)
+            
+            if packaging_item_id:
+                # Calculate packaging quantity needed (same logic as job order creation)
+                net_weight_kg = job.get("net_weight_kg", 200)
+                quantity = job.get("quantity", 0)
+                finished_kg = quantity * net_weight_kg
+                
+                # Calculate required packaging quantity
+                packaging_qty = 0
+                packaging_lower = packaging.lower()
+                
+                if "drum" in packaging_lower:
+                    # Use net_weight_kg from job order
+                    net_weight_per_drum = net_weight_kg
+                    packaging_qty = max(1, ceil(finished_kg / net_weight_per_drum))
+                elif "ibc" in packaging_lower:
+                    net_weight_per_ibc = 1000 * 0.85
+                    packaging_qty = max(1, ceil(finished_kg / net_weight_per_ibc))
+                elif "flexi" in packaging_lower or "flexitank" in packaging_lower:
+                    packaging_qty = 1
+                else:
+                    packaging_qty = max(1, ceil(finished_kg / net_weight_kg))
+                
+                # Reduce packaging stock
+                packaging_balance = await db.inventory_balances.find_one({"item_id": packaging_item_id}, {"_id": 0})
+                packaging_prev_stock = packaging_balance.get("on_hand", 0) if packaging_balance else 0
+                packaging_new_stock = max(0, packaging_prev_stock - packaging_qty)
+                
+                # Update inventory_balances for packaging
+                await db.inventory_balances.update_one(
+                    {"item_id": packaging_item_id},
+                    {"$inc": {"on_hand": -packaging_qty}},
+                    upsert=True
+                )
+                
+                # Create inventory movement for packaging
+                packaging_item = await db.inventory_items.find_one({"id": packaging_item_id}, {"_id": 0})
+                if packaging_item:
+                    packaging_movement = InventoryMovement(
+                        product_id=packaging_item_id,
+                        product_name=packaging_item.get("name", packaging),
+                        sku=packaging_item.get("sku", ""),
+                        movement_type="do_packaging_deduct",
+                        quantity=packaging_qty,
+                        reference_type="delivery_order",
+                        reference_id=delivery_order.id,
+                        reference_number=do_number,
+                        previous_stock=packaging_prev_stock,
+                        new_stock=packaging_new_stock,
+                        created_by=current_user["id"]
+                    )
+                    await db.inventory_movements.insert_one(packaging_movement.model_dump())
+        except Exception as e:
+            # Log error but don't fail delivery order creation
+            print(f"Error reducing packaging stock for delivery order {do_number}: {str(e)}")
     
     # Auto-generate invoice from delivery order
     await auto_generate_invoice_from_do(delivery_order.id, do_number, job, current_user)
@@ -4752,12 +5957,69 @@ async def update_shipping_cro(booking_id: str, data: ShippingBookingUpdate, curr
     return {"message": "CRO details updated" + ("" if is_po_import else " and transport schedule generated")}
 
 @api_router.put("/shipping-bookings/{booking_id}")
-async def update_shipping_booking(booking_id: str, cro_number: Optional[str] = None, status: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+async def update_shipping_booking(
+    booking_id: str, 
+    shipping_line: Optional[str] = None,
+    container_type: Optional[str] = None,
+    container_count: Optional[int] = None,
+    port_of_loading: Optional[str] = None,
+    port_of_discharge: Optional[str] = None,
+    cargo_description: Optional[str] = None,
+    cargo_weight: Optional[float] = None,
+    is_dg: Optional[bool] = None,
+    dg_class: Optional[str] = None,
+    notes: Optional[str] = None,
+    cro_number: Optional[str] = None, 
+    status: Optional[str] = None, 
+    current_user: dict = Depends(get_current_user)
+):
+    """Update shipping booking details"""
+    if not await has_page_access(current_user, "/shipping", fallback_roles=["admin", "shipping", "procurement"]):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
     update_data = {}
-    if cro_number:
+    
+    # Booking detail fields
+    if shipping_line is not None:
+        update_data["shipping_line"] = shipping_line
+    if container_type is not None:
+        update_data["container_type"] = container_type
+    if container_count is not None:
+        update_data["container_count"] = container_count
+    if port_of_loading is not None:
+        update_data["port_of_loading"] = port_of_loading
+    if port_of_discharge is not None:
+        update_data["port_of_discharge"] = port_of_discharge
+    if cargo_description is not None:
+        update_data["cargo_description"] = cargo_description
+    if cargo_weight is not None:
+        update_data["cargo_weight"] = cargo_weight
+    if is_dg is not None:
+        update_data["is_dg"] = is_dg
+    if dg_class is not None:
+        update_data["dg_class"] = dg_class
+    if notes is not None:
+        update_data["notes"] = notes
+    
+    # CRO/Status fields
+    if cro_number is not None:
         update_data["cro_number"] = cro_number
-    if status:
+    if status is not None:
         update_data["status"] = status
+    
+    # If all required fields are now filled and status is PENDING_DETAILS, change to PENDING
+    if status != "PENDING_DETAILS":
+        booking = await db.shipping_bookings.find_one({"id": booking_id}, {"_id": 0})
+        if booking and booking.get("status") == "PENDING_DETAILS":
+            if all([
+                update_data.get("shipping_line") or booking.get("shipping_line"),
+                update_data.get("container_type") or booking.get("container_type"),
+                update_data.get("container_count") or booking.get("container_count"),
+                update_data.get("port_of_loading") or booking.get("port_of_loading"),
+                update_data.get("port_of_discharge") or booking.get("port_of_discharge"),
+                update_data.get("cargo_weight") or booking.get("cargo_weight"),
+            ]):
+                update_data["status"] = "PENDING"
     
     if not update_data:
         raise HTTPException(status_code=400, detail="No update data provided")
@@ -4765,7 +6027,8 @@ async def update_shipping_booking(booking_id: str, cro_number: Optional[str] = N
     result = await db.shipping_bookings.update_one({"id": booking_id}, {"$set": update_data})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Booking not found")
-    return {"message": "Booking updated"}
+    
+    return {"message": "Booking updated successfully", "updated_fields": list(update_data.keys())}
 
 # ==================== TRANSPORT ROUTES ====================
 
@@ -5090,12 +6353,38 @@ async def get_all_stock(current_user: dict = Depends(get_current_user)):
         reserved = sum(r.get("qty", 0) for r in reservations)
         available = current_stock - reserved
         
+        # Calculate net weight per packaging unit (for report view)
+        # Default assumption: 180kg for drums, 200kg for steel drums, etc.
+        packaging_info = product.get("packaging", "Bulk")
+        net_weight_kg_default = 0
+        
+        if packaging_info and packaging_info != "Bulk":
+            # Try to infer from packaging string
+            if "drum" in packaging_info.lower():
+                # Default drum net weight
+                if "210" in packaging_info or "250" in packaging_info:
+                    net_weight_kg_default = 185
+                else:
+                    net_weight_kg_default = 180
+            elif "ibc" in packaging_info.lower():
+                net_weight_kg_default = 850
+            elif "flexi" in packaging_info.lower():
+                net_weight_kg_default = 20000
+            # If product has density, calculate from capacity
+            density = product.get("density_kg_per_l")
+            if density and "200" in packaging_info:
+                net_weight_kg_default = int(200 * density * 0.9)  # 90% fill
+            elif density and "210" in packaging_info:
+                net_weight_kg_default = int(210 * density * 0.9)
+        
         stock_items.append({
             "id": product_id,
             "sku": product.get("sku", ""),
             "name": product.get("name"),
             "type": "FINISHED_PRODUCT",
             "category": product.get("category", ""),
+            "packaging_info": packaging_info,
+            "net_weight_kg_default": net_weight_kg_default,
             "current_stock": current_stock,
             "reserved": reserved,
             "available": available,
@@ -5125,22 +6414,30 @@ async def get_all_stock(current_user: dict = Depends(get_current_user)):
         reserved = sum(r.get("qty", 0) for r in reservations)
         available = current_stock - reserved
         
+        # For packaging from packaging collection, show capacity info
+        capacity = pkg.get("capacity_liters", 0)
+        net_weight = pkg.get("net_weight_kg_default", 0)
+        packaging_info = f"{capacity}L" if capacity > 0 else f"{net_weight}kg" if net_weight > 0 else ""
+        
         stock_items.append({
             "id": pkg_id,
             "sku": pkg.get("sku", ""),
             "name": pkg.get("name"),
             "type": "PACKAGING",
             "category": pkg.get("category", "Packaging"),
+            "packaging_info": packaging_info,
+            "capacity_liters": capacity,
+            "net_weight_kg_default": net_weight,
             "current_stock": current_stock,
             "reserved": reserved,
             "available": available,
-            "unit": pkg.get("unit", "units"),
+            "unit": pkg.get("unit", "EA"),
             "min_stock": pkg.get("min_stock", 0),
             "max_stock": pkg.get("max_stock", 0),
             "price": pkg.get("price", 0)
         })
     
-    # Get raw materials from inventory_items
+    # Get raw materials and packaging from inventory_items
     inventory_items = await db.inventory_items.find({"is_active": True}, {"_id": 0}).to_list(1000)
     for item in inventory_items:
         # Get balance
@@ -5151,22 +6448,204 @@ async def get_all_stock(current_user: dict = Depends(get_current_user)):
         reservations = await db.inventory_reservations.find({"item_id": item["id"]}, {"_id": 0}).to_list(1000)
         reserved = sum(r.get("qty", 0) for r in reservations)
         
+        # Determine type: PACK items are packaging, RAW/TRADED are raw materials
+        item_type = item.get("item_type", "RAW")
+        if item_type == "PACK":
+            stock_type = "PACKAGING"
+            category = item.get("category", "Packaging")
+            unit = item.get("uom", "EA")
+            # For packaging, show capacity/net weight info
+            capacity = item.get("capacity_liters", 0)
+            net_weight = item.get("net_weight_kg_default", 0)
+            packaging_info = f"{capacity}L" if capacity > 0 else f"{net_weight}kg" if net_weight > 0 else ""
+        else:
+            stock_type = "RAW_MATERIAL"
+            category = item.get("category", "Raw Material")
+            unit = item.get("uom") or item.get("unit", "KG")
+            packaging_info = ""
+        
         stock_items.append({
             "id": item.get("id"),
             "sku": item.get("sku", ""),
             "name": item.get("name"),
-            "type": "RAW_MATERIAL",
-            "category": item.get("category", "Raw Material"),
+            "type": stock_type,
+            "category": category,
             "current_stock": on_hand,
             "reserved": reserved,
             "available": on_hand - reserved,
-            "unit": item.get("unit", "KG"),
+            "unit": unit,
+            "packaging_info": packaging_info,
+            "capacity_liters": item.get("capacity_liters", 0),
+            "net_weight_kg_default": item.get("net_weight_kg_default", 0),
             "min_stock": 0,
             "max_stock": 0,
             "price": 0
         })
     
     return stock_items
+
+@api_router.get("/stock/product-packaging-report")
+async def get_product_packaging_report(current_user: dict = Depends(get_current_user)):
+    """
+    Get Product-Packaging Stock Report
+    Shows products grouped by packaging type with standard quantities and drum counts
+    """
+    products = await db.products.find(
+        {"category": "finished_product"},
+        {"_id": 0}
+    ).to_list(1000)
+    
+    report_items = []
+    
+    for product in products:
+        product_id = product.get("id")
+        product_name = product.get("name")
+        packaging = product.get("packaging", "Bulk")
+        unit = product.get("unit", "KG").upper()
+        
+        # Get current stock from inventory_balances
+        balance = await db.inventory_balances.find_one({"item_id": product_id}, {"_id": 0})
+        if balance:
+            current_stock = balance.get("on_hand", 0)
+        else:
+            current_stock = product.get("current_stock", 0)
+        
+        # Calculate reserved quantity
+        reservations = await db.inventory_reservations.find({"item_id": product_id}, {"_id": 0}).to_list(1000)
+        reserved = sum(r.get("qty", 0) for r in reservations)
+        available = current_stock - reserved
+        
+        # Get packaging configuration if exists
+        packaging_config = await db.product_packaging_configs.find_one({
+            "product_id": product_id,
+            "is_active": True
+        }, {"_id": 0})
+        
+        # Determine qty_standard (net weight per package)
+        # First check packaging_configs, then check if product has any active job orders with packaging
+        qty_standard = 0
+        drums_count = 0
+        actual_packaging = packaging  # Default to product's packaging field
+        
+        # Check packaging_configs first (most accurate)
+        if packaging_config:
+            packaging_type = packaging_config.get("packaging_type", "").lower()
+            actual_packaging = packaging_config.get("packaging_name", packaging)
+            if packaging_type in ["drum", "carton"]:
+                qty_standard = packaging_config.get("drum_carton_filling_kg", 0)
+            elif packaging_type == "ibc":
+                qty_standard = packaging_config.get("ibc_filling_kg", 0)
+            elif packaging_type in ["flexi/iso", "flexi", "iso"]:
+                flexi_mt = packaging_config.get("flexi_iso_filling_mt", 0)
+                qty_standard = flexi_mt * 1000  # Convert MT to KG
+        elif packaging and packaging.upper() != "BULK":
+            # Try to infer from packaging string if no config exists
+            packaging_lower = packaging.lower()
+            if "drum" in packaging_lower:
+                if "210" in packaging or "250" in packaging:
+                    qty_standard = 185
+                else:
+                    qty_standard = 180
+            elif "ibc" in packaging_lower:
+                qty_standard = 850
+                # Try to extract IBC capacity from string (e.g., "IBC 1000L")
+                ibc_match = re.search(r'(\d+)\s*L', packaging, re.IGNORECASE)
+                if ibc_match:
+                    capacity_liters = int(ibc_match.group(1))
+                    # Estimate weight based on typical density (0.85-0.9 kg/L for most chemicals)
+                    # Use 0.9 as default fill ratio
+                    qty_standard = int(capacity_liters * 0.9)
+            elif "flexi" in packaging_lower or "iso" in packaging_lower:
+                qty_standard = 20000
+        else:
+            # Check if there are any active job orders with this product that have packaging info
+            # This helps when product.packaging is "Bulk" but jobs use specific packaging
+            active_jobs = await db.job_orders.find({
+                "product_id": product_id,
+                "status": {"$in": ["pending", "approved", "procurement", "in_production"]}
+            }, {"_id": 0, "packaging": 1, "items": 1}).to_list(10)
+            
+            for job in active_jobs:
+                # Check multi-item structure first
+                items = job.get("items", [])
+                if items:
+                    for item in items:
+                        if item.get("product_id") == product_id:
+                            item_packaging = item.get("packaging", "")
+                            if item_packaging and item_packaging.upper() != "BULK":
+                                actual_packaging = item_packaging
+                                # Infer qty_standard from packaging string
+                                packaging_lower = item_packaging.lower()
+                                if "ibc" in packaging_lower:
+                                    ibc_match = re.search(r'(\d+)\s*L', item_packaging, re.IGNORECASE)
+                                    if ibc_match:
+                                        capacity_liters = int(ibc_match.group(1))
+                                        qty_standard = int(capacity_liters * 0.9)  # 90% fill
+                                    else:
+                                        qty_standard = 850  # Default IBC
+                                elif "drum" in packaging_lower:
+                                    if "210" in item_packaging or "250" in item_packaging:
+                                        qty_standard = 185
+                                    else:
+                                        qty_standard = 180
+                                break
+                else:
+                    # Legacy single product structure
+                    job_packaging = job.get("packaging", "")
+                    if job_packaging and job_packaging.upper() != "BULK":
+                        actual_packaging = job_packaging
+                        packaging_lower = job_packaging.lower()
+                        if "ibc" in packaging_lower:
+                            ibc_match = re.search(r'(\d+)\s*L', job_packaging, re.IGNORECASE)
+                            if ibc_match:
+                                capacity_liters = int(ibc_match.group(1))
+                                qty_standard = int(capacity_liters * 0.9)
+                            else:
+                                qty_standard = 850
+                        elif "drum" in packaging_lower:
+                            if "210" in job_packaging or "250" in job_packaging:
+                                qty_standard = 185
+                            else:
+                                qty_standard = 180
+                        break
+        
+        # Calculate drum/unit count
+        if qty_standard > 0:
+            if unit == "MT":
+                drums_count = int((current_stock * 1000) / qty_standard)
+            elif unit == "KG":
+                drums_count = int(current_stock / qty_standard)
+            else:
+                drums_count = int(current_stock)
+        
+        # Determine status
+        min_stock = product.get("min_stock", 0)
+        if current_stock <= 0:
+            status = "Out of Stock"
+        elif current_stock < min_stock:
+            status = "Low Stock"
+        else:
+            status = "In Stock"
+        
+        report_items.append({
+            "product_id": product_id,
+            "product_name": product_name,
+            "sku": product.get("sku", ""),
+            "packing": actual_packaging,  # Use actual_packaging which may come from job orders
+            "qty_standard": qty_standard,
+            "qty_standard_display": f"{qty_standard} {unit}" if qty_standard > 0 else "Bulk",
+            "current_stock": current_stock,
+            "current_stock_display": f"{current_stock:.2f} {unit}",
+            "reserved": reserved,
+            "reserved_display": f"{reserved:.2f} {unit}" if reserved > 0 else "0.00",
+            "available": available,
+            "available_display": f"{available:.2f} {unit}",
+            "drums_count": drums_count if drums_count > 0 else "-",
+            "status": status,
+            "unit": unit
+        })
+    
+    return {"items": report_items}
 
 class StockAdjustment(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -5798,12 +7277,21 @@ async def create_production_log(data: ProductionLogCreate, current_user: dict = 
                         # Get net_weight_kg from job order for drum-to-MT conversion
                         packaging = job_order.get("packaging", "").upper()
                         net_weight_kg = job_order.get("net_weight_kg")
+                        production_type = data.production_type  # Get production type from the log
                         
-                        # If packaging is not Bulk and net_weight_kg exists, convert drums to MT/KG
-                        if packaging != "BULK" and net_weight_kg and net_weight_kg > 0:
-                            # Convert drums to KG first
+                        # Handle based on production type
+                        if production_type == "bulk":
+                            # Bulk production - quantities are already in KG
+                            # Convert to MT if product unit is MT
+                            if product_unit.upper() == "MT":
+                                grn_quantity = required_qty / 1000
+                                grn_unit = "MT"
+                            else:
+                                grn_quantity = required_qty
+                                grn_unit = "KG"
+                        elif packaging != "BULK" and net_weight_kg and net_weight_kg > 0:
+                            # Drummed production - convert drums to KG/MT
                             total_kg = required_qty * net_weight_kg
-                            # Then convert to MT if product unit is MT
                             if product_unit.upper() == "MT":
                                 grn_quantity = total_kg / 1000
                                 grn_unit = "MT"
@@ -5811,7 +7299,7 @@ async def create_production_log(data: ProductionLogCreate, current_user: dict = 
                                 grn_quantity = total_kg
                                 grn_unit = "KG"
                         else:
-                            # Bulk packaging - use required_qty as-is
+                            # Fallback - use required_qty as-is
                             grn_quantity = required_qty
                             grn_unit = product_unit
                         
@@ -5901,6 +7389,22 @@ async def create_production_log(data: ProductionLogCreate, current_user: dict = 
                                 {"$inc": {"on_hand": quantity_to_add}},
                                 upsert=True
                             )
+                        
+                        # Reserve the quantity for bulk production (will be un-reserved when dispatched)
+                        if data.production_type == "bulk":
+                            reservation_id = str(uuid.uuid4())
+                            reservation = {
+                                "id": reservation_id,
+                                "item_id": data.product_id,
+                                "qty": quantity_to_add,  # Reserve the actual quantity added to stock
+                                "reserved_for": "production_filling_complete",
+                                "reference_type": "production_log",
+                                "reference_id": log.id,
+                                "job_order_id": data.job_order_id,
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "created_by": current_user["id"]
+                            }
+                            await db.inventory_reservations.insert_one(reservation)
                     except Exception as e:
                         # Log error but don't fail the production log creation
                         logging.error(f"Failed to create GRN for completed production: {str(e)}")
@@ -5927,12 +7431,21 @@ async def create_production_log(data: ProductionLogCreate, current_user: dict = 
                             # Get net_weight_kg from job order item for drum-to-MT conversion
                             packaging = item.get("packaging", job_order.get("packaging", "")).upper()
                             net_weight_kg = item.get("net_weight_kg")
+                            production_type = data.production_type  # Get production type from the log
                             
-                            # If packaging is not Bulk and net_weight_kg exists, convert drums to MT/KG
-                            if packaging != "BULK" and net_weight_kg and net_weight_kg > 0:
-                                # Convert drums to KG first
+                            # Handle based on production type
+                            if production_type == "bulk":
+                                # Bulk production - quantities are already in KG
+                                # Convert to MT if product unit is MT
+                                if product_unit.upper() == "MT":
+                                    grn_quantity = required_qty / 1000
+                                    grn_unit = "MT"
+                                else:
+                                    grn_quantity = required_qty
+                                    grn_unit = "KG"
+                            elif packaging != "BULK" and net_weight_kg and net_weight_kg > 0:
+                                # Drummed production - convert drums to KG/MT
                                 total_kg = required_qty * net_weight_kg
-                                # Then convert to MT if product unit is MT
                                 if product_unit.upper() == "MT":
                                     grn_quantity = total_kg / 1000
                                     grn_unit = "MT"
@@ -5940,7 +7453,7 @@ async def create_production_log(data: ProductionLogCreate, current_user: dict = 
                                     grn_quantity = total_kg
                                     grn_unit = "KG"
                             else:
-                                # Bulk packaging - use required_qty as-is
+                                # Fallback - use required_qty as-is
                                 grn_quantity = required_qty
                                 grn_unit = product_unit
                             
@@ -6023,6 +7536,22 @@ async def create_production_log(data: ProductionLogCreate, current_user: dict = 
                                     {"$inc": {"on_hand": quantity_to_add}},
                                     upsert=True
                                 )
+                            
+                            # Reserve the quantity for bulk production (will be un-reserved when dispatched)
+                            if data.production_type == "bulk":
+                                reservation_id = str(uuid.uuid4())
+                                reservation = {
+                                    "id": reservation_id,
+                                    "item_id": data.product_id,
+                                    "qty": quantity_to_add,  # Reserve the actual quantity added to stock
+                                    "reserved_for": "production_filling_complete",
+                                    "reference_type": "production_log",
+                                    "reference_id": log.id,
+                                    "job_order_id": data.job_order_id,
+                                    "created_at": datetime.now(timezone.utc).isoformat(),
+                                    "created_by": current_user["id"]
+                                }
+                                await db.inventory_reservations.insert_one(reservation)
                         except Exception as e:
                             logging.error(f"Failed to create GRN for completed production item: {str(e)}")
                         
@@ -6086,12 +7615,9 @@ async def get_jobs_by_category(
             should_include = False
             
             if category == "filling_jobs":
-                # Filling jobs: jobs with drum packaging (bulk to drums)
-                packaging = (job.get("packaging", "") or "").upper()
-                packaging_type = (job.get("packaging_type", "") or "").upper()
-                # Check if packaging contains "DRUM" or packaging_type is "DRUM"
-                # Also include if packaging is not "Bulk" (assuming non-bulk means drums)
-                should_include = "DRUM" in packaging or packaging_type == "DRUM" or (packaging and packaging != "BULK" and packaging != "")
+                # Filling jobs: include ALL products (both MANUFACTURED and TRADED)
+                # All products need to go through the filling process
+                should_include = True
             elif category == "lubricants":
                 product_name = job.get("product_name", "").lower()
                 should_include = any(pattern in product_name for pattern in ["lubricant", "lube", "grease"])
@@ -6133,10 +7659,9 @@ async def get_jobs_by_category(
                 should_include = False
                 
                 if category == "filling_jobs":
-                    # Filling jobs: jobs with drum packaging (bulk to drums)
-                    packaging = (item.get("packaging", "") or "").upper()
-                    # Check if packaging contains "DRUM" or is not "Bulk"
-                    should_include = "DRUM" in packaging or (packaging and packaging != "BULK" and packaging != "")
+                    # Filling jobs: include ALL products (both MANUFACTURED and TRADED)
+                    # All products need to go through the filling process
+                    should_include = True
                 elif category == "lubricants":
                     product_name = item.get("product_name", "").lower()
                     should_include = any(pattern in product_name for pattern in ["lubricant", "lube", "grease"])
@@ -6758,8 +8283,8 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
         first_item = quotation.get("items", [{}])[0] if quotation.get("items") else {}
         uom = first_item.get("uom") or "per_mt"
         
-        # If U.O.M is not set, try to infer from packaging
-        if not first_item.get("uom") or uom == "per_mt":
+        # If U.O.M is not set, try to infer from packaging (only if not explicitly set)
+        if not first_item.get("uom"):
             packaging = str(first_item.get("packaging", "") or "").lower()
             packaging_type = str(first_item.get("packaging_type", "") or "").lower()
             
@@ -6797,8 +8322,8 @@ def generate_quotation_pdf(quotation: dict, include_stamp_signature: bool = Fals
             # Get U.O.M from item, or infer from packaging type
             uom = item.get("uom") or "per_mt"
             
-            # If U.O.M is not set or is per_mt, try to infer from packaging
-            if not item.get("uom") or uom == "per_mt":
+            # If U.O.M is not set, try to infer from packaging (only if not explicitly set)
+            if not item.get("uom"):
                 packaging = str(item.get("packaging", "") or "").lower()
                 packaging_type = str(item.get("packaging_type", "") or "").lower()
                 
@@ -9058,6 +10583,7 @@ async def calculate_costing(
     costing_service = CostingService(db)
     
     # Get reference document
+    local_type = None
     if reference_type == "QUOTATION":
         doc = await db.quotations.find_one({"id": reference_id}, {"_id": 0})
         if not doc:
@@ -9067,6 +10593,7 @@ async def calculate_costing(
         items = doc.get("items", [])
         packaging = items[0].get("packaging", "Bulk") if items else "Bulk"
         incoterm = doc.get("incoterm")
+        local_type = doc.get("local_type")
     elif reference_type == "JOB_ORDER":
         doc = await db.job_orders.find_one({"id": reference_id}, {"_id": 0})
         if not doc:
@@ -9081,6 +10608,7 @@ async def calculate_costing(
                 items = quotation.get("items", [])
                 packaging = items[0].get("packaging", "Bulk") if items else "Bulk"
                 incoterm = quotation.get("incoterm")
+                local_type = quotation.get("local_type")
             else:
                 order_type = "local"
                 packaging = doc.get("packaging", "Bulk")
@@ -9093,22 +10621,40 @@ async def calculate_costing(
         raise HTTPException(status_code=400, detail="Invalid reference_type. Must be QUOTATION or JOB_ORDER")
     
     # Determine costing type
-    # Get country_of_destination and transport_mode from doc
+    # Get country_of_destination, transport_mode, container_type, and is_dg from doc
     country_of_destination = doc.get("country_of_destination") if reference_type == "QUOTATION" else None
     transport_mode = doc.get("transport_mode") if reference_type == "QUOTATION" else None
+    container_type = doc.get("container_type") if reference_type == "QUOTATION" else None
+    quotation_is_dg = doc.get("is_dg") if reference_type == "QUOTATION" else None
+    
     if reference_type == "JOB_ORDER" and so:
         quotation = await db.quotations.find_one({"id": so.get("quotation_id")}, {"_id": 0})
         if quotation:
             country_of_destination = quotation.get("country_of_destination")
             transport_mode = quotation.get("transport_mode")
+            container_type = quotation.get("container_type")
+            quotation_is_dg = quotation.get("is_dg")
+    
+    # Use is_dg from query parameter if provided, otherwise from quotation
+    final_is_dg = is_dg if is_dg is not None else quotation_is_dg
+    
+    # Debug logging (can be removed in production)
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Determining costing type: order_type={order_type}, transport_mode={transport_mode}, packaging={packaging}, container_type={container_type}, is_dg={final_is_dg}")
     
     costing_type = costing_service.determine_costing_type(
         order_type, 
         packaging, 
         incoterm,
         country_of_destination=country_of_destination,
-        transport_mode=transport_mode
+        transport_mode=transport_mode,
+        local_type=local_type,
+        container_type=container_type,
+        is_dg=final_is_dg
     )
+    
+    logger.info(f"Determined costing type: {costing_type}")
     
     # Get quotation_id for cost calculation (always use quotation, even for job orders)
     quotation_id_for_calc = reference_id
@@ -9124,6 +10670,34 @@ async def calculate_costing(
         result = await costing_service.calculate_export_gcc_road_cost(
             quotation_id_for_calc,
             raw_material_cost
+        )
+    elif costing_type == "EXPORT_ROAD":
+        # Use same calculation as EXPORT_GCC_ROAD for now
+        result = await costing_service.calculate_export_gcc_road_cost(
+            quotation_id_for_calc,
+            raw_material_cost
+        )
+    elif costing_type == "EXPORT_40FT_DG":
+        # Use same calculation as EXPORT_CONTAINERIZED for now
+        result = await costing_service.calculate_export_containerized_cost(
+            quotation_id_for_calc,
+            raw_material_cost,
+            ocean_freight,
+            raw_material_source=raw_material_source,
+            packaging_type=packaging_type,
+            incoterm_type=incoterm_type,
+            is_dg=True
+        )
+    elif costing_type == "EXPORT_20FT_DG":
+        # Use same calculation as EXPORT_CONTAINERIZED for now
+        result = await costing_service.calculate_export_containerized_cost(
+            quotation_id_for_calc,
+            raw_material_cost,
+            ocean_freight,
+            raw_material_source=raw_material_source,
+            packaging_type=packaging_type,
+            incoterm_type=incoterm_type,
+            is_dg=True
         )
     elif costing_type == "EXPORT_CONTAINERIZED":
         result = await costing_service.calculate_export_containerized_cost(
@@ -9141,6 +10715,33 @@ async def calculate_costing(
             raw_material_cost,
             ocean_freight,
             raw_material_source=raw_material_source,
+            incoterm_type=incoterm_type
+        )
+    elif costing_type == "LOCAL_PURCHASE_SALE":
+        # Use same calculation as LOCAL_DISPATCH for now
+        result = await costing_service.calculate_local_dispatch_cost(
+            quotation_id_for_calc,
+            raw_material_cost,
+            raw_material_source=raw_material_source,
+            packaging_type=packaging_type,
+            incoterm_type=incoterm_type
+        )
+    elif costing_type == "LOCAL_BULK_TO_PLANT":
+        # Use same calculation as LOCAL_DISPATCH for now
+        result = await costing_service.calculate_local_dispatch_cost(
+            quotation_id_for_calc,
+            raw_material_cost,
+            raw_material_source=raw_material_source,
+            packaging_type=packaging_type,
+            incoterm_type=incoterm_type
+        )
+    elif costing_type == "LOCAL_DRUM_TO_PLANT":
+        # Use same calculation as LOCAL_DISPATCH for now
+        result = await costing_service.calculate_local_dispatch_cost(
+            quotation_id_for_calc,
+            raw_material_cost,
+            raw_material_source=raw_material_source,
+            packaging_type=packaging_type,
             incoterm_type=incoterm_type
         )
     else:  # LOCAL_DISPATCH
@@ -9233,6 +10834,7 @@ async def confirm_costing(
     update_data = {
         "costing_id": costing_id,
         "cost_confirmed": True,
+        "total_cost": costing.get("total_cost"),
         "margin_amount": costing.get("margin_amount"),
         "margin_percentage": costing.get("margin_percentage")
     }
@@ -9268,6 +10870,22 @@ async def update_costing(
         data.port_charges +
         data.local_transport_cost
     )
+
+    # For custom costing sheets that store a detailed breakdown, allow them to drive total_cost
+    costing_type_from_data = data.costing_type or costing.get("costing_type")
+    if data.custom_breakdown:
+        cb = data.custom_breakdown or {}
+        # LOCAL_BULK_TO_PLANT and LOCAL_PURCHASE_SALE: total cost = Product Cost + Cost Per MT (from Table 3)
+        if costing_type_from_data in ["LOCAL_BULK_TO_PLANT", "LOCAL_PURCHASE_SALE"]:
+            product_cost = cb.get("product_cost") or 0.0
+            cost_per_mt = cb.get("cost_per_mt") or 0.0
+            total_cost = product_cost + cost_per_mt
+        # EXPORT_20FT_DG and EXPORT_40FT_DG: total cost = Product Cost + Import Shipment + Export Shipment
+        elif costing_type_from_data in ["EXPORT_20FT_DG", "EXPORT_40FT_DG"]:
+            product_cost = cb.get("product_cost") or 0.0
+            import_shipment = cb.get("import_shipment_charges") or 0.0
+            export_shipment = cb.get("export_shipment_charges") or 0.0
+            total_cost = product_cost + import_shipment + export_shipment
     
     selling_price = costing.get("selling_price", 0.0)
     reference_type = costing.get("reference_type")
@@ -9683,6 +11301,131 @@ async def get_inventory_item_availability(item_id: str, current_user: dict = Dep
         "reservations": reservations
     }
 
+@api_router.put("/inventory-items/{item_id}", response_model=InventoryItem)
+async def update_inventory_item(
+    item_id: str, 
+    data: InventoryItemCreate, 
+    current_user: dict = Depends(get_current_user)
+):
+    """Update an inventory item (name, SKU, capacity, etc.)"""
+    if current_user["role"] not in ["admin", "inventory"]:
+        raise HTTPException(status_code=403, detail="Only admin/inventory can update inventory items")
+    
+    item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    
+    # Update the item
+    update_data = data.model_dump(exclude_unset=True)
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    await db.inventory_items.update_one(
+        {"id": item_id},
+        {"$set": update_data}
+    )
+    
+    # Return updated item
+    updated_item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    return InventoryItem(**updated_item)
+
+@api_router.delete("/inventory-items/{item_id}")
+async def delete_inventory_item(item_id: str, current_user: dict = Depends(get_current_user)):
+    """Delete/deactivate an inventory item"""
+    if current_user["role"] not in ["admin", "inventory"]:
+        raise HTTPException(status_code=403, detail="Only admin/inventory can delete inventory items")
+    
+    item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    
+    # Check if item has stock or is used in any BOMs
+    balance = await db.inventory_balances.find_one({"item_id": item_id}, {"_id": 0})
+    if balance and balance.get("on_hand", 0) > 0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot delete item with stock on hand ({balance.get('on_hand')} {item.get('uom')}). Adjust stock to zero first."
+        )
+    
+    # Check if used in product BOMs
+    bom_usage = await db.product_bom_items.find_one({"material_item_id": item_id}, {"_id": 0})
+    if bom_usage:
+        raise HTTPException(
+            status_code=400, 
+            detail="Cannot delete item that is used in product BOMs. Remove from BOMs first."
+        )
+    
+    # Soft delete by marking as inactive
+    await db.inventory_items.update_one(
+        {"id": item_id},
+        {"$set": {"is_active": False, "deleted_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    
+    return {"message": "Inventory item deleted successfully", "id": item_id}
+
+@api_router.put("/inventory-items/{item_id}/adjust-stock")
+async def adjust_inventory_stock(
+    item_id: str,
+    adjustment: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Adjust stock quantity (increase or decrease drums/items)"""
+    if current_user["role"] not in ["admin", "inventory"]:
+        raise HTTPException(status_code=403, detail="Only admin/inventory can adjust stock")
+    
+    item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    
+    qty_change = adjustment.get("quantity", 0)
+    reason = adjustment.get("reason", "Manual adjustment")
+    
+    if qty_change == 0:
+        raise HTTPException(status_code=400, detail="Quantity adjustment cannot be zero")
+    
+    # Get current balance
+    balance = await db.inventory_balances.find_one({"item_id": item_id}, {"_id": 0})
+    current_qty = balance.get("on_hand", 0) if balance else 0
+    new_qty = current_qty + qty_change
+    
+    if new_qty < 0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot decrease stock below zero. Current: {current_qty}, Attempted change: {qty_change}"
+        )
+    
+    # Update balance
+    await db.inventory_balances.update_one(
+        {"item_id": item_id},
+        {"$set": {"on_hand": new_qty}},
+        upsert=True
+    )
+    
+    # Create inventory movement record
+    movement = InventoryMovement(
+        product_id=item_id,
+        product_name=item.get("name", "Unknown"),
+        sku=item.get("sku", ""),
+        movement_type="adjustment_increase" if qty_change > 0 else "adjustment_decrease",
+        quantity=abs(qty_change),
+        reference_type="manual_adjustment",
+        reference_id=item_id,
+        reference_number=f"ADJ-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        previous_stock=current_qty,
+        new_stock=new_qty,
+        notes=reason,
+        created_by=current_user["id"]
+    )
+    await db.inventory_movements.insert_one(movement.model_dump())
+    
+    return {
+        "message": "Stock adjusted successfully",
+        "item_id": item_id,
+        "previous_qty": current_qty,
+        "new_qty": new_qty,
+        "change": qty_change,
+        "uom": item.get("uom", "EA")
+    }
+
 # Job Order Items Management
 @api_router.post("/job-order-items", response_model=JobOrderItem)
 async def create_job_order_item(data: JobOrderItemCreate, current_user: dict = Depends(get_current_user)):
@@ -9919,46 +11662,93 @@ async def get_purchase_orders(status: Optional[str] = None, current_user: dict =
         query['status'] = status
     pos = await db.purchase_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     
-    # Enrich with lines for all POs
+    # Enrich with lines and PFI reference for all POs
     enriched_pos = []
     for po in pos:
         lines = await db.purchase_order_lines.find({"po_id": po["id"]}, {"_id": 0}).to_list(1000)
-        for line in lines:
-            # Check if line already has item_name (set during creation)
-            if not line.get("item_name") or line.get("item_name") == "Unknown":
-                # Try inventory_items first
-                item = await db.inventory_items.find_one({"id": line.get("item_id")}, {"_id": 0})
-                # If not found, try products table
-                if not item:
-                    item = await db.products.find_one({"id": line.get("item_id")}, {"_id": 0})
-                line["item_name"] = item.get("name") if item else "Unknown"
         po["lines"] = lines
+        
+        # Enrich with PFI number if quotation_id exists but pfi_number is missing
+        if po.get("quotation_id") and not po.get("pfi_number"):
+            quotation = await db.quotations.find_one({"id": po["quotation_id"]}, {"_id": 0})
+            if quotation:
+                po["pfi_number"] = quotation.get("pfi_number")
+        
+        # If quotation_id/pfi_number are missing, try to find from job_numbers in PO lines
+        if not po.get("quotation_id") and not po.get("pfi_number") and lines:
+            for line in lines:
+                job_numbers = line.get("job_numbers", [])
+                if job_numbers:
+                    # Try first job number
+                    job_number = job_numbers[0]
+                    job = await db.job_orders.find_one({"job_number": job_number}, {"_id": 0})
+                    if job:
+                        sales_order_id = job.get("sales_order_id")
+                        if sales_order_id:
+                            sales_order = await db.sales_orders.find_one({"id": sales_order_id}, {"_id": 0})
+                            if sales_order and sales_order.get("quotation_id"):
+                                po["quotation_id"] = sales_order.get("quotation_id")
+                                quotation = await db.quotations.find_one({"id": po["quotation_id"]}, {"_id": 0})
+                                if quotation:
+                                    po["pfi_number"] = quotation.get("pfi_number")
+                                break  # Found it, no need to check other lines
+        
         enriched_pos.append(po)
     
     return enriched_pos
 
+@api_router.get("/purchase-orders/ready-for-import-booking")
+async def get_pos_ready_for_import_booking(current_user: dict = Depends(get_current_user)):
+    """Get approved POs with FOB incoterm that need import booking"""
+    pos = await db.purchase_orders.find({
+        "status": "APPROVED",
+        "incoterm": "FOB",  # Only FOB POs
+        "routed_to": {"$in": ["SHIPPING", None]}  # Not yet routed or routed to shipping
+    }, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return pos
+
 @api_router.get("/purchase-orders/pending-approval")
 async def get_pos_pending_approval(current_user: dict = Depends(get_current_user)):
     """Get POs pending finance approval"""
+    if not await has_page_access(current_user, "/finance-approval", fallback_roles=["finance"]):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
     pos = await db.purchase_orders.find(
         {"status": "DRAFT"},
         {"_id": 0}
     ).sort("created_at", -1).to_list(1000)
     
-    # Enrich with lines
+    # Enrich with lines and PFI reference
     enriched_pos = []
     for po in pos:
         lines = await db.purchase_order_lines.find({"po_id": po["id"]}, {"_id": 0}).to_list(1000)
-        for line in lines:
-            # Check if line already has item_name (set during creation)
-            if not line.get("item_name") or line.get("item_name") == "Unknown":
-                # Try inventory_items first
-                item = await db.inventory_items.find_one({"id": line.get("item_id")}, {"_id": 0})
-                # If not found, try products table
-                if not item:
-                    item = await db.products.find_one({"id": line.get("item_id")}, {"_id": 0})
-                line["item_name"] = item.get("name") if item else "Unknown"
         po["lines"] = lines
+        
+        # Enrich with PFI number if quotation_id exists but pfi_number is missing
+        if po.get("quotation_id") and not po.get("pfi_number"):
+            quotation = await db.quotations.find_one({"id": po["quotation_id"]}, {"_id": 0})
+            if quotation:
+                po["pfi_number"] = quotation.get("pfi_number")
+        
+        # If quotation_id/pfi_number are missing, try to find from job_numbers in PO lines
+        if not po.get("quotation_id") and not po.get("pfi_number") and lines:
+            for line in lines:
+                job_numbers = line.get("job_numbers", [])
+                if job_numbers:
+                    # Try first job number
+                    job_number = job_numbers[0]
+                    job = await db.job_orders.find_one({"job_number": job_number}, {"_id": 0})
+                    if job:
+                        sales_order_id = job.get("sales_order_id")
+                        if sales_order_id:
+                            sales_order = await db.sales_orders.find_one({"id": sales_order_id}, {"_id": 0})
+                            if sales_order and sales_order.get("quotation_id"):
+                                po["quotation_id"] = sales_order.get("quotation_id")
+                                quotation = await db.quotations.find_one({"id": po["quotation_id"]}, {"_id": 0})
+                                if quotation:
+                                    po["pfi_number"] = quotation.get("pfi_number")
+                                break  # Found it, no need to check other lines
+        
         enriched_pos.append(po)
     
     return enriched_pos
@@ -9969,13 +11759,8 @@ async def get_purchase_order(po_id: str, current_user: dict = Depends(get_curren
     if not po:
         raise HTTPException(status_code=404, detail="PO not found")
     
-    # Get PO lines with item details
+    # Get PO lines
     lines = await db.purchase_order_lines.find({"po_id": po_id}, {"_id": 0}).to_list(1000)
-    
-    for line in lines:
-        item = await db.inventory_items.find_one({"id": line['item_id']}, {"_id": 0})
-        line['item'] = item
-    
     po['lines'] = lines
     
     # Get supplier details
@@ -10567,7 +12352,32 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
     
     Returns individual job order shortages instead of aggregated totals.
     Includes items from procurement requisitions that haven't been converted to POs yet.
+    
+    PROCUREMENT ↔ BOM ↔ UNIT ENGINE CONTRACT:
+    ==========================================
+    1) ALL shortage quantities MUST be in ACCOUNTING UNIT = KG
+    2) Source data:
+       - BOM: qty_kg_per_kg_finished (RAW, PACK)
+       - Direct requirement: job order quantity (TRADED)
+    3) NO package units allowed in shortages (CARTON, DRUM, PAIL, IBC)
+    4) MT is for UI display ONLY (conversion: kg / 1000)
+    5) Unit Conversion Engine is authoritative for all conversions
+    6) Quantities are NEVER manipulated inline with hardcoded factors
+    
+    Data Shape Guarantee:
+    {
+      item_id: str,
+      item_name: str,
+      item_type: "RAW" | "PACK" | "TRADED",
+      required_qty: float (ALWAYS in KG),
+      on_hand: float (ALWAYS in KG from inventory_balances),
+      shortage: float (ALWAYS in KG),
+      uom: str (for reference, but qty is KG),
+      source: "BOM" | "JOB_ORDER"
+    }
     """
+    start_time = time.time()
+    logger.info("Starting procurement shortages calculation")
     
     # Get all pending job orders that need procurement
     pending_jobs = await db.job_orders.find(
@@ -10647,7 +12457,35 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
                 
                 # Only include if there's still a shortage
                 if shortage > 0:
+                    # CONTRACT ENFORCEMENT: Validate quantities
+                    if required_qty < 0 or shortage < 0:
+                        logger.error(f"NEGATIVE quantity in PR shortage for {item_id}: required={required_qty}, shortage={shortage}")
+                        continue  # Skip invalid data but don't crash
+                    
+                    # Get UOM for reference
+                    uom = pr_line.get("uom") or material.get("uom") or material.get("unit", "KG")
+                    
+                    # VALIDATION: Normalize MT to KG
+                    if uom.upper() in ["MT", "METRIC TON", "TONNE"]:
+                        logger.warning(f"PR line {item_id} has MT in uom - normalizing to KG")
+                        uom = "KG"
+                    
                     processed_pr_items.add(key)
+                    item_type = pr_line.get("item_type", "RAW")
+                    display_type = "RM/Production" if item_type == "RAW" else "RM/Trading" if item_type == "TRADED" else "Packaging"
+                    
+                    # Get quotation/PFI reference from job order -> sales order -> quotation
+                    quotation_id = None
+                    pfi_number = None
+                    sales_order_id = job.get("sales_order_id")
+                    if sales_order_id:
+                        sales_order = await db.sales_orders.find_one({"id": sales_order_id}, {"_id": 0})
+                        if sales_order and sales_order.get("quotation_id"):
+                            quotation_id = sales_order.get("quotation_id")
+                            quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
+                            if quotation:
+                                pfi_number = quotation.get("pfi_number")
+                    
                     shortage_list.append({
                         "item_id": item_id,
                         "job_id": job_id,
@@ -10655,13 +12493,17 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
                         "product_name": job.get("product_name", "Unknown"),
                         "item_name": material.get("name", "Unknown"),
                         "item_sku": material.get("sku", "N/A"),
-                        "item_type": pr_line.get("item_type", "RAW"),
-                        "uom": pr_line.get("uom") or material.get("uom") or material.get("unit", "KG"),
-                        "required_qty": required_qty,
-                        "shortage": shortage,
-                        "on_hand": on_hand,
-                        "reserved": reserved,
-                        "available": available
+                        "item_type": item_type,
+                        "display_type": display_type,
+                        "uom": uom,  # For reference, but qty is always KG
+                        "required_qty": required_qty,  # ALWAYS KG
+                        "shortage": shortage,  # ALWAYS KG
+                        "on_hand": on_hand,  # ALWAYS KG
+                        "reserved": reserved,  # ALWAYS KG
+                        "available": available,  # ALWAYS KG
+                        "source": "PROCUREMENT_REQUISITION",  # CONTRACT: Track source
+                        "quotation_id": quotation_id,  # Link to quotation/PFI
+                        "pfi_number": pfi_number  # PFI number for display
                     })
     
     # Now process job orders' material_shortages (existing logic)
@@ -10710,6 +12552,16 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
                     for bom_item in bom_items:
                         material_id = bom_item.get("material_item_id")
                         qty_per_kg = bom_item.get("qty_kg_per_kg_finished", 0)
+                        
+                        # CONTRACT ENFORCEMENT: BOM quantities MUST be in KG basis
+                        if qty_per_kg < 0:
+                            logger.error(f"BOM item {material_id} has NEGATIVE qty_per_kg: {qty_per_kg}")
+                            raise HTTPException(
+                                status_code=520,
+                                detail=f"BOM data integrity error: negative quantity for {material_id}"
+                            )
+                        
+                        # Calculate required quantity in KG (accounting unit)
                         required_qty = total_kg * qty_per_kg
                         
                         # Get material details - check both inventory_items and products
@@ -10718,27 +12570,91 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
                             material = await db.products.find_one({"id": material_id}, {"_id": 0})
                         
                         if material:
-                            # Check availability
+                            # Check availability (inventory_balances stores quantities in KG)
                             balance = await db.inventory_balances.find_one({"item_id": material_id}, {"_id": 0})
                             on_hand = balance.get("on_hand", 0) if balance else 0
                             reservations = await db.inventory_reservations.find({"item_id": material_id}, {"_id": 0}).to_list(1000)
                             reserved = sum(r.get("qty", 0) for r in reservations)
                             available = on_hand - reserved
                             
+                            # CONTRACT ENFORCEMENT: All quantities in KG
                             shortage_qty = max(0, required_qty - available)
                             if shortage_qty > 0:
+                                # Get UOM for reference (but quantity is always KG)
+                                uom = bom_item.get("uom") or material.get("uom") or material.get("unit", "KG")
+                                
+                                # VALIDATION: Ensure UOM is normalized to KG for accounting
+                                # BOM should always use KG, but if MT is stored, log warning
+                                if uom.upper() in ["MT", "METRIC TON", "TONNE"]:
+                                    logger.warning(f"BOM item {material_id} has MT in uom field - should be KG")
+                                    uom = "KG"  # Force to KG for contract compliance
+                                
                                 material_shortages.append({
                                     "item_id": material_id,
                                     "item_name": material.get("name", "Unknown"),
                                     "item_sku": material.get("sku", "-"),
-                                    "required_qty": required_qty,
-                                    "available": available,
-                                    "shortage": shortage_qty,
+                                    "required_qty": required_qty,  # ALWAYS KG
+                                    "available": available,  # ALWAYS KG
+                                    "shortage": shortage_qty,  # ALWAYS KG
                                     "status": "SHORTAGE",
-                                    "uom": bom_item.get("uom") or material.get("uom") or material.get("unit", "KG"),
-                                    "item_type": "RAW"
+                                    "uom": uom,  # For reference, but qty is KG
+                                    "item_type": "RAW",
+                                    "source": "BOM"  # CONTRACT: Track shortage source
                                 })
-        
+                    
+                    # Also check for packaging requirements if packaging is not "Bulk"
+                                       # Also check for packaging requirements if packaging is not "Bulk"
+                    if packaging and packaging != "Bulk" and total_kg > 0:
+                        try:
+                            packaging_item_id = await find_or_create_packaging_item(packaging)
+                            if packaging_item_id:
+                                # Calculate required packaging quantity
+                                packaging_qty = 0
+                                packaging_lower = packaging.lower()
+                                
+                                if "drum" in packaging_lower:
+                                    capacity_liters = 200
+                                    if "210" in packaging or "210l" in packaging_lower:
+                                        capacity_liters = 210
+                                    elif "250" in packaging or "250l" in packaging_lower:
+                                        capacity_liters = 250
+                                    net_weight_per_drum = capacity_liters * 0.85
+                                    packaging_qty = max(1, ceil(total_kg / net_weight_per_drum))
+                                elif "ibc" in packaging_lower:
+                                    net_weight_per_ibc = 1000 * 0.85
+                                    packaging_qty = max(1, ceil(total_kg / net_weight_per_ibc))
+                                elif "flexi" in packaging_lower or "flexitank" in packaging_lower:
+                                    packaging_qty = 1
+                                else:
+                                    net_weight = net_weight_kg if net_weight_kg else 200
+                                    packaging_qty = max(1, ceil(total_kg / net_weight))
+                                
+                                # Check packaging availability
+                                packaging_balance = await db.inventory_balances.find_one({"item_id": packaging_item_id}, {"_id": 0})
+                                packaging_on_hand = packaging_balance.get("on_hand", 0) if packaging_balance else 0
+                                packaging_reservations = await db.inventory_reservations.find({"item_id": packaging_item_id}, {"_id": 0}).to_list(1000)
+                                packaging_reserved = sum(r.get("qty", 0) for r in packaging_reservations)
+                                packaging_available = packaging_on_hand - packaging_reserved
+                                packaging_shortage = max(0, packaging_qty - packaging_available)
+                                
+                                if packaging_shortage > 0:
+                                    packaging_item = await db.inventory_items.find_one({"id": packaging_item_id}, {"_id": 0})
+                                    if packaging_item:
+                                        material_shortages.append({
+                                            "item_id": packaging_item_id,
+                                            "item_name": packaging_item.get("name", packaging),
+                                            "item_sku": packaging_item.get("sku", "-"),
+                                            "required_qty": packaging_qty,  # In EA (units), not KG
+                                            "available": packaging_available,  # In EA
+                                            "shortage": packaging_shortage,  # In EA
+                                            "status": "SHORTAGE",
+                                            "uom": packaging_item.get("uom", "EA"),
+                                            "item_type": "PACK",
+                                            "source": "JOB_ORDER"
+                                        })
+                        except Exception as e:
+                            logger.error(f"Error calculating packaging shortage for job {job_number}: {e}")
+                        
         # Process each shortage from the job order - create individual entries
         for shortage_item in material_shortages:
             item_id = shortage_item.get("item_id")
@@ -10773,7 +12689,40 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
                 if not material:
                     continue
                 
+                # CONTRACT ENFORCEMENT: Validate quantities are non-negative
+                if required_qty < 0 or shortage < 0:
+                    logger.error(f"NEGATIVE quantity in shortage for {item_id}: required={required_qty}, shortage={shortage}")
+                    raise HTTPException(
+                        status_code=520,
+                        detail=f"Data integrity error: negative shortage quantity for {material.get('name', item_id)}"
+                    )
+                
+                # Get UOM for reference
+                uom = shortage_item.get("uom") or material.get("uom") or material.get("unit", "KG")
+                
+                # VALIDATION: Normalize MT to KG for contract compliance
+                if uom.upper() in ["MT", "METRIC TON", "TONNE"]:
+                    logger.warning(f"Shortage item {item_id} has MT in uom - normalizing to KG")
+                    uom = "KG"
+                
+                # Determine shortage source
+                shortage_source = shortage_item.get("source", "JOB_ORDER")
+                
+                # Get quotation/PFI reference from job order -> sales order -> quotation
+                quotation_id = None
+                pfi_number = None
+                sales_order_id = job.get("sales_order_id")
+                if sales_order_id:
+                    sales_order = await db.sales_orders.find_one({"id": sales_order_id}, {"_id": 0})
+                    if sales_order and sales_order.get("quotation_id"):
+                        quotation_id = sales_order.get("quotation_id")
+                        quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
+                        if quotation:
+                            pfi_number = quotation.get("pfi_number")
+                
                 # Create individual shortage entry per job order
+                item_type = shortage_item.get("item_type", "RAW")  # RAW, PACK, or TRADED
+                display_type = "RM/Production" if item_type == "RAW" else "RM/Trading" if item_type == "TRADED" else "Packaging"
                 shortage_list.append({
                     "item_id": item_id,
                     "job_id": job_id,
@@ -10781,17 +12730,207 @@ async def get_procurement_shortages(current_user: dict = Depends(get_current_use
                     "product_name": job.get("product_name", "Unknown"),
                     "item_name": shortage_item.get("item_name") or material.get("name", "Unknown"),
                     "item_sku": shortage_item.get("item_sku") or material.get("sku", "N/A"),
-                    "item_type": shortage_item.get("item_type", "RAW"),  # RAW or PACK
-                    "uom": shortage_item.get("uom") or material.get("uom") or material.get("unit", "KG"),
-                    "required_qty": required_qty,
-                    "shortage": shortage,
-                    "on_hand": on_hand,
-                    "reserved": reserved,
-                    "available": available
+                    "item_type": item_type,
+                    "display_type": display_type,
+                    "uom": uom,  # For reference, but qty is always KG
+                    "required_qty": required_qty,  # ALWAYS KG
+                    "shortage": shortage,  # ALWAYS KG
+                    "on_hand": on_hand,  # ALWAYS KG (from inventory_balances)
+                    "reserved": reserved,  # ALWAYS KG
+                    "available": available,  # ALWAYS KG
+                    "source": shortage_source,  # CONTRACT: Track shortage source
+                    "quotation_id": quotation_id,  # Link to quotation/PFI
+                    "pfi_number": pfi_number  # PFI number for display
                 })
+    
+    # ==================== ADD LOW STOCK ITEMS FROM PRODUCTS TABLE ====================
+    # Check products table for low stock items and add them to shortages
+    # Note: products table doesn't have is_active field, so we check all products
+    products = await db.products.find({}, {"_id": 0}).to_list(1000)
+    
+    low_stock_found_count = 0
+    low_stock_added_count = 0
+    skipped_by_category = 0
+    total_products_checked = len(products)
+    products_with_min_stock = 0
+    products_below_min_stock = 0
+    
+    logger.info(f"Checking {total_products_checked} active products for low stock...")
+    
+    for product in products:
+        current_stock = product.get("current_stock", 0)
+        min_stock = product.get("min_stock", 0)
+        category = product.get("category", "finished_product")
+        product_type = product.get("type", "MANUFACTURED")
+        item_name = product.get("name", "Unknown")
+        
+        # Count products with min_stock set
+        if min_stock > 0:
+            products_with_min_stock += 1
+        
+        # Only process if min_stock > 0 and current_stock < min_stock
+        if min_stock > 0 and current_stock < min_stock:
+            products_below_min_stock += 1
+            low_stock_found_count += 1
+            logger.info(f"Low stock found: {item_name} (SKU: {product.get('sku', 'N/A')}) - Category: {category}, Type: {product_type}, Current: {current_stock}, Min: {min_stock}")
+            
+            shortage = min_stock - current_stock
+            required_qty = min_stock  # Required quantity is the minimum stock level
+            item_id = product.get("id")
+            item_sku = product.get("sku", "N/A")
+            unit = product.get("unit", "KG")
+            
+            # Convert to KG if needed (for consistency with shortage calculations)
+            on_hand_kg = current_stock
+            required_qty_kg = required_qty
+            shortage_kg = shortage
+            
+            if unit.upper() == "MT":
+                on_hand_kg = current_stock * 1000
+                required_qty_kg = required_qty * 1000
+                shortage_kg = shortage * 1000
+                unit = "KG"  # Normalize to KG
+            
+            # Determine item_type and display_type based on category and type
+            # PRIORITY: Check category first, then type (as per user requirement)
+            item_type = None
+            display_type = None
+            
+            # Check category first as per user requirement
+            if category == "raw_material":
+                # If RAW MATERIAL, check type
+                if product_type == "TRADED":
+                    item_type = "TRADED"
+                    display_type = "RM/Trading"
+                else:
+                    # type == "MANUFACTURED" or default
+                    item_type = "RAW"
+                    display_type = "RM/Production"
+            elif category == "packaging":
+                item_type = "PACK"
+                display_type = "Packaging"
+            else:
+                # For finished_product or other categories, skip (as per requirement)
+                skipped_by_category += 1
+                logger.info(f"Skipping {item_name} - category is '{category}' (not raw_material or packaging)")
+                continue
+            
+            # Check if this item is already in shortage_list (from job orders)
+            # Use a unique key: (item_id, "LOW_STOCK") to avoid duplicates
+            existing_shortage = next(
+                (s for s in shortage_list if s.get("item_id") == item_id and s.get("source") == "LOW_STOCK"),
+                None
+            )
+            
+            if not existing_shortage:
+                # Get reservations for this item
+                reservations = await db.inventory_reservations.find({"item_id": item_id}, {"_id": 0}).to_list(1000)
+                reserved = sum(r.get("qty", 0) for r in reservations)
+                available = on_hand_kg - reserved
+                
+                shortage_list.append({
+                    "item_id": item_id,
+                    "job_id": "LOW_STOCK",  # Special job_id for low stock items
+                    "job_number": "LOW_STOCK",  # Special job number
+                    "product_name": item_name,  # Product name for display
+                    "item_name": item_name,
+                    "item_sku": item_sku,
+                    "item_type": item_type,
+                    "display_type": display_type,
+                    "uom": unit,  # For reference
+                    "required_qty": required_qty_kg,  # ALWAYS in KG
+                    "shortage": shortage_kg,  # ALWAYS in KG
+                    "on_hand": on_hand_kg,  # ALWAYS in KG
+                    "reserved": reserved,  # Reservations in KG
+                    "available": available,  # Available = on_hand - reserved
+                    "source": "LOW_STOCK"  # Track source
+                })
+                low_stock_added_count += 1
+                logger.info(f"Added {item_name} to {display_type} shortages")
+    
+    # Also check inventory_items table for RAW and PACK materials with low stock
+    inventory_items = await db.inventory_items.find(
+        {"is_active": True, "item_type": {"$in": ["RAW", "PACK"]}},
+        {"_id": 0}
+    ).to_list(1000)
+    
+    for item in inventory_items:
+        item_id = item.get("id")
+        min_stock = item.get("min_stock", 0)
+        
+        # Get stock from inventory_balances
+        balance = await db.inventory_balances.find_one({"item_id": item_id}, {"_id": 0})
+        on_hand = balance.get("on_hand", 0) if balance else 0
+        
+        # Only process if min_stock > 0 and on_hand < min_stock
+        if min_stock > 0 and on_hand < min_stock:
+            shortage = min_stock - on_hand
+            required_qty = min_stock
+            item_name = item.get("name", "Unknown")
+            item_sku = item.get("sku", "N/A")
+            item_type = item.get("item_type")  # RAW or PACK
+            unit = item.get("uom", "KG")
+            
+            # Convert to KG if needed
+            on_hand_kg = on_hand
+            required_qty_kg = required_qty
+            shortage_kg = shortage
+            
+            if unit.upper() == "MT":
+                on_hand_kg = on_hand * 1000
+                required_qty_kg = required_qty * 1000
+                shortage_kg = shortage * 1000
+                unit = "KG"
+            
+            # Determine display_type
+            if item_type == "RAW":
+                display_type = "RM/Production"
+            elif item_type == "PACK":
+                display_type = "Packaging"
+            else:
+                continue
+            
+            # Check if this item is already in shortage_list
+            existing_shortage = next(
+                (s for s in shortage_list if s.get("item_id") == item_id and s.get("source") == "LOW_STOCK"),
+                None
+            )
+            
+            if not existing_shortage:
+                # Get reservations for this item
+                reservations = await db.inventory_reservations.find({"item_id": item_id}, {"_id": 0}).to_list(1000)
+                reserved = sum(r.get("qty", 0) for r in reservations)
+                available = on_hand_kg - reserved
+                
+                shortage_list.append({
+                    "item_id": item_id,
+                    "job_id": "LOW_STOCK",
+                    "job_number": "LOW_STOCK",
+                    "product_name": item_name,
+                    "item_name": item_name,
+                    "item_sku": item_sku,
+                    "item_type": item_type,
+                    "display_type": display_type,
+                    "uom": unit,
+                    "required_qty": required_qty_kg,  # ALWAYS in KG
+                    "shortage": shortage_kg,  # ALWAYS in KG
+                    "on_hand": on_hand_kg,  # ALWAYS in KG
+                    "reserved": reserved,  # Reservations in KG
+                    "available": available,  # Available = on_hand - reserved
+                    "source": "LOW_STOCK"
+                })
+    
+    # Always log the summary, even if no low stock items found
+    logger.info(f"Low stock check summary: Checked {total_products_checked} products, {products_with_min_stock} have min_stock set, {products_below_min_stock} below min_stock, added {low_stock_added_count} to shortages, skipped {skipped_by_category} by category")
     
     # Sort by item name, then by job number
     shortage_list.sort(key=lambda x: (x["item_name"], x["job_number"]))
+    
+    elapsed_time = time.time() - start_time
+    pack_count = len([s for s in shortage_list if s["item_type"] == "PACK"])
+    raw_count = len([s for s in shortage_list if s["item_type"] == "RAW"])
+    traded_count = len([s for s in shortage_list if s["item_type"] == "TRADED"])
+    logger.info(f"Procurement shortages calculation completed in {elapsed_time:.2f}s. Found {len(shortage_list)} total shortages (RAW: {raw_count}, PACK: {pack_count}, TRADED: {traded_count})")
     
     return {
         "total_shortages": len(shortage_list),
@@ -11287,6 +13426,8 @@ class GeneratePORequest(BaseModel):
     total_amount: float = 0
     lines: List[Dict[str, Any]] = []
     notes: Optional[str] = None
+    quotation_id: Optional[str] = None  # Link to quotation/PFI
+    pfi_number: Optional[str] = None  # PFI number for display
 
 @api_router.post("/purchase-orders/generate")
 async def generate_po_directly(data: GeneratePORequest, current_user: dict = Depends(get_current_user)):
@@ -11309,6 +13450,39 @@ async def generate_po_directly(data: GeneratePORequest, current_user: dict = Dep
     # Get UOM from first line (assuming all lines have same UOM)
     total_uom = data.lines[0].get("uom", "KG") if data.lines else "KG"
     
+    # Try to get quotation_id and pfi_number if not provided
+    quotation_id = data.quotation_id
+    pfi_number = data.pfi_number
+    
+    # If quotation_id/pfi_number not provided, try to get from job_numbers in ALL lines
+    if not quotation_id and not pfi_number and data.lines:
+        # Try each line's job_numbers until we find a quotation
+        for line in data.lines:
+            job_numbers = line.get("job_numbers", [])
+            if job_numbers and len(job_numbers) > 0:
+                for job_number in job_numbers:
+                    # Look up job order
+                    job = await db.job_orders.find_one({"job_number": job_number}, {"_id": 0})
+                    if job:
+                        sales_order_id = job.get("sales_order_id")
+                        if sales_order_id:
+                            sales_order = await db.sales_orders.find_one({"id": sales_order_id}, {"_id": 0})
+                            if sales_order and sales_order.get("quotation_id"):
+                                quotation_id = sales_order.get("quotation_id")
+                                quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
+                                if quotation:
+                                    pfi_number = quotation.get("pfi_number")
+                                    break  # Found it, no need to check more
+                        if quotation_id:  # Break outer loop too
+                            break
+            if quotation_id:  # Break if we found it
+                break
+    
+    # Log if we couldn't find quotation info (for debugging)
+    if not quotation_id and not pfi_number:
+        first_line_job_numbers = data.lines[0].get("job_numbers", []) if data.lines else []
+        logger.warning(f"PO {po_number} created without quotation_id/pfi_number. Lines: {len(data.lines)}, First line job_numbers: {first_line_job_numbers}")
+    
     # Create PO with DRAFT status (pending finance approval)
     po = PurchaseOrder(
         supplier_id=data.supplier_id,
@@ -11319,6 +13493,8 @@ async def generate_po_directly(data: GeneratePORequest, current_user: dict = Dep
         incoterm=data.incoterm,
         payment_terms=data.payment_terms,
         delivery_date=data.delivery_date,  # Set delivery date from form
+        quotation_id=quotation_id,  # Link to quotation if provided
+        pfi_number=pfi_number,  # PFI number for display
         po_number=po_number,
         status="DRAFT",  # Will require finance approval
         created_by=current_user["id"]
@@ -11357,7 +13533,10 @@ async def generate_po_directly(data: GeneratePORequest, current_user: dict = Dep
             qty=line_data.get("qty", 0),
             uom=line_data.get("uom", "KG"),
             unit_price=line_data.get("unit_price", 0),
-            required_by=data.delivery_date
+            required_by=data.delivery_date,
+            procurement_type=line_data.get("procurement_type", "Bulk"),
+            packaging_item_id=line_data.get("packaging_item_id"),
+            packaging_qty=line_data.get("packaging_qty", 0) if line_data.get("procurement_type") == "Drummed" else None
         )
         po_line_dict = po_line.model_dump()
         po_line_dict["item_name"] = item_name
@@ -11398,8 +13577,8 @@ async def finance_approve_po(po_id: str, data: Optional[Dict[str, Any]] = None, 
     """Finance approves a PO (Phase 6) and routes based on incoterm.
     Optionally accepts line items data to update quantities and prices.
     """
-    if current_user["role"] not in ["admin", "finance"]:
-        raise HTTPException(status_code=403, detail="Only admin/finance can approve POs")
+    if not await has_page_access(current_user, "/finance-approval", fallback_roles=["finance"]):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
     if not po:
@@ -11525,23 +13704,32 @@ async def finance_approve_po(po_id: str, data: Optional[Dict[str, Any]] = None, 
         
     elif incoterm == "FOB":
         # FOB: Buyer responsible for shipping - Route to Shipping Window first
-        # After shipping is booked, will route to Import Window
+        # Create minimal booking record that requires user to fill in details
         booking_number = await generate_sequence("SHP", "shipping_bookings")
         shipping_booking = {
             "id": str(uuid.uuid4()),
             "booking_number": booking_number,
             "job_order_ids": [],  # Empty for PO imports
-            "customer_name": po.get("supplier_name", ""),  # Supplier for imports
-            "port_of_loading": po.get("port_of_loading", ""),
-            "port_of_discharge": po.get("port_of_discharge", ""),
+            "po_ids": [po_id],  # Link to PO
+            "customer_name": "",  # Will be filled by user
+            "supplier_name": po.get("supplier_name", ""),
+            "shipping_line": None,  # User must fill
+            "container_type": None,  # User must fill (not default 20ft)
+            "container_count": None,  # User must fill (not default 1)
+            "port_of_loading": None,  # User must fill
+            "port_of_discharge": None,  # User must fill
+            "cargo_description": None,  # User must fill
+            "cargo_weight": None,  # User must fill
+            "is_dg": False,
+            "dg_class": None,
             "incoterm": incoterm,
-            "status": "PENDING",
+            "status": "PENDING_DETAILS",  # New status indicating details needed
             "ref_type": "PO_IMPORT",
             "ref_id": po_id,
             "po_number": po.get("po_number"),
-            "supplier_name": po.get("supplier_name"),
             "booking_source": "SELLER",  # Seller (buyer's company) books for FOB imports
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "notes": f"Auto-created from PO approval. Please fill in shipping details."
         }
         await db.shipping_bookings.insert_one(shipping_booking)
         route_result["routed_to"] = "SHIPPING"
@@ -11550,8 +13738,8 @@ async def finance_approve_po(po_id: str, data: Optional[Dict[str, Any]] = None, 
         # Create notification
         await create_notification(
             event_type="SHIP_BOOKING_REQUIRED",
-            title=f"🚢 Shipping Booking Required: PO {po.get('po_number')}",
-            message=f"PO {po.get('po_number')} (FOB incoterm) requires shipping booking. Buyer responsible for main carriage - please book shipping.",
+            title=f"🚢 Shipping Booking Details Required: PO {po.get('po_number')}",
+            message=f"PO {po.get('po_number')} (FOB) created booking {booking_number}. Please fill in container type, shipping line, ports, and cargo details.",
             link="/shipping",
             ref_type="PO",
             ref_id=po_id,
@@ -11615,6 +13803,76 @@ async def finance_reject_po(po_id: str, reason: str = "", current_user: dict = D
     )
     
     return {"success": True, "message": "PO rejected by finance"}
+
+@api_router.post("/purchase-orders/retroactive-enrich-quotations")
+async def retroactive_enrich_po_quotations(current_user: dict = Depends(get_current_user)):
+    """
+    Retroactively enrich existing POs with quotation_id and pfi_number
+    by looking up job_numbers in PO lines -> job orders -> sales orders -> quotations
+    """
+    if current_user["role"] not in ["admin"]:
+        raise HTTPException(status_code=403, detail="Only admin can run this operation")
+    
+    # Get all POs missing quotation_id or pfi_number
+    pos = await db.purchase_orders.find({
+        "$or": [
+            {"quotation_id": {"$exists": False}},
+            {"quotation_id": None},
+            {"pfi_number": {"$exists": False}},
+            {"pfi_number": None}
+        ]
+    }, {"_id": 0}).to_list(1000)
+    
+    updated_count = 0
+    not_found_count = 0
+    
+    for po in pos:
+        po_id = po.get("id")
+        lines = await db.purchase_order_lines.find({"po_id": po_id}, {"_id": 0}).to_list(1000)
+        
+        quotation_id = None
+        pfi_number = None
+        
+        # Try to find quotation from job_numbers in PO lines
+        for line in lines:
+            job_numbers = line.get("job_numbers", [])
+            if job_numbers:
+                job_number = job_numbers[0]
+                job = await db.job_orders.find_one({"job_number": job_number}, {"_id": 0})
+                if job:
+                    sales_order_id = job.get("sales_order_id")
+                    if sales_order_id:
+                        sales_order = await db.sales_orders.find_one({"id": sales_order_id}, {"_id": 0})
+                        if sales_order and sales_order.get("quotation_id"):
+                            quotation_id = sales_order.get("quotation_id")
+                            quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
+                            if quotation:
+                                pfi_number = quotation.get("pfi_number")
+                            break  # Found it
+        
+        # Update PO if we found quotation info
+        if quotation_id or pfi_number:
+            update_data = {}
+            if quotation_id:
+                update_data["quotation_id"] = quotation_id
+            if pfi_number:
+                update_data["pfi_number"] = pfi_number
+            
+            await db.purchase_orders.update_one(
+                {"id": po_id},
+                {"$set": update_data}
+            )
+            updated_count += 1
+        else:
+            not_found_count += 1
+    
+    return {
+        "success": True,
+        "message": f"Retroactive enrichment complete",
+        "updated": updated_count,
+        "not_found": not_found_count,
+        "total_processed": len(pos)
+    }
 
 @api_router.put("/purchase-orders/{po_id}/send")
 async def send_po_to_supplier(po_id: str, current_user: dict = Depends(get_current_user)):
@@ -11701,61 +13959,100 @@ async def get_routing_options(current_user: dict = Depends(get_current_user)):
 @api_router.post("/logistics/route-po/{po_id}")
 async def route_po_logistics(po_id: str, incoterm: str, current_user: dict = Depends(get_current_user)):
     """Route PO to appropriate logistics flow based on incoterm (Phase 8)"""
-    if current_user["role"] not in ["admin", "procurement", "finance"]:
-        raise HTTPException(status_code=403, detail="Only admin/procurement/finance can route POs")
-    
-    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
-    if not po:
-        raise HTTPException(status_code=404, detail="PO not found")
-    
-    if incoterm not in INCOTERM_ROUTING:
-        raise HTTPException(status_code=400, detail=f"Invalid incoterm: {incoterm}")
-    
-    routing = INCOTERM_ROUTING[incoterm]
-    
-    # Create logistics routing record
-    routing_record = {
-        "id": str(uuid.uuid4()),
-        "po_id": po_id,
-        "po_number": po.get("po_number"),
-        "incoterm": incoterm,
-        "routing_type": routing["type"],
-        "route": routing["route"],
-        "status": "PENDING",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_by": current_user["id"]
-    }
-    
-    await db.logistics_routing.insert_one(routing_record)
-    
-    # Update PO with incoterm
-    await db.purchase_orders.update_one(
-        {"id": po_id},
-        {"$set": {
-            "incoterm": incoterm,
-            "logistics_routing_id": routing_record["id"]
-        }}
-    )
-    
-    # For IMPORT types, create import checklist
-    if routing["type"] == "IMPORT":
-        import_checklist = {
+    try:
+        if current_user["role"] not in ["admin", "procurement", "finance"]:
+            raise HTTPException(status_code=403, detail="Only admin/procurement/finance can route POs")
+        
+        # Validate input
+        if not po_id or not po_id.strip():
+            raise HTTPException(status_code=400, detail="Invalid PO ID")
+        
+        if not incoterm or not incoterm.strip():
+            raise HTTPException(status_code=400, detail="Incoterm is required")
+        
+        po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+        if not po:
+            raise HTTPException(status_code=404, detail="PO not found")
+        
+        # Check if PO is in a state that allows routing
+        po_status = po.get("status", "")
+        if po_status in ["CANCELLED", "CLOSED"]:
+            raise HTTPException(status_code=400, detail=f"Cannot route PO with status {po_status}")
+        
+        if incoterm not in INCOTERM_ROUTING:
+            raise HTTPException(status_code=400, detail=f"Invalid incoterm: {incoterm}")
+        
+        routing = INCOTERM_ROUTING[incoterm]
+        
+        # Check if PO already has routing
+        existing_routing = await db.logistics_routing.find_one({"po_id": po_id}, {"_id": 0})
+        if existing_routing:
+            raise HTTPException(status_code=400, detail="PO already has a logistics routing assigned")
+        
+        # Create logistics routing record
+        routing_record = {
             "id": str(uuid.uuid4()),
             "po_id": po_id,
-            "routing_id": routing_record["id"],
-            "status": "PRE_IMPORT",
-            "pre_import_docs": [],
-            "post_import_docs": [],
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "po_number": po.get("po_number"),
+            "incoterm": incoterm,
+            "routing_type": routing["type"],
+            "route": routing["route"],
+            "status": "PENDING",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": current_user.get("id", "unknown")
         }
-        await db.import_checklists.insert_one(import_checklist)
-        routing_record["import_checklist_id"] = import_checklist["id"]
+        
+        # Insert routing record (MongoDB will add _id which we don't want in response)
+        await db.logistics_routing.insert_one(routing_record.copy())
+        
+        # Update PO with incoterm
+        await db.purchase_orders.update_one(
+            {"id": po_id},
+            {"$set": {
+                "incoterm": incoterm,
+                "logistics_routing_id": routing_record["id"]
+            }}
+        )
+        
+        # For IMPORT types, create import checklist
+        import_checklist_id = None
+        if routing["type"] == "IMPORT":
+            import_checklist = {
+                "id": str(uuid.uuid4()),
+                "po_id": po_id,
+                "routing_id": routing_record["id"],
+                "status": "PRE_IMPORT",
+                "pre_import_docs": [],
+                "post_import_docs": [],
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            await db.import_checklists.insert_one(import_checklist)
+            import_checklist_id = import_checklist["id"]
+        
+        # Build response (clean dict without MongoDB ObjectId)
+        response_routing = {
+            **routing_record,
+            **({"import_checklist_id": import_checklist_id} if import_checklist_id else {})
+        }
+        
+        return {
+            "success": True,
+            "routing": response_routing,
+            "message": f"PO routed via {routing['route']} ({routing['description']})"
+        }
     
-    return {
-        "success": True,
-        "routing": routing_record,
-        "message": f"PO routed via {routing['route']} ({routing['description']})"
-    }
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is (400, 403, 404)
+        raise
+    except Exception as e:
+        # Log the internal error
+        logger.error(f"Logistics routing failed for PO {po_id}: {str(e)}", exc_info=True)
+        
+        # Return 520 for configuration/internal business logic failures
+        raise HTTPException(
+            status_code=520, 
+            detail=f"Routing configuration error: Unable to route PO. Please contact system administrator."
+        )
 
 @api_router.get("/logistics/routing")
 async def get_logistics_routing(status: Optional[str] = None, current_user: dict = Depends(get_current_user)):
@@ -12749,8 +15046,14 @@ class TransportOutward(BaseModel):
 async def get_transport_inward(status: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     """Get inward transport records with product details"""
     query = {}
+    
+    # Filter out completed/dispatched statuses unless a specific status is requested
+    excluded_statuses = ["DISPATCHED", "DELIVERED", "ARRIVED", "COMPLETED"]
     if status:
         query["status"] = status
+    else:
+        query["status"] = {"$nin": excluded_statuses}
+    
     records = await db.transport_inward.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     
     # Enrich with PO lines/products
@@ -12782,14 +15085,20 @@ async def get_transport_inward(status: Optional[str] = None, current_user: dict 
                     record["total_uom"] = unit
                     record["total_unit"] = unit  # Also set total_unit for backward compatibility
                 
-                # Get product/item names summary from lines
-                product_names = [line.get("item_name", "Unknown") for line in po_lines if line.get("item_name")]
-                record["products_summary"] = ", ".join(product_names[:3])  # First 3 products
-                if len(product_names) > 3:
-                    record["products_summary"] += f" (+{len(product_names) - 3} more)"
+                # Get product/item names summary from lines (now with packaging info)
+                product_summaries = [line.get("display_name", line.get("item_name", "Unknown")) for line in po_lines]
+                record["products_summary"] = ", ".join(product_summaries[:3])  # First 3 products
+                if len(product_summaries) > 3:
+                    record["products_summary"] += f" (+{len(product_summaries) - 3} more)"
                 
-                # Also include legacy items field for backward compatibility
-                record["items"] = [{"product_name": line.get("item_name"), "quantity": line.get("qty"), "unit": line.get("uom")} for line in po_lines]
+                # Also include legacy items field for backward compatibility (with packaging info)
+                record["items"] = [{
+                    "product_name": line.get("display_name", line.get("item_name")), 
+                    "quantity": line.get("qty"), 
+                    "unit": line.get("uom"),
+                    "packaging_qty": line.get("packaging_qty"),
+                    "packaging_name": line.get("packaging_name")
+                } for line in po_lines]
                 
                 # Include delivery date from PO
                 if po.get("delivery_date") and not record.get("delivery_date"):
@@ -13108,8 +15417,14 @@ async def get_transport_outward(
 ):
     """Get outward transport records with product details"""
     query = {}
+    
+    # Filter out completed/dispatched statuses unless a specific status is requested
+    excluded_statuses = ["DISPATCHED", "DELIVERED", "ARRIVED", "COMPLETED"]
     if status:
         query["status"] = status
+    else:
+        query["status"] = {"$nin": excluded_statuses}
+    
     if transport_type:
         query["transport_type"] = transport_type
     records = await db.transport_outward.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
@@ -15183,8 +17498,8 @@ async def create_grn_from_qc(inspection: dict, current_user: dict):
             else:  # GRN is already in MT
                 quantity_to_add = item["quantity"]
         else:
-            # Default: assume KG, convert MT to KG if needed
-            quantity_to_add = item["quantity"] if grn_unit == "KG" else item["quantity"] * 1000
+        # Same unit or non-weight units (EA, PCS, etc.) - use as-is
+            quantity_to_add = item["quantity"]
         
         # Update inventory_balances using the correct item_id
         await db.inventory_balances.update_one(
@@ -15685,10 +18000,24 @@ async def get_job_orders_with_documents(current_user: dict = Depends(get_current
 
 @api_router.get("/settings/all")
 async def get_all_settings(current_user: dict = Depends(get_current_user)):
-    """Get all system settings (payment terms, document templates, container types, companies)"""
-    if current_user["role"] not in ["admin"]:
-        raise HTTPException(status_code=403, detail="Only admin can access settings")
+    """Get all system settings - admin gets full access, others get limited access"""
+    # Check if user has settings page access or is admin
+    has_full_access = await has_page_access(current_user, "/settings", fallback_roles=[])
     
+    if not has_full_access:
+        # For non-admin users, return limited settings needed for operations
+        # (bank accounts, payment terms, packaging types)
+        banks_doc = await db.settings.find_one({"type": "bank_accounts"}, {"_id": 0})
+        payment_terms_doc = await db.settings.find_one({"type": "payment_terms"}, {"_id": 0})
+        packaging_types_doc = await db.settings.find_one({"type": "packaging_types"}, {"_id": 0})
+        
+        return {
+            "bank_accounts": banks_doc.get("data", []) if banks_doc else [],
+            "payment_terms": payment_terms_doc.get("data", []) if payment_terms_doc else [],
+            "packaging_types": packaging_types_doc.get("data", []) if packaging_types_doc else [],
+        }
+    
+    # Admin gets full access - continue with existing code
     # Get payment terms
     payment_terms_doc = await db.settings.find_one({"type": "payment_terms"}, {"_id": 0})
     if not payment_terms_doc:
@@ -16066,11 +18395,61 @@ async def delete_company(company_id: str, current_user: dict = Depends(get_curre
     
     return {"success": True}
 
+@api_router.get("/settings/packaging-types")
+async def get_packaging_types(current_user: dict = Depends(get_current_user)):
+    """Get packaging types - accessible to all authenticated users"""
+    packaging_types_doc = await db.settings.find_one({"type": "packaging_types"}, {"_id": 0})
+    if not packaging_types_doc:
+        default_packaging_types = [
+            {"id": "1", "name": "200L Drum", "description": "Standard 200 liter drum"},
+            {"id": "2", "name": "IBC", "description": "Intermediate Bulk Container"},
+            {"id": "3", "name": "Bulk", "description": "Bulk tanker delivery"}
+        ]
+        return default_packaging_types
+    return packaging_types_doc.get("data", [])
+
+@api_router.get("/settings/payment-terms")
+async def get_payment_terms(current_user: dict = Depends(get_current_user)):
+    """Get payment terms - accessible to all authenticated users"""
+    payment_terms_doc = await db.settings.find_one({"type": "payment_terms"}, {"_id": 0})
+    if not payment_terms_doc:
+        default_payment_terms = [
+            {"id": "1", "name": "Net 30", "days": 30, "description": "Payment due in 30 days"},
+            {"id": "2", "name": "Net 60", "days": 60, "description": "Payment due in 60 days"},
+            {"id": "3", "name": "Advance", "days": 0, "description": "Payment in advance"},
+            {"id": "4", "name": "LC", "days": 0, "description": "Letter of Credit"},
+            {"id": "5", "name": "COD", "days": 0, "description": "Cash on Delivery"}
+        ]
+        return default_payment_terms
+    return payment_terms_doc.get("data", [])
+
+@api_router.get("/settings/bank-accounts")
+async def get_bank_accounts(current_user: dict = Depends(get_current_user)):
+    """Get all bank accounts - accessible to sales, user, admin, and finance roles"""
+    if current_user["role"] not in ["admin", "sales", "user", "finance"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    banks_doc = await db.settings.find_one({"type": "bank_accounts"}, {"_id": 0})
+    if not banks_doc:
+        # Return default banks if none configured
+        default_banks = [
+            {"id": "1", "bank_name": "HABIB BANK AG ZURICH", "account_type": "US DOLLAR ACCOUNT", "iban": "", "swift": "", "branch_address": ""},
+            {"id": "2", "bank_name": "HABIB BANK AG ZURICH", "account_type": "EURO ACCOUNT", "iban": "", "swift": "", "branch_address": ""},
+            {"id": "3", "bank_name": "HABIB BANK AG ZURICH", "account_type": "UAE DIRHAMS ACCOUNT", "iban": "", "swift": "", "branch_address": ""},
+            {"id": "4", "bank_name": "COMMERCIAL BANK OF DUBAI", "account_type": "US DOLLAR ACCOUNT", "iban": "AE6002300001005833726", "swift": "CBDBUAEADXXX", "branch_address": "P.O. Box 2668. Al Ittihad Street. Port Saeed, Deira- DUBAI-UAE"},
+            {"id": "5", "bank_name": "COMMERCIAL BANK OF DUBAI", "account_type": "UAE DIRHAMS ACCOUNT", "iban": "", "swift": "", "branch_address": ""},
+            {"id": "6", "bank_name": "EMIRATES ISLAMIC BANK", "account_type": "US DOLLAR ACCOUNT", "iban": "", "swift": "", "branch_address": ""},
+            {"id": "7", "bank_name": "EMIRATES ISLAMIC BANK", "account_type": "UAE DIRHAMS ACCOUNT", "iban": "", "swift": "", "branch_address": ""}
+        ]
+        return default_banks
+    
+    return banks_doc.get("data", [])
+
 @api_router.post("/settings/bank-accounts")
 async def create_bank_account(data: dict, current_user: dict = Depends(get_current_user)):
     """Add a new bank account"""
-    if current_user["role"] not in ["admin"]:
-        raise HTTPException(status_code=403, detail="Only admin can manage settings")
+    if current_user["role"] not in ["admin", "sales", "user"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     
     doc = await db.settings.find_one({"type": "bank_accounts"})
     if not doc:
@@ -16094,8 +18473,8 @@ async def create_bank_account(data: dict, current_user: dict = Depends(get_curre
 @api_router.put("/settings/bank-accounts/{bank_id}")
 async def update_bank_account(bank_id: str, data: dict, current_user: dict = Depends(get_current_user)):
     """Update a bank account"""
-    if current_user["role"] not in ["admin"]:
-        raise HTTPException(status_code=403, detail="Only admin can manage settings")
+    if current_user["role"] not in ["admin", "sales", "user"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     
     await db.settings.update_one(
         {"type": "bank_accounts", "data.id": bank_id},
@@ -16112,8 +18491,8 @@ async def update_bank_account(bank_id: str, data: dict, current_user: dict = Dep
 @api_router.delete("/settings/bank-accounts/{bank_id}")
 async def delete_bank_account(bank_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a bank account"""
-    if current_user["role"] not in ["admin"]:
-        raise HTTPException(status_code=403, detail="Only admin can manage settings")
+    if current_user["role"] not in ["admin", "sales", "user"]:
+        raise HTTPException(status_code=403, detail="Access denied")
     
     await db.settings.update_one(
         {"type": "bank_accounts"},

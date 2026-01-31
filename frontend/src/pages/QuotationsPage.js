@@ -178,6 +178,7 @@ export default function QuotationsPage() {
     bank_id: '',
     transport_mode: 'ocean',  // 'ocean', 'road', 'air'
     local_type: null,  // 'direct_to_customer', 'bulk_to_plant', 'packaged_to_plant'
+    is_dg: false,  // Dangerous goods flag
     // Additional freight fields
     additional_freight_rate_per_fcl: 0,
     additional_freight_currency: 'USD',
@@ -192,6 +193,7 @@ export default function QuotationsPage() {
     sku: '',
     quantity: 0,
     unit_price: 0,
+    basePricePerMT: 0, // Store the original price per MT for conversions
     uom: 'per_mt', // Unit of Measure: 'per_unit', 'per_liter', 'per_mt'
     packaging: 'Bulk',
     net_weight_kg: null,
@@ -232,28 +234,32 @@ export default function QuotationsPage() {
 
   const loadData = async () => {
     try {
-      const [quotationsRes, customersRes, productsRes, settingsRes] = await Promise.all([
+      const [quotationsRes, customersRes, productsRes, settingsRes, banksRes, packagingRes, paymentTermsRes] = await Promise.all([
         quotationAPI.getAll(),
         customerAPI.getAll(),
         productAPI.getAll(),
-        api.get('/settings/all').catch(() => ({ data: {} }))
+        api.get('/settings/all').catch(() => ({ data: {} })),
+        api.get('/settings/bank-accounts').catch(() => ({ data: [] })), // Fetch bank accounts separately for non-admin users
+        api.get('/settings/packaging-types').catch(() => ({ data: [] })), // Fetch packaging types from dedicated endpoint
+        api.get('/settings/payment-terms').catch(() => ({ data: [] })) // Fetch payment terms from dedicated endpoint
       ]);
       setQuotations(quotationsRes.data);
       setCustomers(customersRes.data);
       setProducts(productsRes.data.filter(p => p.category === 'finished_product'));
       
-      // Load packaging types and bank accounts from settings
-      const settings = settingsRes.data || {};
-      const packagingFromSettings = settings.packaging_types || [];
+      // Load packaging types from dedicated endpoint (works for non-admin users)
+      const packagingFromSettings = packagingRes.data || [];
       // Store full packaging objects
       setPackagingObjects(packagingFromSettings);
       // Always include "Bulk" as the first option, then add settings packaging types
       const allPackaging = ['Bulk', ...packagingFromSettings.map(p => p.name || p).filter(p => p !== 'Bulk')];
       setPackagingTypes(allPackaging.length > 1 ? allPackaging : DEFAULT_PACKAGING);
-      setBankAccounts(settings.bank_accounts || []);
       
-      // Load payment terms from settings and merge with defaults
-      const paymentTermsFromSettings = settings.payment_terms || [];
+      // Load bank accounts from dedicated endpoint (works for non-admin users)
+      setBankAccounts(banksRes.data || []);
+      
+      // Load payment terms from dedicated endpoint (works for non-admin users)
+      const paymentTermsFromSettings = paymentTermsRes.data || [];
       const termsFromSettings = paymentTermsFromSettings.map(t => t.name || t).filter(Boolean);
       
       // Merge defaults with settings terms, checking for duplicates
@@ -301,6 +307,7 @@ export default function QuotationsPage() {
         product_name: product.name,
         sku: product.sku,
         unit_price: product.price_usd || 0,
+        basePricePerMT: product.price_usd || 0, // Store base price for conversions
       });
     }
   };
@@ -325,8 +332,19 @@ export default function QuotationsPage() {
     // Infer U.O.M from packaging
     const inferredUom = inferUOMFromPackaging(packagingName);
     
+    // Store the base price (per MT) if not already stored
+    const basePricePerMT = newItem.basePricePerMT || newItem.unit_price;
+    
     if (packagingName === 'Bulk') {
-      setNewItem({ ...newItem, packaging: 'Bulk', uom: 'per_mt', net_weight_kg: null, quantity: 0 });
+      setNewItem({ 
+        ...newItem, 
+        packaging: 'Bulk', 
+        uom: 'per_mt', 
+        net_weight_kg: null, 
+        quantity: 0,
+        unit_price: basePricePerMT, // Reset to base price per MT
+        basePricePerMT: basePricePerMT
+      });
       return;
     }
     
@@ -387,12 +405,30 @@ export default function QuotationsPage() {
             defaultUom = 'per_liter'; // For Flexi/ISO - price per liter
           }
           
+          // Calculate converted unit price based on UOM
+          let convertedUnitPrice = basePricePerMT;
+          
+          if (defaultUom === 'per_unit' && netWeight) {
+            // Price per unit = Price per MT × (net_weight_kg / 1000)
+            convertedUnitPrice = basePricePerMT * (netWeight / 1000);
+          } else if (defaultUom === 'per_liter') {
+            // For liters, need density (if available)
+            const product = products.find(p => p.id === newItem.product_id);
+            if (product && product.density_kg_per_l) {
+              // Price per liter = Price per MT × (density_kg_per_l / 1000)
+              convertedUnitPrice = basePricePerMT * (product.density_kg_per_l / 1000);
+            }
+          }
+          // For per_mt, keep the base price (no conversion needed)
+          
           setNewItem({
             ...newItem,
             packaging: packagingName,
             uom: defaultUom,
             net_weight_kg: netWeight,
             quantity: autoQuantity,
+            unit_price: convertedUnitPrice, // Use converted price
+            basePricePerMT: basePricePerMT,
             hscode: config.hscode,
             country_of_origin: config.origin || form.country_of_origin || 'UAE'
           });
@@ -423,17 +459,56 @@ export default function QuotationsPage() {
       // Auto-set the first netweight if available
       const autoNetWeight = netWeights.length > 0 ? netWeights[0] : null;
       
+      // Calculate converted unit price based on UOM
+      let convertedUnitPrice = basePricePerMT;
+      
+      if (defaultUom === 'per_unit' && autoNetWeight) {
+        // Price per unit = Price per MT × (net_weight_kg / 1000)
+        convertedUnitPrice = basePricePerMT * (autoNetWeight / 1000);
+      } else if (defaultUom === 'per_liter') {
+        // For liters, need density (if available)
+        const product = products.find(p => p.id === newItem.product_id);
+        if (product && product.density_kg_per_l) {
+          // Price per liter = Price per MT × (density_kg_per_l / 1000)
+          convertedUnitPrice = basePricePerMT * (product.density_kg_per_l / 1000);
+        }
+      }
+      // For per_mt, keep the base price (no conversion needed)
+      
       setNewItem({ 
         ...newItem, 
         packaging: packagingName,
         uom: defaultUom,
         net_weight_kg: autoNetWeight,
+        unit_price: convertedUnitPrice, // Use converted price
+        basePricePerMT: basePricePerMT,
         availableNetWeights: netWeights // Store available netweights for dropdown
       });
     } else {
       // Infer U.O.M from packaging if not set by config
       const inferredUom = inferUOMFromPackaging(packagingName);
-      setNewItem({ ...newItem, packaging: packagingName, uom: inferredUom, net_weight_kg: null, availableNetWeights: [] });
+      
+      // Calculate converted unit price based on UOM (no netWeight available)
+      let convertedUnitPrice = basePricePerMT;
+      
+      if (inferredUom === 'per_liter') {
+        // For liters, need density (if available)
+        const product = products.find(p => p.id === newItem.product_id);
+        if (product && product.density_kg_per_l) {
+          convertedUnitPrice = basePricePerMT * (product.density_kg_per_l / 1000);
+        }
+      }
+      // For per_unit without netWeight or per_mt, keep the base price
+      
+      setNewItem({ 
+        ...newItem, 
+        packaging: packagingName, 
+        uom: inferredUom, 
+        net_weight_kg: null, 
+        unit_price: convertedUnitPrice,
+        basePricePerMT: basePricePerMT,
+        availableNetWeights: [] 
+      });
     }
   };
 
@@ -464,9 +539,9 @@ export default function QuotationsPage() {
     }
     
     // Calculate total based on U.O.M (Unit of Measure)
-    // Infer U.O.M from packaging if not explicitly set
+    // Infer U.O.M from packaging only if not explicitly set
     let uom = newItem.uom;
-    if (!uom || uom === 'per_mt') {
+    if (!uom) {
       uom = inferUOMFromPackaging(newItem.packaging);
     }
     
@@ -487,10 +562,17 @@ export default function QuotationsPage() {
       total = newItem.quantity * newItem.unit_price;
       // Approximate weight (1 liter ≈ 1 kg for most liquids)
       weight_mt = newItem.quantity / 1000;
-    } else { // per_mt (default for bulk)
-      // For bulk: quantity (MT) × unit_price
-      weight_mt = newItem.quantity;
-      total = newItem.quantity * newItem.unit_price;
+    } else { // per_mt (for pricing per metric ton)
+      // Calculate weight from quantity of units and net weight
+      if (newItem.net_weight_kg) {
+        // For packaged products: calculate weight from quantity × net_weight_kg
+        weight_mt = (newItem.net_weight_kg * newItem.quantity) / 1000;
+      } else {
+        // For bulk (no net weight): assume quantity is in MT
+        weight_mt = newItem.quantity;
+      }
+      // IMPORTANT: Total is always weight_mt × unit_price when UOM is per_mt
+      total = weight_mt * newItem.unit_price;
     }
     
     setForm({
@@ -507,7 +589,8 @@ export default function QuotationsPage() {
       product_name: '', 
       sku: '', 
       quantity: 0, 
-      unit_price: 0, 
+      unit_price: 0,
+      basePricePerMT: 0, // Reset base price
       uom: 'per_mt',
       packaging: 'Bulk', 
       net_weight_kg: null, 
@@ -697,6 +780,7 @@ export default function QuotationsPage() {
         expected_delivery_date: fullQuotation.expected_delivery_date || '',
         transport_mode: fullQuotation.transport_mode || 'ocean',
         local_type: fullQuotation.local_type || null,
+        is_dg: fullQuotation.is_dg || false,
         notes: fullQuotation.notes || '',
         items: fullQuotation.items || [],
         required_documents: fullQuotation.required_documents || [],
@@ -861,6 +945,7 @@ export default function QuotationsPage() {
       bank_id: '',
       transport_mode: 'ocean',
       local_type: null,
+      is_dg: false,
       additional_freight_rate_per_fcl: 0,
       additional_freight_currency: 'USD',
       cfr_amount: 0,
@@ -1103,6 +1188,15 @@ export default function QuotationsPage() {
                         ) : null;
                       })()}
                     </div>
+                    <div className="flex items-end">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <Checkbox 
+                          checked={form.is_dg || false} 
+                          onCheckedChange={(checked) => setForm({...form, is_dg: checked === true})}
+                        />
+                        <span className="text-sm">Dangerous Goods (DG)</span>
+                      </label>
+                    </div>
                   </div>
                   
                   {/* Additional Freight Section (for CFR) */}
@@ -1191,7 +1285,9 @@ export default function QuotationsPage() {
                           <SelectItem value="none">None</SelectItem>
                           <SelectItem value="direct_to_customer">Direct to Customer</SelectItem>
                           <SelectItem value="bulk_to_plant">Bulk to Plant</SelectItem>
-                          <SelectItem value="packaged_to_plant">Packaged to Plant</SelectItem>
+                          <SelectItem value="packaged_to_plant">Drum to Plant</SelectItem>
+                          <SelectItem value="gcc_road_bulk">GCC by Road - Bulk</SelectItem>
+                          <SelectItem value="gcc_road">GCC by Road</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
@@ -1952,8 +2048,8 @@ export default function QuotationsPage() {
                                   const firstItem = containerItems[0];
                                   let uom = firstItem?.uom || 'per_mt';
                                   
-                                  // If U.O.M is not set, try to infer from packaging
-                                  if (!firstItem?.uom || uom === 'per_mt') {
+                                  // If U.O.M is not set, try to infer from packaging (only if not explicitly set)
+                                  if (!firstItem?.uom) {
                                     const packaging = (firstItem?.packaging || '').toLowerCase();
                                     const packagingType = (firstItem?.packaging_type || '').toLowerCase();
                                     
@@ -1980,8 +2076,8 @@ export default function QuotationsPage() {
                                 // Get U.O.M from item, or infer from packaging type
                                 let uom = item.uom || 'per_mt';
                                 
-                                // If U.O.M is not set or is per_mt, try to infer from packaging
-                                if (!item.uom || uom === 'per_mt') {
+                                // If U.O.M is not set, try to infer from packaging (only if not explicitly set)
+                                if (!item.uom) {
                                   const packaging = (item.packaging || '').toLowerCase();
                                   const packagingType = (item.packaging_type || '').toLowerCase();
                                   
@@ -2067,8 +2163,8 @@ export default function QuotationsPage() {
                           const firstItem = selectedQuotation.items?.[0];
                           let uom = firstItem?.uom || 'per_mt';
                           
-                          // If U.O.M is not set, try to infer from packaging
-                          if (!firstItem?.uom || uom === 'per_mt') {
+                          // If U.O.M is not set, try to infer from packaging (only if not explicitly set)
+                          if (!firstItem?.uom) {
                             const packaging = (firstItem?.packaging || '').toLowerCase();
                             const packagingType = (firstItem?.packaging_type || '').toLowerCase();
                             
@@ -2095,8 +2191,8 @@ export default function QuotationsPage() {
                         // Get U.O.M from item, or infer from packaging type
                         let uom = item.uom || 'per_mt';
                         
-                        // If U.O.M is not set or is per_mt, try to infer from packaging
-                        if (!item.uom || uom === 'per_mt') {
+                        // If U.O.M is not set, try to infer from packaging (only if not explicitly set)
+                        if (!item.uom) {
                           const packaging = (item.packaging || '').toLowerCase();
                           const packagingType = (item.packaging_type || '').toLowerCase();
                           

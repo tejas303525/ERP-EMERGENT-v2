@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { 
   Package, Plus, Minus, RefreshCw, Search, Edit, History,
-  Box, Boxes, ArrowUpCircle, ArrowDownCircle
+  Box, Boxes, ArrowUpCircle, ArrowDownCircle, FileText
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
@@ -109,6 +109,13 @@ const StockManagementPage = () => {
           Stock Items
         </Button>
         <Button
+          variant={activeTab === 'report' ? 'default' : 'outline'}
+          onClick={() => setActiveTab('report')}
+        >
+          <FileText className="w-4 h-4 mr-2" />
+          Product-Packaging Report
+        </Button>
+        <Button
           variant={activeTab === 'history' ? 'default' : 'outline'}
           onClick={() => setActiveTab('history')}
         >
@@ -160,7 +167,7 @@ const StockManagementPage = () => {
                     <th className="p-3 text-left text-xs font-medium text-muted-foreground">SKU</th>
                     <th className="p-3 text-left text-xs font-medium text-muted-foreground">Name</th>
                     <th className="p-3 text-left text-xs font-medium text-muted-foreground">Type</th>
-                    <th className="p-3 text-left text-xs font-medium text-muted-foreground">Category</th>
+                    <th className="p-3 text-left text-xs font-medium text-muted-foreground">Packaging/Category</th>
                     <th className="p-3 text-left text-xs font-medium text-muted-foreground">Current Stock</th>
                     <th className="p-3 text-left text-xs font-medium text-muted-foreground">Reserved</th>
                     <th className="p-3 text-left text-xs font-medium text-muted-foreground">Available</th>
@@ -195,7 +202,21 @@ const StockManagementPage = () => {
                             {item.type?.replace('_', ' ')}
                           </Badge>
                         </td>
-                        <td className="p-3 text-muted-foreground">{item.category}</td>
+                        <td className="p-3">
+                          <div className="flex flex-col">
+                            <span className="text-muted-foreground">{item.packaging_info || item.category || '-'}</span>
+                            {item.capacity_liters > 0 && (
+                              <span className="text-xs text-muted-foreground/60">
+                                Capacity: {item.capacity_liters}L
+                              </span>
+                            )}
+                            {item.net_weight_kg_default > 0 && (
+                              <span className="text-xs text-muted-foreground/60">
+                                Net Weight: {item.net_weight_kg_default}kg
+                              </span>
+                            )}
+                          </div>
+                        </td>
                         <td className="p-3">
                           <span className={item.current_stock < 100 ? 'text-red-400 font-medium' : 'text-green-400'}>
                             {item.current_stock?.toFixed(2)}
@@ -218,6 +239,10 @@ const StockManagementPage = () => {
             </div>
           </div>
         </>
+      )}
+
+      {activeTab === 'report' && (
+        <ProductPackagingReportTab />
       )}
 
       {activeTab === 'history' && (
@@ -250,6 +275,143 @@ const StockManagementPage = () => {
           }}
         />
       )}
+    </div>
+  );
+};
+
+// ==================== PRODUCT-PACKAGING REPORT TAB ====================
+const ProductPackagingReportTab = () => {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [reportData, setReportData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  
+  useEffect(() => {
+    loadReportData();
+  }, []);
+  
+  const loadReportData = async () => {
+    setLoading(true);
+    try {
+      const res = await api.get('/stock/product-packaging-report');
+      setReportData(res.data.items || []);
+    } catch (error) {
+      console.error('Failed to load product-packaging report:', error);
+      toast.error('Failed to load report');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Filter by search term
+  const filteredProducts = reportData.filter(item =>
+    item.product_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    item.sku?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    item.packing?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  return (
+    <div className="glass rounded-lg border border-border">
+      <div className="p-4 border-b border-border">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Product-Packaging Stock Report</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Stock report showing products by packaging type with standard quantities
+            </p>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="Search products..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="pl-10 w-64"
+              />
+            </div>
+            <Button variant="outline" onClick={loadReportData} size="sm">
+              <RefreshCw className="w-4 h-4 mr-2" />
+              Refresh
+            </Button>
+          </div>
+        </div>
+      </div>
+      
+      {loading ? (
+        <div className="p-8 text-center">
+          <RefreshCw className="w-6 h-6 animate-spin mx-auto text-muted-foreground" />
+        </div>
+      ) : filteredProducts.length === 0 ? (
+        <div className="p-8 text-center text-muted-foreground">
+          <Package className="w-12 h-12 mx-auto mb-4 opacity-50" />
+          <p>No products found</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead className="bg-muted/30">
+              <tr>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground w-20">S.I. No.</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">PRODUCT</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">PACKING</th>
+                <th className="p-3 text-right text-xs font-medium text-muted-foreground">QTY-STANDARD</th>
+                <th className="p-3 text-right text-xs font-medium text-muted-foreground">CURRENT STOCK</th>
+                <th className="p-3 text-right text-xs font-medium text-muted-foreground">DRUMS</th>
+                <th className="p-3 text-center text-xs font-medium text-muted-foreground">STATUS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredProducts.map((item, index) => {
+                return (
+                  <tr key={item.product_id} className="border-b border-border/50 hover:bg-muted/10">
+                    <td className="p-3 text-center text-muted-foreground">{index + 1}</td>
+                    <td className="p-3">
+                      <div className="font-medium">{item.product_name}</div>
+                      <div className="text-xs text-muted-foreground">{item.sku}</div>
+                    </td>
+                    <td className="p-3 text-muted-foreground">{item.packing}</td>
+                    <td className="p-3 text-right font-mono">
+                      {item.qty_standard_display}
+                    </td>
+                    <td className="p-3 text-right font-mono font-bold">
+                      <span className={
+                        item.status === 'Low Stock' ? 'text-red-400' : 
+                        item.status === 'Out of Stock' ? 'text-red-600' :
+                        'text-green-400'
+                      }>
+                        {item.current_stock_display}
+                      </span>
+                    </td>
+                    <td className="p-3 text-right font-mono text-cyan-400">
+                      {item.drums_count}
+                    </td>
+                    <td className="p-3 text-center">
+                      <Badge className={
+                        item.status === 'In Stock' ? 'bg-green-500/20 text-green-400' :
+                        item.status === 'Low Stock' ? 'bg-amber-500/20 text-amber-400' :
+                        'bg-red-500/20 text-red-400'
+                      }>
+                        {item.status}
+                      </Badge>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      
+      <div className="p-4 border-t border-border bg-muted/10">
+        <div className="flex justify-between items-center text-sm">
+          <span className="text-muted-foreground">
+            Total Products: <span className="font-semibold text-foreground">{filteredProducts.length}</span>
+          </span>
+          <span className="text-muted-foreground">
+            Date: <span className="font-semibold text-foreground">{new Date().toLocaleDateString('en-GB')}</span>
+          </span>
+        </div>
+      </div>
     </div>
   );
 };
