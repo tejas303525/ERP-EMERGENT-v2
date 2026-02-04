@@ -36,23 +36,14 @@ const TransportWindowPage = () => {
   }, []);
 
   const loadData = async () => {
-    // #region agent log
-    fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:37',message:'loadData called',data:{timestamp:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     setLoading(true);
     try {
       const [inwardRes, outwardRes, importsRes, posRes, jobsRes] = await Promise.all([
         api.get('/transport/inward').catch((err) => {
-          // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:41',message:'transport/inward API call failed',data:{error:err?.message||String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           console.error('Failed to load transport/inward:', err);
           return { data: [] };
         }),
         api.get('/transport/outward').catch((err) => {
-          // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:42',message:'transport/outward API call failed',data:{error:err?.message||String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           console.error('Failed to load transport/outward:', err);
           return { data: [] };
         }),
@@ -60,10 +51,6 @@ const TransportWindowPage = () => {
         api.get('/purchase-orders', { params: { status: 'APPROVED' } }).catch(() => ({ data: [] })),
         api.get('/job-orders', { params: { status: 'ready_for_dispatch' } }).catch(() => ({ data: [] }))
       ]);
-      
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:48',message:'API responses received',data:{inwardLength:inwardRes?.data?.length||0,outwardLength:outwardRes?.data?.length||0,importsLength:importsRes?.data?.length||0,posLength:posRes?.data?.length||0,jobsLength:jobsRes?.data?.length||0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       
       const inward = inwardRes.data || [];
       
@@ -117,9 +104,6 @@ const TransportWindowPage = () => {
           po_items: po.lines || po.po_items || []
         }))
       ];
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:81',message:'Setting inwardDDP state',data:{finalInwardDDPLength:finalInwardDDP.length,bookedDDPCount:bookedDDP.length,unbookedDDPCount:unbookedDDPPOs.length,statuses:finalInwardDDP.map(t=>t.status)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       setInwardDDP(finalInwardDDP);
       
       // Combine booked transports with unbooked POs for EXW
@@ -142,19 +126,17 @@ const TransportWindowPage = () => {
           po_items: po.lines || po.po_items || []
         }))
       ];
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:102',message:'Setting inwardEXW state',data:{finalInwardEXWLength:finalInwardEXW.length,bookedEXWCount:bookedEXW.length,unbookedEXWCount:unbookedPOs.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       setInwardEXW(finalInwardEXW);
       
       // Import logistics from imports collection
       const finalInwardImport = importsRes.data || [];
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:123',message:'Setting inwardImport state',data:{finalInwardImportLength:finalInwardImport.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       setInwardImport(finalInwardImport);
       
       const outward = outwardRes.data || [];
+      
+      console.log('📦 Raw Outward Transport Data:', outward.length, 'records');
+      console.log('📦 Container Transports:', outward.filter(t => t.transport_type === 'CONTAINER').length);
+      console.log('📦 Sample Container Transport:', outward.find(t => t.transport_type === 'CONTAINER'));
       
       // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
       const jobsResponse = jobsRes?.data || {};
@@ -217,9 +199,6 @@ const TransportWindowPage = () => {
           incoterm: job.incoterm
         }))
       ];
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:143',message:'Setting localDispatch state',data:{finalLocalDispatchLength:finalLocalDispatch.length,bookedLocalCount:bookedLocal.length,unbookedJobsCount:unbookedJobs.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       setLocalDispatch(finalLocalDispatch);
       
       // Show ALL container transports (both booked and unbooked)
@@ -283,9 +262,19 @@ const TransportWindowPage = () => {
           incoterm: job.incoterm
         }))
       ];
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:163',message:'Setting exportContainer state',data:{finalExportContainerLength:finalExportContainer.length,bookedContainerCount:bookedContainer.length,unbookedContainerJobsCount:unbookedContainerJobs.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
+      
+      // Debug: Log CRO details for export containers
+      console.log('🚢 Export Container Data:', finalExportContainer.map(t => ({
+        id: t.id,
+        job_number: t.job_number,
+        si_cutoff: t.si_cutoff,
+        pull_out_date: t.pull_out_date,
+        gate_in_date: t.gate_in_date,
+        vgm_cutoff: t.vgm_cutoff,
+        vessel_name: t.vessel_name,
+        cro_number: t.cro_number
+      })));
+      
       setExportContainer(finalExportContainer);
 
       // Calculate dispatch jobs with balance quantities (for "Jobs Ready for Dispatch" table)
@@ -335,9 +324,6 @@ const TransportWindowPage = () => {
       
       setDispatchJobs(dispatchJobsWithBalance);
     } catch (error) {
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:165',message:'loadData error caught',data:{errorMessage:error?.message||String(error),errorName:error?.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
       console.error('Failed to load transport data:', error);
     } finally {
       setLoading(false);
@@ -397,9 +383,6 @@ const TransportWindowPage = () => {
   const importPending = inwardImport.filter(t => t.status === 'PENDING').length;
   const localPending = localDispatch.filter(t => t.status === 'PENDING').length;
   const exportPending = exportContainer.filter(t => t.status === 'PENDING').length;
-  // #region agent log
-  fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransportWindowPage.js:219',message:'Computed pending counts',data:{ddpPending,exwPending,importPending,localPending,exportPending,inwardDDPLength:inwardDDP.length,inwardEXWLength:inwardEXW.length,inwardImportLength:inwardImport.length,localDispatchLength:localDispatch.length,exportContainerLength:exportContainer.length,inwardDDPStatuses:inwardDDP.map(t=>t.status)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
 
   // Calculate MT totals for dispatched and pending
   const allOutwardTransports = [...localDispatch, ...exportContainer];
@@ -1290,15 +1273,19 @@ const TransportBookingModal = ({ bookingType, item, onClose, onBooked }) => {
             });
             if (uploadResponse.ok) {
               const uploadData = await uploadResponse.json();
-              deliveryNoteDocPath = uploadData.path || uploadData.file_id || uploadData.id || form.delivery_note_document.name;
+              deliveryNoteDocPath = uploadData.path || uploadData.file_id || uploadData.id;
+              if (!deliveryNoteDocPath) {
+                throw new Error('Upload response did not contain file path');
+              }
             } else {
-              // If upload fails, just use the file name
-              deliveryNoteDocPath = form.delivery_note_document.name;
+              const errorText = await uploadResponse.text();
+              throw new Error(`Upload failed: ${uploadResponse.status} - ${errorText}`);
             }
           } catch (error) {
             console.error('File upload error:', error);
-            // Fallback to file name if upload fails
-            deliveryNoteDocPath = form.delivery_note_document.name;
+            toast.error(`Failed to upload delivery note document: ${error.message}`);
+            setLoading(false);
+            return; // Stop the booking process
           }
         } else {
           // Already a string path
@@ -1323,15 +1310,19 @@ const TransportBookingModal = ({ bookingType, item, onClose, onBooked }) => {
             });
             if (uploadResponse.ok) {
               const uploadData = await uploadResponse.json();
-              deliveryOrderDocPath = uploadData.path || uploadData.file_id || uploadData.id || form.delivery_order_document.name;
+              deliveryOrderDocPath = uploadData.path || uploadData.file_id || uploadData.id;
+              if (!deliveryOrderDocPath) {
+                throw new Error('Upload response did not contain file path');
+              }
             } else {
-              // If upload fails, just use the file name
-              deliveryOrderDocPath = form.delivery_order_document.name;
+              const errorText = await uploadResponse.text();
+              throw new Error(`Upload failed: ${uploadResponse.status} - ${errorText}`);
             }
           } catch (error) {
             console.error('File upload error:', error);
-            // Fallback to file name if upload fails
-            deliveryOrderDocPath = form.delivery_order_document.name;
+            toast.error(`Failed to upload delivery order document: ${error.message}`);
+            setLoading(false);
+            return; // Stop the booking process
           }
         } else {
           // Already a string path
@@ -1953,33 +1944,6 @@ const JobsReadyForDispatchTab = ({ jobs, onRefresh, onBookTransport }) => {
 // ==================== LOCAL DISPATCH TAB ====================
 const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, onBookTransport }) => {
   
-  // #region agent log
-  useEffect(() => {
-    transports.forEach(transport => {
-      if (transport.total_quantity) {
-        fetch('http://127.0.0.1:7245/ingest/b639d9b5-860e-4e6f-85ad-5a85f91095a5', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            location: 'TransportWindowPage.js:useEffect',
-            message: 'Local dispatch quantity display',
-            data: {
-              total_quantity: transport.total_quantity,
-              unit: transport.unit,
-              job_number: transport.job_number,
-              transport_number: transport.transport_number
-            },
-            timestamp: Date.now(),
-            sessionId: 'debug-session',
-            runId: 'initial',
-            hypothesisId: 'A,B,C'
-          })
-        }).catch(() => {});
-      }
-    });
-  }, [transports]);
-  // #endregion
-  
   const getStatusColor = (status) => {
     switch (status) {
       case 'NOT_BOOKED': return 'bg-red-500/20 text-red-400';
@@ -2167,8 +2131,12 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Product</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Containers</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Shipping Line</th>
-                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Cro Vessel</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Vessel</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Cutoff</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">SI Cutoff</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Pull Out</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Gate In</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">VGM</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Pickup</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Customer</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">MT</th>
@@ -2220,6 +2188,44 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                     ) : '-'}
                   </td>
                   <td className="p-3 text-sm">
+                    {transport.si_cutoff ? (
+                      <span className="font-mono text-xs">
+                        {new Date(transport.si_cutoff).toLocaleString('en-US', { 
+                          month: 'short', 
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </span>
+                    ) : '-'}
+                  </td>
+                  <td className="p-3 text-sm">
+                    {transport.pull_out_date ? (
+                      <span className="font-mono text-xs">
+                        {new Date(transport.pull_out_date).toLocaleDateString()}
+                      </span>
+                    ) : '-'}
+                  </td>
+                  <td className="p-3 text-sm">
+                    {transport.gate_in_date ? (
+                      <span className="font-mono text-xs">
+                        {new Date(transport.gate_in_date).toLocaleDateString()}
+                      </span>
+                    ) : '-'}
+                  </td>
+                  <td className="p-3 text-sm">
+                    {transport.vgm_cutoff ? (
+                      <span className="font-mono text-xs">
+                        {new Date(transport.vgm_cutoff).toLocaleString('en-US', { 
+                          month: 'short', 
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </span>
+                    ) : '-'}
+                  </td>
+                  <td className="p-3 text-sm">
                     {transport.pickup_date ? (
                       <span className="font-mono">{new Date(transport.pickup_date).toLocaleDateString()}</span>
                     ) : '-'}
@@ -2245,56 +2251,16 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                       >
                         <Eye className="w-4 h-4" />
                       </Button>
-                      {(() => {
-                        const incoterm = (transport.incoterm || '').toUpperCase();
-                        // For CIF/CFR/CPT/CIP, we handle freight and transport booking
-                        const needsTransportBooking = ['CIF', 'CFR', 'CPT', 'CIP'].includes(incoterm);
-                        
-                        if (needsTransportBooking) {
-                          // CIF/CFR: Show "Book Transport" button for booking shipping
-                          return (
-                            (!transport.transport_number || transport.status === 'NOT_BOOKED' || transport.needs_booking) && (
-                              <Button 
-                                size="sm" 
-                                onClick={() => onBookTransport(transport)}
-                              >
-                                <Plus className="w-4 h-4 mr-1" />
-                                Book Transport
-                              </Button>
-                            )
-                          );
-                        } else {
-                          // FOB/Other: Show normal Start Loading/Dispatch flow
-                          return (
-                            <>
-                              {(!transport.transport_number || transport.status === 'NOT_BOOKED' || transport.needs_booking) && (
-                                <Button 
-                                  size="sm" 
-                                  onClick={() => onBookTransport(transport)}
-                                >
-                                  <Plus className="w-4 h-4 mr-1" />
-                                  Book Transport
-                                </Button>
-                              )}
-                              {transport.transport_number && transport.status === 'PENDING' && (
-                                <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'LOADING')}>
-                                  Start Loading
-                                </Button>
-                              )}
-                              {transport.status === 'LOADING' && (
-                                <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'DISPATCHED')}>
-                                  Dispatch
-                                </Button>
-                              )}
-                              {transport.status === 'DISPATCHED' && (
-                                <Button size="sm" onClick={() => onStatusUpdate(transport.id, 'AT_PORT')}>
-                                  At Port
-                                </Button>
-                              )}
-                            </>
-                          );
-                        }
-                      })()}
+                      {/* Transport Booking - Show for PENDING status even if transport_number exists */}
+                      {(!transport.transport_number || transport.status === 'NOT_BOOKED' || transport.status === 'PENDING' || transport.needs_booking) && (
+                        <Button 
+                          size="sm" 
+                          onClick={() => onBookTransport(transport)}
+                        >
+                          <Plus className="w-4 h-4 mr-1" />
+                          Book Transport
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>

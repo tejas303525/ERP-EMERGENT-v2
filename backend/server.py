@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, File, UploadFile
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query, Body, File, UploadFile
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
@@ -684,6 +684,7 @@ class ShippingBookingCreate(BaseModel):
     is_dg: bool = False  # Dangerous Goods
     dg_class: Optional[str] = None
     notes: Optional[str] = None
+    incoterm: Optional[str] = None
     # CRO fields (for FOB - customer provides these upfront)
     cro_number: Optional[str] = None
     vessel_name: Optional[str] = None
@@ -713,6 +714,8 @@ class ShippingBookingUpdate(BaseModel):
     si_cutoff: Optional[str] = None  # SI (Shipping Instructions) cutoff
     gate_in_date: Optional[str] = None  # Gate in date at port
     status: Optional[str] = None
+    incoterm: Optional[str] = None  # FOB, CFR, CIF, CIP, DDP, EXW, etc.
+    incoterm: Optional[str] = None
 
 class ShippingBooking(ShippingBookingCreate):
     model_config = ConfigDict(extra="ignore")
@@ -736,6 +739,7 @@ class ShippingBooking(ShippingBookingCreate):
     po_id: Optional[str] = None  # Single PO ID (for backward compatibility)
     po_number: Optional[str] = None  # Enriched from PO
     supplier_name: Optional[str] = None  # Enriched from PO
+    incoterm: Optional[str] = None  # FOB, CFR, CIF, CIP, DDP, EXW, etc.
     created_by: str = ""
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -868,16 +872,22 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
         if user is None:
             raise HTTPException(status_code=401, detail="User not found")
-        allowed_pages=user.get("allowed_pages",[])
-        if user.get("role_id"):
-            role=await db.roles.find_one({"id": user.get("role_id")}, {"_id": 0, "allowed_pages": 1})
-            if role:
-                allowed_pages=role.get("allowed_pages",[])
         
-
-        if user.get("role")=="admin":
-            allowed_pages=["all"]
-        user["allowed_pages"]=allowed_pages
+        allowed_pages = []
+        
+        # Priority 1: Check if user has a custom role assigned
+        if user.get("role_id"):
+            role = await db.roles.find_one({"id": user.get("role_id")}, {"_id": 0, "allowed_pages": 1})
+            if role:
+                allowed_pages = role.get("allowed_pages", [])
+        # Priority 2: Fall back to old standard role system if no custom role
+        elif user.get("role") == "admin":
+            allowed_pages = ["all"]
+        else:
+            # For users without custom roles, get from user's allowed_pages field
+            allowed_pages = user.get("allowed_pages", [])
+        
+        user["allowed_pages"] = allowed_pages
         
         return user
     except jwt.ExpiredSignatureError:
@@ -929,6 +939,35 @@ async def get_current_user_optional(
     
     # If neither is provided, raise 401
     raise HTTPException(status_code=401, detail="Authentication required")
+
+def has_permission(user: dict, required_roles: List[str] = None, required_page: str = None) -> bool:
+    """
+    Check if user has permission based on custom roles or standard roles.
+    
+    Args:
+        user: Current user dict with role and allowed_pages
+        required_roles: List of standard role names (e.g., ['admin', 'security'])
+        required_page: Page path to check in custom role permissions (e.g., '/security-qc')
+    
+    Returns:
+        True if user has permission, False otherwise
+    """
+    # Check custom role permissions first
+    allowed_pages = user.get("allowed_pages", [])
+    
+    # Admin via custom role (has "all" pages)
+    if "all" in allowed_pages:
+        return True
+    
+    # Check if specific page is allowed in custom role
+    if required_page and required_page in allowed_pages:
+        return True
+    
+    # Fall back to standard role check
+    if required_roles and user.get("role") in required_roles:
+        return True
+    
+    return False
 
 async def generate_sequence(prefix: str, collection: str) -> str:
     counter = await db.counters.find_one_and_update(
@@ -1193,7 +1232,7 @@ async def has_page_access(current_user: dict, page_path: str, fallback_roles: Li
 @api_router.get("/roles", response_model=List[Role])
 async def get_roles(current_user: dict = Depends(get_current_user)):
     """Get all roles"""
-    if current_user.get("role") != "admin":
+    if not has_permission(current_user, required_roles=["admin"], required_page="/roles"):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     roles = await db.roles.find({}, {"_id": 0}).to_list(1000)
@@ -1202,7 +1241,7 @@ async def get_roles(current_user: dict = Depends(get_current_user)):
 @api_router.post("/roles", response_model=Role)
 async def create_role(role_data: RoleCreate, current_user: dict = Depends(get_current_user)):
     """Create a new role"""
-    if current_user.get("role") != "admin":
+    if not has_permission(current_user, required_roles=["admin"], required_page="/roles"):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     # Check for duplicate role name
@@ -1217,7 +1256,7 @@ async def create_role(role_data: RoleCreate, current_user: dict = Depends(get_cu
 @api_router.get("/roles/{role_id}", response_model=Role)
 async def get_role(role_id: str, current_user: dict = Depends(get_current_user)):
     """Get a specific role"""
-    if current_user.get("role") != "admin":
+    if not has_permission(current_user, required_roles=["admin"], required_page="/roles"):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     role = await db.roles.find_one({"id": role_id}, {"_id": 0})
@@ -1228,7 +1267,7 @@ async def get_role(role_id: str, current_user: dict = Depends(get_current_user))
 @api_router.put("/roles/{role_id}", response_model=Role)
 async def update_role(role_id: str, role_data: RoleUpdate, current_user: dict = Depends(get_current_user)):
     """Update a role"""
-    if current_user.get("role") != "admin":
+    if not has_permission(current_user, required_roles=["admin"], required_page="/roles"):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     role = await db.roles.find_one({"id": role_id}, {"_id": 0})
@@ -1257,7 +1296,7 @@ async def update_role(role_id: str, role_data: RoleUpdate, current_user: dict = 
 @api_router.delete("/roles/{role_id}")
 async def delete_role(role_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a role"""
-    if current_user.get("role") != "admin":
+    if not has_permission(current_user, required_roles=["admin"], required_page="/roles"):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     role = await db.roles.find_one({"id": role_id}, {"_id": 0})
@@ -1282,7 +1321,7 @@ async def delete_role(role_id: str, current_user: dict = Depends(get_current_use
 @api_router.get("/pages/available")
 async def get_available_pages(current_user: dict = Depends(get_current_user)):
     """Get list of all available pages in the system"""
-    if current_user.get("role") != "admin":
+    if not has_permission(current_user, required_roles=["admin"], required_page="/roles"):
         raise HTTPException(status_code=403, detail="Admin access required")
     
     # Define all available pages
@@ -1480,7 +1519,7 @@ async def update_product(product_id: str, data: ProductCreate, current_user: dic
 @api_router.delete("/products/{product_id}")
 async def delete_product(product_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a product"""
-    if current_user["role"] not in ["admin"]:
+    if not has_permission(current_user, required_roles=["admin"], required_page="/products"):
         raise HTTPException(status_code=403, detail="Only admin can delete products")
     
     # Check if product exists
@@ -1581,13 +1620,13 @@ async def create_quotation(data: QuotationCreate, current_user: dict = Depends(g
     
     grand_total = subtotal + vat_amount
     
-    # Auto-set mode_of_transport based on order_type
+    # Auto-set transport_mode based on order_type
     quotation_data = data.model_dump(exclude={"items", "vat_amount", "vat_rate", "subtotal", "total", "total_weight_mt"})
-    if not quotation_data.get("mode_of_transport"):
+    if not quotation_data.get("transport_mode"):
         if data.order_type == "export":
-            quotation_data["mode_of_transport"] = "SEA"
+            quotation_data["transport_mode"] = "SEA"
         elif data.order_type == "local":
-            quotation_data["mode_of_transport"] = "ROAD"
+            quotation_data["transport_mode"] = "ROAD"
     
     # Auto-populate country_of_destination if not provided
     if not quotation_data.get("country_of_destination"):
@@ -1676,13 +1715,13 @@ async def get_quotation(quotation_id: str, current_user: dict = Depends(get_curr
             quotation["customer_phone"] = customer.get("phone", "")
             quotation["customer_email"] = customer.get("email", "")
     
-    # Auto-set mode_of_transport if not present
-    if not quotation.get("mode_of_transport"):
+    # Auto-set transport_mode if not present
+    if not quotation.get("transport_mode"):
         order_type = quotation.get("order_type", "").lower()
         if order_type == "export":
-            quotation["mode_of_transport"] = "SEA"
+            quotation["transport_mode"] = "SEA"
         elif order_type == "local":
-            quotation["mode_of_transport"] = "ROAD"
+            quotation["transport_mode"] = "ROAD"
     
     return quotation
 
@@ -1771,12 +1810,12 @@ async def update_quotation(quotation_id: str, data: QuotationCreate, current_use
     # If this is a rejected quotation being edited, generate REV number
     update_data = data.model_dump(exclude={"items", "vat_amount", "vat_rate", "subtotal", "total", "total_weight_mt"})
     
-    # Auto-set mode_of_transport based on order_type if not provided
-    if not update_data.get("mode_of_transport"):
+    # Auto-set transport_mode based on order_type if not provided
+    if not update_data.get("transport_mode"):
         if data.order_type == "export":
-            update_data["mode_of_transport"] = "SEA"
+            update_data["transport_mode"] = "SEA"
         elif data.order_type == "local":
-            update_data["mode_of_transport"] = "ROAD"
+            update_data["transport_mode"] = "ROAD"
     
     # Auto-populate country_of_destination if not provided
     if not update_data.get("country_of_destination"):
@@ -3715,7 +3754,7 @@ async def check_and_update_procurement_status(job_id: str, current_user: dict = 
 @api_router.delete("/job-orders/{job_id}")
 async def delete_job_order(job_id: str, current_user: dict = Depends(get_current_user)):
     """Delete a job order"""
-    if current_user["role"] not in ["admin", "production"]:
+    if not has_permission(current_user, required_roles=["admin", "production"], required_page="/job-orders"):
         raise HTTPException(status_code=403, detail="Only admin/production can delete job orders")
     
     # Check if job order exists
@@ -4531,6 +4570,60 @@ async def migrate_dispatch_routing():
         "skipped": skipped
     }
 
+@api_router.post("/quotations/migrate-transport-mode")
+async def migrate_quotations_transport_mode():
+    """
+    Migration endpoint: Set transport_mode for all quotations based on order_type
+    Previously the system was setting 'mode_of_transport' which was ignored
+    """
+    # Temporarily disabled auth check for migration
+    # if current_user["role"] not in ["admin"]:
+    #     raise HTTPException(status_code=403, detail="Only admin can run migrations")
+    
+    updated_count = 0
+    skipped_count = 0
+    
+    # Get all quotations
+    quotations = await db.quotations.find(
+        {},
+        {"_id": 0, "id": 1, "pfi_number": 1, "order_type": 1, "transport_mode": 1}
+    ).to_list(None)
+    
+    for quotation in quotations:
+        quotation_id = quotation.get("id")
+        pfi_number = quotation.get("pfi_number", "")
+        order_type = quotation.get("order_type", "").lower()
+        current_transport_mode = quotation.get("transport_mode")
+        
+        # Skip if transport_mode is already set
+        if current_transport_mode:
+            skipped_count += 1
+            continue
+        
+        # Determine transport_mode based on order_type
+        new_transport_mode = None
+        if order_type == "export":
+            new_transport_mode = "SEA"
+        elif order_type == "local":
+            new_transport_mode = "ROAD"
+        
+        if new_transport_mode:
+            # Update the quotation
+            await db.quotations.update_one(
+                {"id": quotation_id},
+                {"$set": {"transport_mode": new_transport_mode}}
+            )
+            updated_count += 1
+            print(f"✓ Updated {pfi_number}: transport_mode={new_transport_mode}")
+    
+    return {
+        "success": True,
+        "message": "Migration complete",
+        "updated_count": updated_count,
+        "skipped_count": skipped_count,
+        "total_processed": updated_count + skipped_count
+    }
+
 # ==================== GRN ROUTES ====================
 
 async def find_inventory_item_id(product_id: str, product_name: str = None, sku: str = None) -> str:
@@ -4581,7 +4674,7 @@ async def find_inventory_item_id(product_id: str, product_name: str = None, sku:
 
 @api_router.post("/grn", response_model=GRN)
 async def create_grn(data: GRNCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "security", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "security", "inventory"], required_page="/grn"):
         raise HTTPException(status_code=403, detail="Only security/inventory can create GRN")
     
     # Validate all items have positive quantities
@@ -5035,7 +5128,7 @@ async def get_grns_pending_payables(current_user: dict = Depends(get_current_use
 @api_router.put("/grn/{grn_id}/payables-approve")
 async def payables_approve_grn(grn_id: str, notes: str = "", current_user: dict = Depends(get_current_user)):
     """Payables approves a GRN for AP posting"""
-    if current_user["role"] not in ["admin", "finance"]:
+    if not has_permission(current_user, required_roles=["admin", "finance"], required_page="/grn"):
         raise HTTPException(status_code=403, detail="Only admin/finance can approve GRN for payables")
     
     grn = await db.grn.find_one({"id": grn_id}, {"_id": 0})
@@ -5057,7 +5150,7 @@ async def payables_approve_grn(grn_id: str, notes: str = "", current_user: dict 
 @api_router.put("/grn/{grn_id}/payables-hold")
 async def payables_hold_grn(grn_id: str, reason: str = "", current_user: dict = Depends(get_current_user)):
     """Payables puts a GRN on hold"""
-    if current_user["role"] not in ["admin", "finance"]:
+    if not has_permission(current_user, required_roles=["admin", "finance"], required_page="/grn"):
         raise HTTPException(status_code=403, detail="Only admin/finance can hold GRN")
     
     await db.grn.update_one(
@@ -5075,7 +5168,7 @@ async def payables_hold_grn(grn_id: str, reason: str = "", current_user: dict = 
 @api_router.put("/grn/{grn_id}/payables-reject")
 async def payables_reject_grn(grn_id: str, reason: str = "", current_user: dict = Depends(get_current_user)):
     """Payables rejects a GRN"""
-    if current_user["role"] not in ["admin", "finance"]:
+    if not has_permission(current_user, required_roles=["admin", "finance"], required_page="/grn"):
         raise HTTPException(status_code=403, detail="Only admin/finance can reject GRN")
     
     await db.grn.update_one(
@@ -5110,7 +5203,7 @@ async def get_production_completed_jobs(current_user: dict = Depends(get_current
 
 @api_router.post("/delivery-orders", response_model=DeliveryOrder)
 async def create_delivery_order(data: DeliveryOrderCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "security"]:
+    if not has_permission(current_user, required_roles=["admin", "security"], required_page="/delivery-orders"):
         raise HTTPException(status_code=403, detail="Only security can create delivery orders")
     
     # Validate that all vehicle-related fields are filled
@@ -5312,6 +5405,290 @@ async def get_delivery_orders(current_user: dict = Depends(get_current_user)):
     
     return orders
 
+@api_router.post("/delivery-orders/from-security")
+async def create_do_from_security(
+    job_order_id: str = Body(...),
+    batch_number: str = Body(...),
+    exit_empty_weight: float = Body(...),
+    exit_gross_weight: float = Body(...),
+    exit_net_weight: float = Body(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Create delivery order from security QC with exit weighment and stock reduction"""
+    if not has_permission(current_user, required_roles=["admin", "security", "qc"], required_page="/security-qc"):
+        raise HTTPException(status_code=403, detail="Only security/QC can issue delivery orders")
+    
+    # Get job order
+    job = await db.job_orders.find_one({"id": job_order_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job order not found")
+    
+    # Get transport outward for vehicle details
+    transport = await db.transport_outward.find_one({"job_order_id": job_order_id}, {"_id": 0})
+    
+    # Get security checklist for additional details
+    checklist = await db.security_checklists.find_one({
+        "ref_type": "OUTWARD",
+        "ref_id": transport["id"] if transport else job_order_id
+    }, {"_id": 0})
+    
+    # Generate DO number
+    do_number = await generate_sequence("DO", "delivery_orders")
+    
+    # Create delivery order with exit weighment
+    delivery_order = {
+        "id": str(uuid.uuid4()),
+        "do_number": do_number,
+        "job_order_id": job_order_id,
+        "job_number": job.get("job_number"),
+        "product_name": job.get("product_name"),
+        "quantity": job.get("quantity"),
+        "batch_number": batch_number,
+        "exit_empty_weight": exit_empty_weight,
+        "exit_gross_weight": exit_gross_weight,
+        "exit_net_weight": exit_net_weight,
+        "vehicle_type": transport.get("vehicle_type") if transport else checklist.get("vehicle_type") if checklist else "Unknown",
+        "vehicle_number": checklist.get("vehicle_number") if checklist else transport.get("vehicle_number") if transport else "Unknown",
+        "driver_name": checklist.get("driver_name") if checklist else transport.get("driver_name") if transport else "Unknown",
+        "issued_by": current_user["id"],
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.delivery_orders.insert_one(delivery_order)
+    
+    # Remove MongoDB's _id field for JSON serialization
+    delivery_order.pop("_id", None)
+    
+    # Update job status
+    await db.job_orders.update_one({"id": job_order_id}, {"$set": {"status": "dispatched"}})
+    
+    # Update transport outward if exists
+    if transport:
+        await db.transport_outward.update_one(
+            {"id": transport["id"]},
+            {"$set": {
+                "do_number": do_number,
+                "do_created": True,
+                "status": "DISPATCHED"
+            }}
+        )
+    
+    # Stock reduction based on packaging type - Comprehensive solution for all packaging types
+    packaging = job.get("packaging", "Bulk")
+    packaging_type = job.get("packaging_type", "BULK")
+    product_id = job.get("product_id")
+    
+    if not product_id:
+        raise HTTPException(status_code=400, detail="Job order missing product_id")
+    
+    product = await db.products.find_one({"id": product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    quantity = job.get("quantity", 0)
+    prev_stock = product.get("current_stock", 0)
+    
+    # Normalize packaging type for comparison
+    packaging_lower = packaging.lower() if packaging else "bulk"
+    packaging_type_upper = packaging_type.upper() if packaging_type else "BULK"
+    
+    # Determine if this is unit-based packaging or bulk/flexi
+    is_unit_based = any(keyword in packaging_lower for keyword in [
+        "drum", "carton", "pail", "ibc", "bag", "box"
+    ]) or packaging_type_upper in ["DRUMS", "CARTON", "PAIL", "IBC"]
+    
+    is_flexi_bulk = any(keyword in packaging_lower for keyword in [
+        "flexi", "iso", "tank"
+    ]) or packaging_type_upper in ["FLEXI", "ISO", "FLEXITANK"]
+    
+    if packaging_type_upper == "BULK" or (packaging_lower == "bulk" and not is_unit_based and not is_flexi_bulk):
+        # ========== CASE 1: BULK (No packaging) ==========
+        # For bulk, quantity is in MT, no packaging reduction
+        new_stock = max(0, prev_stock - quantity)
+        
+        await db.products.update_one(
+            {"id": product_id},
+            {"$set": {"current_stock": new_stock}}
+        )
+        
+        await db.inventory_balances.update_one(
+            {"item_id": product_id},
+            {"$inc": {"on_hand": -quantity}},
+            upsert=True
+        )
+        
+        # Create inventory movement
+        movement = InventoryMovement(
+            product_id=product_id,
+            product_name=job.get("product_name", "Unknown"),
+            sku=product.get("sku", ""),
+            movement_type="do_deduct",
+            quantity=quantity,
+            reference_type="delivery_order",
+            reference_id=delivery_order["id"],
+            reference_number=do_number,
+            previous_stock=prev_stock,
+            new_stock=new_stock,
+            created_by=current_user["id"]
+        )
+        await db.inventory_movements.insert_one(movement.model_dump())
+        
+    elif is_flexi_bulk:
+        # ========== CASE 2: FLEXI BAGS / ISO TANKS ==========
+        # quantity = number of flexi bags/tanks
+        # product is measured in MT (from job.get("total_weight_mt") or calculated)
+        
+        # Get the total MT from job order
+        total_product_mt = job.get("total_weight_mt") or job.get("weight_mt", 0)
+        
+        # If not available, calculate from quantity and net weight
+        if not total_product_mt:
+            net_weight_kg = job.get("net_weight_kg", 20000)  # Default 20 MT per flexi bag
+            total_product_mt = (quantity * net_weight_kg) / 1000
+        
+        # Reduce product stock in MT
+        new_stock = max(0, prev_stock - total_product_mt)
+        await db.products.update_one(
+            {"id": product_id},
+            {"$set": {"current_stock": new_stock}}
+        )
+        
+        await db.inventory_balances.update_one(
+            {"item_id": product_id},
+            {"$inc": {"on_hand": -total_product_mt}},
+            upsert=True
+        )
+        
+        # Create product movement
+        movement = InventoryMovement(
+            product_id=product_id,
+            product_name=job.get("product_name", "Unknown"),
+            sku=product.get("sku", ""),
+            movement_type="do_deduct",
+            quantity=total_product_mt,
+            reference_type="delivery_order",
+            reference_id=delivery_order["id"],
+            reference_number=do_number,
+            previous_stock=prev_stock,
+            new_stock=new_stock,
+            created_by=current_user["id"]
+        )
+        await db.inventory_movements.insert_one(movement.model_dump())
+        
+        # Reduce packaging stock (flexi bags/ISO tanks)
+        if packaging and packaging.lower() != "bulk":
+            packaging_item_id = await find_or_create_packaging_item(packaging)
+            if packaging_item_id:
+                await db.inventory_balances.update_one(
+                    {"item_id": packaging_item_id},
+                    {"$inc": {"on_hand": -quantity}},  # Reduce by number of flexi bags
+                    upsert=True
+                )
+    
+    elif is_unit_based:
+        # ========== CASE 3: UNIT-BASED PACKAGING (Drums, Cartons, Pails, IBCs, etc.) ==========
+        # quantity = number of units (drums/cartons/pails/IBCs)
+        
+        # Get net weight per unit
+        net_weight_kg = job.get("net_weight_kg", 200)  # Default 200 kg per unit
+        
+        # Special defaults for different packaging types
+        if "ibc" in packaging_lower:
+            net_weight_kg = job.get("net_weight_kg", 850)  # 850 kg default for IBC
+        elif "pail" in packaging_lower:
+            net_weight_kg = job.get("net_weight_kg", 20)  # 20 kg default for pail
+        elif "carton" in packaging_lower:
+            net_weight_kg = job.get("net_weight_kg", 25)  # 25 kg default for carton
+        
+        # Calculate total product in MT
+        total_product_kg = quantity * net_weight_kg
+        total_product_mt = total_product_kg / 1000
+        
+        # Reduce product stock in MT
+        new_stock = max(0, prev_stock - total_product_mt)
+        await db.products.update_one(
+            {"id": product_id},
+            {"$set": {"current_stock": new_stock}}
+        )
+        
+        await db.inventory_balances.update_one(
+            {"item_id": product_id},
+            {"$inc": {"on_hand": -total_product_mt}},
+            upsert=True
+        )
+        
+        # Create product movement
+        movement = InventoryMovement(
+            product_id=product_id,
+            product_name=job.get("product_name", "Unknown"),
+            sku=product.get("sku", ""),
+            movement_type="do_deduct",
+            quantity=total_product_mt,
+            reference_type="delivery_order",
+            reference_id=delivery_order["id"],
+            reference_number=do_number,
+            previous_stock=prev_stock,
+            new_stock=new_stock,
+            created_by=current_user["id"]
+        )
+        await db.inventory_movements.insert_one(movement.model_dump())
+        
+        # Reduce packaging stock (drums/cartons/pails/IBCs)
+        if packaging and packaging.lower() != "bulk":
+            packaging_item_id = await find_or_create_packaging_item(packaging)
+            if packaging_item_id:
+                await db.inventory_balances.update_one(
+                    {"item_id": packaging_item_id},
+                    {"$inc": {"on_hand": -quantity}},  # Reduce by number of units
+                    upsert=True
+                )
+    
+    else:
+        # ========== FALLBACK: Treat as BULK ==========
+        # If packaging type cannot be determined, default to bulk behavior
+        new_stock = max(0, prev_stock - quantity)
+        
+        await db.products.update_one(
+            {"id": product_id},
+            {"$set": {"current_stock": new_stock}}
+        )
+        
+        await db.inventory_balances.update_one(
+            {"item_id": product_id},
+            {"$inc": {"on_hand": -quantity}},
+            upsert=True
+        )
+        
+        movement = InventoryMovement(
+            product_id=product_id,
+            product_name=job.get("product_name", "Unknown"),
+            sku=product.get("sku", ""),
+            movement_type="do_deduct",
+            quantity=quantity,
+            reference_type="delivery_order",
+            reference_id=delivery_order["id"],
+            reference_number=do_number,
+            previous_stock=prev_stock,
+            new_stock=new_stock,
+            created_by=current_user["id"]
+        )
+        await db.inventory_movements.insert_one(movement.model_dump())
+    
+    # Notify receivables
+    await create_notification(
+        event_type="DO_ISSUED",
+        title=f"Delivery Order Issued: {do_number}",
+        message=f"DO {do_number} issued for {job.get('job_number')}. Ready for invoicing.",
+        link="/delivery-orders",
+        ref_type="DELIVERY_ORDER",
+        ref_id=delivery_order["id"],
+        target_roles=["finance", "receivables"],
+        notification_type="success"
+    )
+    
+    return {"success": True, "do_number": do_number, "delivery_order": delivery_order}
+
 # ==================== SHIPPING ROUTES ====================
 
 async def auto_create_transport_from_cro(booking_id: str, cro_data, booking_dict: dict, job_numbers: list, customer_name: str, current_user_id: str):
@@ -5319,6 +5696,17 @@ async def auto_create_transport_from_cro(booking_id: str, cro_data, booking_dict
     existing_schedule = await db.transport_schedules.find_one({"shipping_booking_id": booking_id})
     
     if existing_schedule:
+        # Fix existing transport_outward records that might be missing job_order_id
+        job_order_ids = booking_dict.get("job_order_ids", [])
+        primary_job_id = job_order_ids[0] if job_order_ids and len(job_order_ids) > 0 else None
+        
+        if primary_job_id:
+            # Update transport_outward records for this booking if they're missing job_order_id
+            await db.transport_outward.update_many(
+                {"shipping_booking_id": booking_id, "job_order_id": None},
+                {"$set": {"job_order_id": primary_job_id}}
+            )
+        
         return existing_schedule  # Already created
     
     # Get product names from jobs
@@ -5365,14 +5753,14 @@ async def auto_create_transport_from_cro(booking_id: str, cro_data, booking_dict
         pickup_date=pickup_date,
         pickup_location="Factory",
         schedule_number=schedule_number,
-        booking_number=booking_dict["booking_number"],
+        booking_number=booking_dict.get("booking_number", ""),
         cro_number=cro_number,
         vessel_name=vessel_name,
         vessel_date=vessel_date,
         cutoff_date=cutoff_date_str,
-        container_type=booking_dict["container_type"],
-        container_count=booking_dict["container_count"],
-        port_of_loading=booking_dict["port_of_loading"],
+        container_type=booking_dict.get("container_type", "20ft"),
+        container_count=booking_dict.get("container_count", 1),
+        port_of_loading=booking_dict.get("port_of_loading", ""),
         job_numbers=job_numbers,
         product_names=product_names,
         auto_generated=True,
@@ -5384,11 +5772,11 @@ async def auto_create_transport_from_cro(booking_id: str, cro_data, booking_dict
     dispatch_schedule = DispatchSchedule(
         transport_schedule_id=transport_schedule.id,
         schedule_number=schedule_number,
-        booking_number=booking_dict["booking_number"],
+        booking_number=booking_dict.get("booking_number", ""),
         job_numbers=job_numbers,
         product_names=product_names,
-        container_type=booking_dict["container_type"],
-        container_count=booking_dict["container_count"],
+        container_type=booking_dict.get("container_type", "20ft"),
+        container_count=booking_dict.get("container_count", 1),
         pickup_date=pickup_date,
         expected_arrival=pickup_date,
         vessel_date=vessel_date or "",
@@ -5401,18 +5789,25 @@ async def auto_create_transport_from_cro(booking_id: str, cro_data, booking_dict
     
     # Create transport_outward record for Transport Window
     transport_out_number = await generate_sequence("TOUT", "transport_outward")
+    
+    # Get job_order_ids from booking
+    job_order_ids = booking_dict.get("job_order_ids", [])
+    # If single job, use first job_order_id for job_order_id field
+    primary_job_id = job_order_ids[0] if job_order_ids and len(job_order_ids) > 0 else None
+    
     transport_outward = {
         "id": str(uuid.uuid4()),
         "transport_number": transport_out_number,
         "shipping_booking_id": booking_id,
-        "booking_number": booking_dict["booking_number"],
+        "booking_number": booking_dict.get("booking_number", ""),
         "cro_number": cro_number,
         "job_numbers": job_numbers,
+        "job_order_id": primary_job_id,  # Add job_order_id for frontend matching
         "customer_name": customer_name,
         "transport_type": "CONTAINER",
         "container_number": None,
-        "container_type": booking_dict.get("container_type"),
-        "destination": booking_dict.get("port_of_discharge"),
+        "container_type": booking_dict.get("container_type", "20ft"),
+        "destination": booking_dict.get("port_of_discharge", ""),
         "dispatch_date": None,
         "delivery_date": None,
         "status": "PENDING",
@@ -5424,7 +5819,7 @@ async def auto_create_transport_from_cro(booking_id: str, cro_data, booking_dict
 
 @api_router.post("/shipping-bookings", response_model=ShippingBooking)
 async def create_shipping_booking(data: ShippingBookingCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "shipping"]:
+    if not has_permission(current_user, required_roles=["admin", "shipping"], required_page="/shipping"):
         raise HTTPException(status_code=403, detail="Only shipping can create bookings")
     
     # ========== VALIDATION: Check for duplicate PO bookings ==========
@@ -5596,6 +5991,13 @@ async def create_shipping_booking(data: ShippingBookingCreate, current_user: dic
                 if so:
                     customer_name = so.get("customer_name", "Customer")
     
+    # Save incoterm to booking record for display
+    if incoterm and not is_po_import:
+        await db.shipping_bookings.update_one(
+            {"id": booking.id},
+            {"$set": {"incoterm": incoterm}}
+        )
+    
         # Create notification based on booking source
         if is_customer_booking:
             await create_notification(
@@ -5637,7 +6039,7 @@ async def get_shipping_bookings(status: Optional[str] = None, current_user: dict
 @api_router.post("/shipping-bookings/cleanup-orphaned")
 async def cleanup_orphaned_bookings(current_user: dict = Depends(get_current_user)):
     """Clean up bookings that reference non-existent POs or job orders"""
-    if current_user["role"] != "admin":
+    if not has_permission(current_user, required_roles=["admin"], required_page="/shipping"):
         raise HTTPException(status_code=403, detail="Only admin can cleanup bookings")
     
     all_bookings = await db.shipping_bookings.find({}, {"_id": 0}).to_list(1000)
@@ -5700,7 +6102,7 @@ async def get_shipping_booking(booking_id: str, current_user: dict = Depends(get
 @api_router.put("/shipping-bookings/{booking_id}/cro")
 async def update_shipping_cro(booking_id: str, data: ShippingBookingUpdate, current_user: dict = Depends(get_current_user)):
     """Update CRO details and auto-generate transport schedules"""
-    if current_user["role"] not in ["admin", "shipping"]:
+    if not has_permission(current_user, required_roles=["admin", "shipping"], required_page="/shipping"):
         raise HTTPException(status_code=403, detail="Only shipping can update bookings")
     
     booking = await db.shipping_bookings.find_one({"id": booking_id}, {"_id": 0})
@@ -5812,8 +6214,15 @@ async def update_shipping_cro(booking_id: str, data: ShippingBookingUpdate, curr
         
         # Create notifications (only for export bookings with transport schedules)
         if transport_schedule_obj:
-            schedule_num = transport_schedule_obj.schedule_number
-            pickup_date = transport_schedule_obj.pickup_date
+            # Handle both dict and Pydantic object formats
+            if isinstance(transport_schedule_obj, dict):
+                schedule_num = transport_schedule_obj.get("schedule_number")
+                pickup_date = transport_schedule_obj.get("pickup_date")
+                schedule_id = transport_schedule_obj.get("id")
+            else:
+                schedule_num = transport_schedule_obj.schedule_number
+                pickup_date = transport_schedule_obj.pickup_date
+                schedule_id = transport_schedule_obj.id
             
             await create_notification(
                 event_type="CRO_RECEIVED",
@@ -5832,12 +6241,12 @@ async def update_shipping_cro(booking_id: str, data: ShippingBookingUpdate, curr
                 message=f"CRO {data.cro_number} received. Transport booking required for pickup on {pickup_date}. Please assign transporter and vehicle via Transport Planner.",
                 link="/transport-planner",
                 ref_type="TRANSPORT_SCHEDULE",
-                ref_id=transport_schedule_obj.id,
+                ref_id=schedule_id,
                 target_roles=["admin", "transport", "dispatch"],
                 notification_type="info"
             )
             
-            dispatch_schedule = await db.dispatch_schedules.find_one({"transport_schedule_id": transport_schedule_obj.id}, {"_id": 0, "id": 1})
+            dispatch_schedule = await db.dispatch_schedules.find_one({"transport_schedule_id": schedule_id}, {"_id": 0, "id": 1})
             if dispatch_schedule:
                 await create_notification(
                     event_type="CONTAINER_LOADING_SCHEDULED",
@@ -5853,7 +6262,9 @@ async def update_shipping_cro(booking_id: str, data: ShippingBookingUpdate, curr
             # Send email notification
             updated_booking = await db.shipping_bookings.find_one({"id": booking_id}, {"_id": 0})
             if updated_booking:
-                await notify_cro_received(updated_booking, transport_schedule_obj.model_dump())
+                # Convert to dict if it's a Pydantic object
+                schedule_dict = transport_schedule_obj if isinstance(transport_schedule_obj, dict) else transport_schedule_obj.model_dump()
+                await notify_cro_received(updated_booking, schedule_dict)
     
     # Handle PO import bookings - route to Import Window after CRO is received
     # Create import record for ALL PO_IMPORT bookings (not just FOB) when CRO is saved
@@ -6034,7 +6445,7 @@ async def update_shipping_booking(
 
 @api_router.post("/transport-schedules", response_model=TransportSchedule)
 async def create_transport_schedule(data: TransportScheduleCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "transport"]:
+    if not has_permission(current_user, required_roles=["admin", "transport"], required_page="/transport-window"):
         raise HTTPException(status_code=403, detail="Only transport can create schedules")
     
     booking = await db.shipping_bookings.find_one({"id": data.shipping_booking_id}, {"_id": 0})
@@ -6222,7 +6633,7 @@ async def update_dispatch_status(schedule_id: str, status: str, current_user: di
 
 @api_router.post("/export-documents", response_model=ExportDocument)
 async def create_export_document(data: ExportDocumentCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "documentation"]:
+    if not has_permission(current_user, required_roles=["admin", "documentation"], required_page="/documentation"):
         raise HTTPException(status_code=403, detail="Only documentation can create export documents")
     
     booking = await db.shipping_bookings.find_one({"id": data.shipping_booking_id}, {"_id": 0})
@@ -6245,7 +6656,7 @@ async def get_export_documents(shipping_booking_id: Optional[str] = None, curren
 
 @api_router.post("/qc-batches", response_model=QCBatch)
 async def create_qc_batch(data: QCBatchCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "qc"]:
+    if not has_permission(current_user, required_roles=["admin", "qc"], required_page="/qc"):
         raise HTTPException(status_code=403, detail="Only QC can create batches")
     
     job = await db.job_orders.find_one({"id": data.job_order_id}, {"_id": 0})
@@ -6626,26 +7037,26 @@ async def get_product_packaging_report(current_user: dict = Depends(get_current_
             status = "Low Stock"
         else:
             status = "In Stock"
+        if actual_packaging.upper() != "BULK" and qty_standard > 0:
+            report_items.append({
+                "product_id": product_id,
+                "product_name": product_name,
+                "sku": product.get("sku", ""),
+                "packing": actual_packaging,  # Use actual_packaging which may come from job orders
+                "qty_standard": qty_standard,
+                "qty_standard_display": f"{qty_standard} {unit}" if qty_standard > 0 else "Bulk",
+                "current_stock": current_stock,
+                "current_stock_display": f"{current_stock:.2f} {unit}",
+                "reserved": reserved,
+                "reserved_display": f"{reserved:.2f} {unit}" if reserved > 0 else "0.00",
+                "available": available,
+                "available_display": f"{available:.2f} {unit}",
+                "drums_count": drums_count if drums_count > 0 else "-",
+                "status": status,
+                "unit": unit
+            })
         
-        report_items.append({
-            "product_id": product_id,
-            "product_name": product_name,
-            "sku": product.get("sku", ""),
-            "packing": actual_packaging,  # Use actual_packaging which may come from job orders
-            "qty_standard": qty_standard,
-            "qty_standard_display": f"{qty_standard} {unit}" if qty_standard > 0 else "Bulk",
-            "current_stock": current_stock,
-            "current_stock_display": f"{current_stock:.2f} {unit}",
-            "reserved": reserved,
-            "reserved_display": f"{reserved:.2f} {unit}" if reserved > 0 else "0.00",
-            "available": available,
-            "available_display": f"{available:.2f} {unit}",
-            "drums_count": drums_count if drums_count > 0 else "-",
-            "status": status,
-            "unit": unit
-        })
-    
-    return {"items": report_items}
+        return {"items": report_items}
 
 class StockAdjustment(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -6676,7 +7087,7 @@ class AddStockItemRequest(BaseModel):
 @api_router.post("/stock/add-item")
 async def add_stock_item(data: AddStockItemRequest, current_user: dict = Depends(get_current_user)):
     """Add a new stock item"""
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/stock-management"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can add stock items")
     
     # Generate SKU if not provided
@@ -6767,7 +7178,7 @@ async def adjust_stock(
     current_user: dict = Depends(get_current_user)
 ):
     """Adjust stock for any item type"""
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/stock-management"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can adjust stock")
     
     # Find the item in products, packaging, or inventory_items
@@ -7230,7 +7641,7 @@ async def get_procurement_list(current_user: dict = Depends(get_current_user)):
 @api_router.post("/production/logs", response_model=ProductionLog)
 async def create_production_log(data: ProductionLogCreate, current_user: dict = Depends(get_current_user)):
     """Create a production log entry"""
-    if current_user["role"] not in ["admin", "production"]:
+    if not has_permission(current_user, required_roles=["admin", "production"], required_page="/production-schedule"):
         raise HTTPException(status_code=403, detail="Only admin/production can create production logs")
     
     log = ProductionLog(**data.model_dump(), created_by=current_user["id"])
@@ -7593,6 +8004,25 @@ async def get_production_logs(
     logs = await db.production_logs.find(query, {"_id": 0}).sort("production_date", -1).to_list(1000)
     return logs
 
+@api_router.get("/production/logs/batch/{job_number}")
+async def get_batch_by_job_number(job_number: str, current_user: dict = Depends(get_current_user)):
+    """Get batch number from production logs by job number"""
+    log = await db.production_logs.find_one(
+        {"job_number": job_number},
+        {"_id": 0}
+    )
+    
+    if log:
+        return {
+            "batch_number": log.get("batch_number"),
+            "production_type": log.get("production_type", "drummed"),
+            "quantity_produced": log.get("quantity_produced"),
+            "production_date": log.get("production_date"),
+            "found": True
+        }
+    
+    return {"batch_number": None, "found": False}
+
 @api_router.get("/production/jobs-by-category")
 async def get_jobs_by_category(
     category: str,
@@ -7728,7 +8158,7 @@ class BlendReport(BlendReportCreate):
 
 @api_router.post("/blend-reports", response_model=BlendReport)
 async def create_blend_report(data: BlendReportCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "production", "qc"]:
+    if not has_permission(current_user, required_roles=["admin", "production", "qc"], required_page="/production-schedule"):
         raise HTTPException(status_code=403, detail="Only production/QC can create blend reports")
     
     job = await db.job_orders.find_one({"id": data.job_order_id}, {"_id": 0})
@@ -7774,7 +8204,7 @@ async def get_blend_report(report_id: str, current_user: dict = Depends(get_curr
 
 @api_router.put("/blend-reports/{report_id}/approve")
 async def approve_blend_report(report_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "qc"]:
+    if not has_permission(current_user, required_roles=["admin", "qc"], required_page="/production-schedule"):
         raise HTTPException(status_code=403, detail="Only QC can approve blend reports")
     
     result = await db.blend_reports.update_one(
@@ -9599,11 +10029,11 @@ def generate_job_order_pdf(job: dict, so: dict = None, quotation: dict = None, c
     elements.append(Spacer(1, 0.3*cm))
     
     # Mode of Transport and Free Time
-    mode_of_transport = job.get("mode_of_transport", quotation.get("mode_of_transport", "SEA") if quotation else "SEA")
+    transport_mode = job.get("transport_mode", quotation.get("transport_mode", "SEA") if quotation else "SEA")
     free_time_days = job.get("free_time_days", quotation.get("free_time_days", "21") if quotation else "21")
     
     transport_data = [
-        ["Mode of Transport:", mode_of_transport, "FREE TIME DAYS AT DESTINATION:", f"{free_time_days} DAYS DETENTION FREE TIME ALLOWED AT PORT OF DESTINATION"],
+        ["Mode of Transport:", transport_mode, "FREE TIME DAYS AT DESTINATION:", f"{free_time_days} DAYS DETENTION FREE TIME ALLOWED AT PORT OF DESTINATION"],
     ]
     
     transport_table = Table(transport_data, colWidths=[4*cm, 5*cm, 4.5*cm, 4.9*cm])
@@ -10368,7 +10798,7 @@ class Notification(NotificationCreate):
 
 @api_router.post("/notifications", response_model=Notification)
 async def create_notification(data: NotificationCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin"]:
+    if not has_permission(current_user, required_roles=["admin"], required_page="/settings"):
         raise HTTPException(status_code=403, detail="Only admin can create notifications")
     
     notification = Notification(**data.model_dump(), created_by=current_user["id"])
@@ -10438,7 +10868,7 @@ class UserPasswordChange(BaseModel):
 
 @api_router.get("/users")
 async def get_users(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin"]:
+    if not has_permission(current_user, required_roles=["admin"], required_page="/users"):
         raise HTTPException(status_code=403, detail="Only admin can view users")
     
     users = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(1000)
@@ -10446,7 +10876,7 @@ async def get_users(current_user: dict = Depends(get_current_user)):
 
 @api_router.get("/users/{user_id}")
 async def get_user(user_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin"] and current_user["id"] != user_id:
+    if not has_permission(current_user, required_roles=["admin"], required_page="/users") and current_user["id"] != user_id:
         raise HTTPException(status_code=403, detail="Only admin can view other users")
     
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
@@ -10456,7 +10886,7 @@ async def get_user(user_id: str, current_user: dict = Depends(get_current_user))
 
 @api_router.put("/users/{user_id}")
 async def update_user(user_id: str, data: UserUpdate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin"]:
+    if not has_permission(current_user, required_roles=["admin"], required_page="/users"):
         raise HTTPException(status_code=403, detail="Only admin can update users")
     
     update_data = {k: v for k, v in data.model_dump().items() if v is not None}
@@ -10473,7 +10903,7 @@ async def update_user(user_id: str, data: UserUpdate, current_user: dict = Depen
 
 @api_router.put("/users/{user_id}/password")
 async def change_user_password(user_id: str, data: UserPasswordChange, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin"]:
+    if not has_permission(current_user, required_roles=["admin"], required_page="/users"):
         raise HTTPException(status_code=403, detail="Only admin can change passwords")
     
     hashed = hash_password(data.new_password)
@@ -10484,7 +10914,7 @@ async def change_user_password(user_id: str, data: UserPasswordChange, current_u
 
 @api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin"]:
+    if not has_permission(current_user, required_roles=["admin"], required_page="/users"):
         raise HTTPException(status_code=403, detail="Only admin can delete users")
     
     if user_id == current_user["id"]:
@@ -10538,7 +10968,7 @@ scheduler = ProductionScheduler(db)
 # Packaging Management
 @api_router.post("/packaging", response_model=Packaging)
 async def create_packaging(data: PackagingCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can create packaging")
     
     packaging = Packaging(**data.model_dump())
@@ -10555,7 +10985,7 @@ async def get_packaging(category: Optional[str] = None, current_user: dict = Dep
 
 @api_router.put("/packaging/{packaging_id}", response_model=Packaging)
 async def update_packaging(packaging_id: str, data: PackagingCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can update packaging")
     
     result = await db.packaging.update_one({"id": packaging_id}, {"$set": data.model_dump()})
@@ -10875,17 +11305,9 @@ async def update_costing(
     costing_type_from_data = data.costing_type or costing.get("costing_type")
     if data.custom_breakdown:
         cb = data.custom_breakdown or {}
-        # LOCAL_BULK_TO_PLANT and LOCAL_PURCHASE_SALE: total cost = Product Cost + Cost Per MT (from Table 3)
-        if costing_type_from_data in ["LOCAL_BULK_TO_PLANT", "LOCAL_PURCHASE_SALE"]:
-            product_cost = cb.get("product_cost") or 0.0
-            cost_per_mt = cb.get("cost_per_mt") or 0.0
-            total_cost = product_cost + cost_per_mt
-        # EXPORT_20FT_DG and EXPORT_40FT_DG: total cost = Product Cost + Import Shipment + Export Shipment
-        elif costing_type_from_data in ["EXPORT_20FT_DG", "EXPORT_40FT_DG"]:
-            product_cost = cb.get("product_cost") or 0.0
-            import_shipment = cb.get("import_shipment_charges") or 0.0
-            export_shipment = cb.get("export_shipment_charges") or 0.0
-            total_cost = product_cost + import_shipment + export_shipment
+        # Get total_cost from custom_breakdown if available
+        if cb.get("total_cost") is not None:
+            total_cost = cb.get("total_cost")
     
     selling_price = costing.get("selling_price", 0.0)
     reference_type = costing.get("reference_type")
@@ -10901,9 +11323,18 @@ async def update_costing(
     total_quantity = sum(item.get("quantity", 0) for item in items)
     unit_price = selling_price / total_quantity if total_quantity > 0 else 0.0
     
-    # Calculate margin
+    # Calculate margin - USE net_profit_loss from custom_breakdown if it exists
     costing_service = CostingService(db)
-    margin = costing_service.calculate_margin(selling_price, total_cost, total_quantity, unit_price)
+    if data.custom_breakdown and data.custom_breakdown.get("net_profit_loss") is not None:
+        # Use the net profit from costing modal
+        net_profit = data.custom_breakdown.get("net_profit_loss")
+        margin = {
+            "margin_amount": net_profit,
+            "margin_percentage": (net_profit / selling_price * 100) if selling_price > 0 else 0
+        }
+    else:
+        # Only recalculate if not provided
+        margin = costing_service.calculate_margin(selling_price, total_cost, total_quantity, unit_price)
     
     # Update costing
     update_data = {
@@ -10979,7 +11410,7 @@ async def create_transport_route(
     current_user: dict = Depends(get_current_user)
 ):
     """Create a new transport route"""
-    if current_user["role"] not in ["admin", "finance"]:
+    if not has_permission(current_user, required_roles=["admin", "finance"], required_page="/settings"):
         raise HTTPException(status_code=403, detail="Only admin/finance can manage transport routes")
     
     route = TransportRoute(**data.model_dump())
@@ -10993,7 +11424,7 @@ async def update_transport_route(
     current_user: dict = Depends(get_current_user)
 ):
     """Update a transport route"""
-    if current_user["role"] not in ["admin", "finance"]:
+    if not has_permission(current_user, required_roles=["admin", "finance"], required_page="/settings"):
         raise HTTPException(status_code=403, detail="Only admin/finance can manage transport routes")
     
     update_data = data.model_dump()
@@ -11018,7 +11449,7 @@ async def update_transport_master_from_bookings(
     Update transport master routes from actual booking charges.
     Calculates average rate from recent bookings for matching routes.
     """
-    if current_user["role"] not in ["admin", "finance"]:
+    if not has_permission(current_user, required_roles=["admin", "finance"], required_page="/settings"):
         raise HTTPException(status_code=403, detail="Only admin/finance can update transport master")
     
     if not auto_update:
@@ -11136,7 +11567,7 @@ async def create_fixed_charge(
     current_user: dict = Depends(get_current_user)
 ):
     """Create a new fixed charge"""
-    if current_user["role"] not in ["admin", "finance"]:
+    if not has_permission(current_user, required_roles=["admin", "finance"], required_page="/settings"):
         raise HTTPException(status_code=403, detail="Only admin/finance can manage fixed charges")
     
     charge = FixedCharge(**data.model_dump())
@@ -11150,7 +11581,7 @@ async def update_fixed_charge(
     current_user: dict = Depends(get_current_user)
 ):
     """Update a fixed charge"""
-    if current_user["role"] not in ["admin", "finance"]:
+    if not has_permission(current_user, required_roles=["admin", "finance"], required_page="/settings"):
         raise HTTPException(status_code=403, detail="Only admin/finance can manage fixed charges")
     
     update_data = data.model_dump()
@@ -11168,7 +11599,7 @@ async def update_fixed_charge(
 # Inventory Items Management
 @api_router.post("/inventory-items", response_model=InventoryItem)
 async def create_inventory_item(data: InventoryItemCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can create inventory items")
     
     item = InventoryItem(**data.model_dump())
@@ -11308,7 +11739,7 @@ async def update_inventory_item(
     current_user: dict = Depends(get_current_user)
 ):
     """Update an inventory item (name, SKU, capacity, etc.)"""
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can update inventory items")
     
     item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
@@ -11331,7 +11762,7 @@ async def update_inventory_item(
 @api_router.delete("/inventory-items/{item_id}")
 async def delete_inventory_item(item_id: str, current_user: dict = Depends(get_current_user)):
     """Delete/deactivate an inventory item"""
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can delete inventory items")
     
     item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
@@ -11369,7 +11800,7 @@ async def adjust_inventory_stock(
     current_user: dict = Depends(get_current_user)
 ):
     """Adjust stock quantity (increase or decrease drums/items)"""
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can adjust stock")
     
     item = await db.inventory_items.find_one({"id": item_id}, {"_id": 0})
@@ -11429,7 +11860,7 @@ async def adjust_inventory_stock(
 # Job Order Items Management
 @api_router.post("/job-order-items", response_model=JobOrderItem)
 async def create_job_order_item(data: JobOrderItemCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "production", "sales"]:
+    if not has_permission(current_user, required_roles=["admin", "production", "sales"], required_page="/job-orders"):
         raise HTTPException(status_code=403, detail="Only admin/production/sales can create job order items")
     
     item = JobOrderItem(**data.model_dump())
@@ -11447,7 +11878,7 @@ async def get_job_order_items(status: Optional[str] = None, current_user: dict =
 # Product BOM Management
 @api_router.post("/product-boms", response_model=ProductBOM)
 async def create_product_bom(data: ProductBOMCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "production"]:
+    if not has_permission(current_user, required_roles=["admin", "production"], required_page="/bom-management"):
         raise HTTPException(status_code=403, detail="Only admin/production can create BOMs")
     
     # If this is set as active, deactivate other BOMs for same product
@@ -11463,7 +11894,7 @@ async def create_product_bom(data: ProductBOMCreate, current_user: dict = Depend
 
 @api_router.post("/product-bom-items", response_model=ProductBOMItem)
 async def create_product_bom_item(data: ProductBOMItemCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "production"]:
+    if not has_permission(current_user, required_roles=["admin", "production"], required_page="/bom-management"):
         raise HTTPException(status_code=403, detail="Only admin/production can create BOM items")
     
     item = ProductBOMItem(**data.model_dump())
@@ -11513,7 +11944,7 @@ async def get_product_boms(product_id: str, current_user: dict = Depends(get_cur
 # Product-Packaging Conversion Specs
 @api_router.post("/product-packaging-specs", response_model=ProductPackagingSpec)
 async def create_product_packaging_spec(data: ProductPackagingSpecCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "production"]:
+    if not has_permission(current_user, required_roles=["admin", "production"], required_page="/products"):
         raise HTTPException(status_code=403, detail="Only admin/production can create conversion specs")
     
     spec = ProductPackagingSpec(**data.model_dump())
@@ -11528,7 +11959,7 @@ async def get_product_packaging_specs(product_id: str, current_user: dict = Depe
 # Packaging BOM Management
 @api_router.post("/packaging-boms", response_model=PackagingBOM)
 async def create_packaging_bom(data: PackagingBOMCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can create packaging BOMs")
     
     bom = PackagingBOM(**data.model_dump())
@@ -11537,7 +11968,7 @@ async def create_packaging_bom(data: PackagingBOMCreate, current_user: dict = De
 
 @api_router.post("/packaging-bom-items", response_model=PackagingBOMItem)
 async def create_packaging_bom_item(data: PackagingBOMItemCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can create packaging BOM items")
     
     item = PackagingBOMItem(**data.model_dump())
@@ -11566,7 +11997,7 @@ async def get_packaging_boms(packaging_id: str, current_user: dict = Depends(get
 # BOM Activation Endpoints
 @api_router.put("/product-boms/{bom_id}/activate")
 async def activate_product_bom(bom_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "production"]:
+    if not has_permission(current_user, required_roles=["admin", "production"], required_page="/bom-management"):
         raise HTTPException(status_code=403, detail="Only admin/production can activate BOMs")
     
     bom = await db.product_boms.find_one({"id": bom_id}, {"_id": 0})
@@ -11589,7 +12020,7 @@ async def activate_product_bom(bom_id: str, current_user: dict = Depends(get_cur
 
 @api_router.put("/packaging-boms/{bom_id}/activate")
 async def activate_packaging_bom(bom_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "inventory"]:
+    if not has_permission(current_user, required_roles=["admin", "inventory"], required_page="/inventory"):
         raise HTTPException(status_code=403, detail="Only admin/inventory can activate packaging BOMs")
     
     bom = await db.packaging_boms.find_one({"id": bom_id}, {"_id": 0})
@@ -11613,7 +12044,7 @@ async def activate_packaging_bom(bom_id: str, current_user: dict = Depends(get_c
 # Suppliers Management
 @api_router.post("/suppliers", response_model=Supplier)
 async def create_supplier(data: SupplierCreate, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "procurement"]:
+    if not has_permission(current_user, required_roles=["admin", "procurement"], required_page="/procurement"):
         raise HTTPException(status_code=403, detail="Only admin/procurement can create suppliers")
     
     supplier = Supplier(**data.model_dump())
@@ -11627,7 +12058,7 @@ async def get_suppliers(current_user: dict = Depends(get_current_user)):
 
 @api_router.delete("/suppliers/{supplier_id}")
 async def delete_supplier(supplier_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["admin", "procurement"]:
+    if not has_permission(current_user, required_roles=["admin", "procurement"], required_page="/procurement"):
         raise HTTPException(status_code=403, detail="Only admin/procurement can delete suppliers")
     
     result = await db.suppliers.delete_one({"id": supplier_id})
@@ -15488,25 +15919,58 @@ async def get_transport_outward(
             
             # If not found, try to get from linked job orders
             if not shipping_booking:
-                # Check job_order_id
+                # Check job_order_id - search both ways (from job order and from shipping bookings)
                 if record.get("job_order_id"):
-                    job_order = await db.job_orders.find_one({"id": record["job_order_id"]}, {"_id": 0})
+                    job_id = record["job_order_id"]
+                    # First try from job order
+                    job_order = await db.job_orders.find_one({"id": job_id}, {"_id": 0})
                     if job_order and job_order.get("shipping_booking_id"):
                         shipping_booking = await db.shipping_bookings.find_one({"id": job_order["shipping_booking_id"]}, {"_id": 0})
+                    
+                    # If still not found, search shipping bookings that contain this job_id
+                    if not shipping_booking:
+                        shipping_booking = await db.shipping_bookings.find_one(
+                            {"job_order_ids": job_id, "status": {"$nin": ["cancelled", "deleted"]}},
+                            {"_id": 0}
+                        )
                 
                 # Check job_numbers array
                 if not shipping_booking and record.get("job_numbers"):
                     for job_number in record.get("job_numbers", []):
                         job_order = await db.job_orders.find_one({"job_number": job_number}, {"_id": 0})
-                        if job_order and job_order.get("shipping_booking_id"):
+                        if job_order:
+                            # Try from job order's shipping_booking_id
+                            if job_order.get("shipping_booking_id"):
+                                shipping_booking = await db.shipping_bookings.find_one({"id": job_order["shipping_booking_id"]}, {"_id": 0})
+                                if shipping_booking:
+                                    break
+                            
+                            # Try searching by job order ID in shipping bookings
+                            if not shipping_booking and job_order.get("id"):
+                                shipping_booking = await db.shipping_bookings.find_one(
+                                    {"job_order_ids": job_order["id"], "status": {"$nin": ["cancelled", "deleted"]}},
+                                    {"_id": 0}
+                                )
+                                if shipping_booking:
+                                    break
+                
+                # If still not found and we have job_number directly, try one more search
+                if not shipping_booking and record.get("job_number"):
+                    job_order = await db.job_orders.find_one({"job_number": record["job_number"]}, {"_id": 0})
+                    if job_order:
+                        if job_order.get("shipping_booking_id"):
                             shipping_booking = await db.shipping_bookings.find_one({"id": job_order["shipping_booking_id"]}, {"_id": 0})
-                            if shipping_booking:
-                                break
+                        elif job_order.get("id"):
+                            shipping_booking = await db.shipping_bookings.find_one(
+                                {"job_order_ids": job_order["id"], "status": {"$nin": ["cancelled", "deleted"]}},
+                                {"_id": 0}
+                            )
             
             if shipping_booking:
                 # Add shipping booking fields to transport record
                 # CRITICAL: Use .get() which returns the value (including empty strings) or None if key doesn't exist
                 record["si_cutoff"] = shipping_booking.get("si_cutoff")
+                record["vgm_cutoff"] = shipping_booking.get("vgm_cutoff")
                 record["pull_out_date"] = shipping_booking.get("pull_out_date")
                 record["gate_in_date"] = shipping_booking.get("gate_in_date")
                 record["container_count"] = shipping_booking.get("container_count") or record.get("container_count") or 1
@@ -15832,38 +16296,80 @@ async def book_transport_outward(data: dict, current_user: dict = Depends(get_cu
     if booking_quantity_mt > job_total_weight_mt:
         raise HTTPException(status_code=400, detail=f"Booking quantity ({booking_quantity_mt} MT) cannot exceed job order total weight ({job_total_weight_mt} MT)")
     
-    # Create transport outward record
-    transport_number = await generate_sequence("TOUT", "transport_outward")
-    transport_data = {
-        "id": str(uuid.uuid4()),
-        "transport_number": transport_number,
+    # Check if transport already exists for this job (e.g., auto-created from CRO for export containers)
+    existing_transport = await db.transport_outward.find_one({
         "job_order_id": job_id,
-        "job_number": job.get("job_number", ""),
-        "customer_name": job.get("customer_name", ""),
-        "product_name": job.get("product_name", ""),
-        "quantity": booking_quantity_mt,  # Use booking quantity in MT (allows partial bookings)
-        "unit": "MT",  # Always use MT for transport bookings
-        "packaging": job.get("packaging", ""),
-        "transporter_name": data.get("transporter_name") or data.get("transporter", ""),
-        "vehicle_number": data.get("vehicle_number", ""),
-        "vehicle_type": data.get("vehicle_type", ""),
-        "driver_name": data.get("driver_name", ""),
-        "driver_contact": data.get("driver_contact") or data.get("driver_phone", ""),
-        "scheduled_date": data.get("scheduled_date") or data.get("pickup_date", ""),
-        "delivery_date": data.get("delivery_date") or data.get("expected_delivery", ""),
         "transport_type": transport_type,
-        "incoterm": job.get("incoterm", ""),
-        "notes": data.get("notes", ""),
-        "transport_charges": data.get("transport_charges"),  # Save transport charges
-        "delivery_order_number": data.get("delivery_order_number"),  # Save delivery order number
-        "delivery_order_document": data.get("delivery_order_document"),  # Save delivery order document path
-        "status": "PENDING",  # Set to PENDING so it can be marked as LOADING/DISPATCHED
-        "source": "TRANSPORT_PLANNER",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_by": current_user["id"]
-    }
+        "status": "PENDING"
+    }, {"_id": 0})
     
-    await db.transport_outward.insert_one(transport_data)
+    if existing_transport:
+        # Update existing transport record with booking details
+        transport_number = existing_transport.get("transport_number")
+        transport_id = existing_transport.get("id")
+        
+        update_data = {
+            "transporter_name": data.get("transporter_name") or data.get("transporter", ""),
+            "vehicle_number": data.get("vehicle_number", ""),
+            "vehicle_type": data.get("vehicle_type", ""),
+            "driver_name": data.get("driver_name", ""),
+            "driver_contact": data.get("driver_contact") or data.get("driver_phone", ""),
+            "scheduled_date": data.get("scheduled_date") or data.get("pickup_date", ""),
+            "delivery_date": data.get("delivery_date") or data.get("expected_delivery", ""),
+            "notes": data.get("notes", ""),
+            "transport_charges": data.get("transport_charges"),
+            "delivery_order_number": data.get("delivery_order_number"),
+            "delivery_order_document": data.get("delivery_order_document"),
+            "source": "TRANSPORT_PLANNER",  # Update source to indicate it's been booked through planner
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": current_user["id"]
+        }
+        
+        # Only update quantity if provided (don't overwrite CRO-created quantity)
+        if data.get("quantity") is not None and data.get("quantity") != "":
+            update_data["quantity"] = booking_quantity_mt
+            update_data["unit"] = "MT"
+        
+        await db.transport_outward.update_one(
+            {"id": transport_id},
+            {"$set": update_data}
+        )
+        
+        transport_data = {**existing_transport, **update_data}
+    else:
+        # Create new transport outward record
+        transport_number = await generate_sequence("TOUT", "transport_outward")
+        transport_id = str(uuid.uuid4())
+        transport_data = {
+            "id": transport_id,
+            "transport_number": transport_number,
+            "job_order_id": job_id,
+            "job_number": job.get("job_number", ""),
+            "customer_name": job.get("customer_name", ""),
+            "product_name": job.get("product_name", ""),
+            "quantity": booking_quantity_mt,  # Use booking quantity in MT (allows partial bookings)
+            "unit": "MT",  # Always use MT for transport bookings
+            "packaging": job.get("packaging", ""),
+            "transporter_name": data.get("transporter_name") or data.get("transporter", ""),
+            "vehicle_number": data.get("vehicle_number", ""),
+            "vehicle_type": data.get("vehicle_type", ""),
+            "driver_name": data.get("driver_name", ""),
+            "driver_contact": data.get("driver_contact") or data.get("driver_phone", ""),
+            "scheduled_date": data.get("scheduled_date") or data.get("pickup_date", ""),
+            "delivery_date": data.get("delivery_date") or data.get("expected_delivery", ""),
+            "transport_type": transport_type,
+            "incoterm": job.get("incoterm", ""),
+            "notes": data.get("notes", ""),
+            "transport_charges": data.get("transport_charges"),  # Save transport charges
+            "delivery_order_number": data.get("delivery_order_number"),  # Save delivery order number
+            "delivery_order_document": data.get("delivery_order_document"),  # Save delivery order document path
+            "status": "PENDING",  # Set to PENDING so it can be marked as LOADING/DISPATCHED
+            "source": "TRANSPORT_PLANNER",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": current_user["id"]
+        }
+        
+        await db.transport_outward.insert_one(transport_data)
     
     # Update job with transport booking
     await db.job_orders.update_one(
@@ -16712,6 +17218,14 @@ class SecurityChecklistCreate(BaseModel):
     tare_weight: Optional[float] = None
     net_weight: Optional[float] = None
     notes: Optional[str] = None
+    arrival_time: Optional[str] = None
+    arrival_quantity: Optional[float] = None
+    transport_company: Optional[str] = None
+    discharge_checklist_items: Optional[Dict[str, bool]] = None
+    load_status: Optional[str] = None
+    batch_number: Optional[str] = None
+    loading_time: Optional[str] = None
+    loading_checklist_items: Optional[Dict[str, bool]] = None
 
 class SecurityChecklistUpdate(BaseModel):
     vehicle_number: Optional[str] = None
@@ -16725,6 +17239,14 @@ class SecurityChecklistUpdate(BaseModel):
     checklist_items: Optional[Dict[str, bool]] = None
     notes: Optional[str] = None
     status: Optional[str] = None
+    arrival_time: Optional[str] = None
+    arrival_quantity: Optional[float] = None
+    transport_company: Optional[str] = None
+    discharge_checklist_items: Optional[Dict[str, bool]] = None
+    load_status: Optional[str] = None  # ASSIGNED, LOADED, APPROVED
+    batch_number: Optional[str] = None
+    loading_time: Optional[str] = None
+    loading_checklist_items: Optional[Dict[str, bool]] = None
 
 # QC Inspection Models
 class QCInspectionCreate(BaseModel):
@@ -16740,6 +17262,10 @@ class QCInspectionCreate(BaseModel):
     vehicle_number: Optional[str] = None
     po_number: Optional[str] = None
     sampling_size: Optional[str] = None
+    arrival_quantity: Optional[float] = None
+    sample_type: Optional[str] = None
+    qc_parameters: Optional[List[Dict[str, Any]]] = None
+    security_checklist_id: Optional[str] = None
 
 class QCInspectionUpdate(BaseModel):
     batch_number: Optional[str] = None
@@ -16756,6 +17282,64 @@ class QCInspectionUpdate(BaseModel):
     vehicle_number: Optional[str] = None
     po_number: Optional[str] = None
     sampling_size: Optional[str] = None
+    arrival_quantity: Optional[float] = None
+    sample_type: Optional[str] = None
+    qc_parameters: Optional[List[Dict[str, Any]]] = None
+    security_checklist_id: Optional[str] = None
+
+# QC Parameter Models (for configurable QC testing parameters)
+class QCParameter(BaseModel):
+    id: str
+    product_type: str  # SOLVENT, OIL, CHEMICAL, etc.
+    parameter_name: str
+    test_type: str  # PASS_FAIL, MEASUREMENT, VISUAL
+    required: bool = True
+    order: int = 0
+    unit: Optional[str] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    description: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+class QCParameterCreate(BaseModel):
+    product_type: str
+    parameter_name: str
+    test_type: str = "PASS_FAIL"
+    required: bool = True
+    order: int = 0
+    unit: Optional[str] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    description: Optional[str] = None
+
+class QCParameterUpdate(BaseModel):
+    parameter_name: Optional[str] = None
+    test_type: Optional[str] = None
+    required: Optional[bool] = None
+    order: Optional[int] = None
+    unit: Optional[str] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    description: Optional[str] = None
+
+# Quantity Claims Model (for tracking partial deliveries)
+class QuantityClaim(BaseModel):
+    id: str
+    po_id: str
+    po_number: str
+    po_line_id: str
+    product_name: str
+    ordered_qty: float
+    received_qty: float
+    pending_qty: float
+    claim_status: str  # PENDING_REVIEW, APPROVED, DISPUTED, RESOLVED
+    supplier_name: str
+    claim_reason: Optional[str] = None
+    created_at: str
+    updated_at: str
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
 
 # ==================== SECURITY ENDPOINTS ====================
 
@@ -16948,7 +17532,7 @@ async def get_security_outward(status: Optional[str] = None, current_user: dict 
 @api_router.post("/security/checklists")
 async def create_security_checklist(data: SecurityChecklistCreate, current_user: dict = Depends(get_current_user)):
     """Create a security checklist for inward or outward transport"""
-    if current_user["role"] not in ["admin", "security"]:
+    if not has_permission(current_user, required_roles=["admin", "security"], required_page="/security-qc"):
         raise HTTPException(status_code=403, detail="Only security can create checklists")
     
     checklist_number = await generate_sequence("SEC", "security_checklists")
@@ -16976,7 +17560,7 @@ async def create_security_checklist(data: SecurityChecklistCreate, current_user:
 @api_router.put("/security/checklists/{checklist_id}")
 async def update_security_checklist(checklist_id: str, data: SecurityChecklistUpdate, current_user: dict = Depends(get_current_user)):
     """Update security checklist with weighment and details"""
-    if current_user["role"] not in ["admin", "security"]:
+    if not has_permission(current_user, required_roles=["admin", "security"], required_page="/security-qc"):
         raise HTTPException(status_code=403, detail="Only security can update checklists")
     
     update_data = {k: v for k, v in data.model_dump().items() if v is not None}
@@ -17002,7 +17586,7 @@ async def complete_security_checklist(checklist_id: str, current_user: dict = De
     For INWARD: Creates QC inspection and routes to GRN after QC pass.
     For OUTWARD: Creates QC inspection and generates Delivery Order after QC pass.
     """
-    if current_user["role"] not in ["admin", "security"]:
+    if not has_permission(current_user, required_roles=["admin", "security"], required_page="/security-qc"):
         raise HTTPException(status_code=403, detail="Only security can complete checklists")
     
     checklist = await db.security_checklists.find_one({"id": checklist_id}, {"_id": 0})
@@ -17252,6 +17836,158 @@ async def get_qc_dashboard(current_user: dict = Depends(get_current_user)):
         }
     }
 
+# ==================== QC PARAMETERS ENDPOINTS ====================
+
+@api_router.get("/qc/parameters")
+async def get_qc_parameters(product_type: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    """Get QC testing parameters, optionally filtered by product type"""
+    query = {}
+    if product_type:
+        query["product_type"] = product_type.upper()
+    
+    parameters = await db.qc_parameters.find(query, {"_id": 0}).sort("order", 1).to_list(100)
+    
+    # If no parameters found and product_type is specified, create defaults
+    if len(parameters) == 0 and product_type:
+        await initialize_default_qc_parameters()
+        parameters = await db.qc_parameters.find(query, {"_id": 0}).sort("order", 1).to_list(100)
+    
+    return parameters
+
+@api_router.post("/qc/parameters")
+async def create_qc_parameter(data: QCParameterCreate, current_user: dict = Depends(get_current_user)):
+    """Create a new QC parameter (admin only)"""
+    if not has_permission(current_user, required_roles=["admin"], required_page="/settings"):
+        raise HTTPException(status_code=403, detail="Only admin can create QC parameters")
+    
+    parameter = {
+        "id": str(uuid.uuid4()),
+        "product_type": data.product_type.upper(),
+        "parameter_name": data.parameter_name,
+        "test_type": data.test_type,
+        "required": data.required,
+        "order": data.order,
+        "unit": data.unit,
+        "min_value": data.min_value,
+        "max_value": data.max_value,
+        "description": data.description,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.qc_parameters.insert_one(parameter)
+    return parameter
+
+@api_router.put("/qc/parameters/{parameter_id}")
+async def update_qc_parameter(parameter_id: str, data: QCParameterUpdate, current_user: dict = Depends(get_current_user)):
+    """Update QC parameter (admin only)"""
+    if not has_permission(current_user, required_roles=["admin"], required_page="/settings"):
+        raise HTTPException(status_code=403, detail="Only admin can update QC parameters")
+    
+    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    result = await db.qc_parameters.update_one(
+        {"id": parameter_id},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Parameter not found")
+    
+    parameter = await db.qc_parameters.find_one({"id": parameter_id}, {"_id": 0})
+    return parameter
+
+@api_router.delete("/qc/parameters/{parameter_id}")
+async def delete_qc_parameter(parameter_id: str, current_user: dict = Depends(get_current_user)):
+    """Delete QC parameter (admin only)"""
+    if not has_permission(current_user, required_roles=["admin"], required_page="/settings"):
+        raise HTTPException(status_code=403, detail="Only admin can delete QC parameters")
+    
+    result = await db.qc_parameters.delete_one({"id": parameter_id})
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Parameter not found")
+    
+    return {"success": True, "message": "Parameter deleted"}
+
+async def initialize_default_qc_parameters():
+    """Initialize default QC parameters for Solvent and Oil if they don't exist"""
+    
+    # Check if parameters already exist
+    existing = await db.qc_parameters.count_documents({})
+    if existing > 0:
+        return
+    
+    default_parameters = [
+        # Solvent Parameters
+        {"product_type": "SOLVENT", "parameter_name": "Appearance", "test_type": "VISUAL", "required": True, "order": 1, "description": "Visual inspection of clarity and color"},
+        {"product_type": "SOLVENT", "parameter_name": "Color", "test_type": "PASS_FAIL", "required": True, "order": 2, "description": "Color specification check"},
+        {"product_type": "SOLVENT", "parameter_name": "Odor", "test_type": "PASS_FAIL", "required": True, "order": 3, "description": "Characteristic odor check"},
+        {"product_type": "SOLVENT", "parameter_name": "Moisture Content", "test_type": "MEASUREMENT", "required": True, "order": 4, "unit": "%", "max_value": 0.1, "description": "Karl Fischer moisture analysis"},
+        {"product_type": "SOLVENT", "parameter_name": "Density", "test_type": "MEASUREMENT", "required": True, "order": 5, "unit": "g/ml", "description": "Density at 20°C"},
+        {"product_type": "SOLVENT", "parameter_name": "Purity", "test_type": "MEASUREMENT", "required": True, "order": 6, "unit": "%", "min_value": 99.0, "description": "GC purity analysis"},
+        {"product_type": "SOLVENT", "parameter_name": "Container Integrity", "test_type": "PASS_FAIL", "required": True, "order": 7, "description": "Check for leaks or damage"},
+        
+        # Oil Parameters
+        {"product_type": "OIL", "parameter_name": "Appearance", "test_type": "VISUAL", "required": True, "order": 1, "description": "Visual inspection of clarity and color"},
+        {"product_type": "OIL", "parameter_name": "Color", "test_type": "PASS_FAIL", "required": True, "order": 2, "description": "Color specification check"},
+        {"product_type": "OIL", "parameter_name": "Odor", "test_type": "PASS_FAIL", "required": True, "order": 3, "description": "Characteristic odor check"},
+        {"product_type": "OIL", "parameter_name": "Moisture Content", "test_type": "MEASUREMENT", "required": True, "order": 4, "unit": "%", "max_value": 0.2, "description": "Karl Fischer moisture analysis"},
+        {"product_type": "OIL", "parameter_name": "Acid Value", "test_type": "MEASUREMENT", "required": True, "order": 5, "unit": "mg KOH/g", "max_value": 2.0, "description": "Free fatty acid content"},
+        {"product_type": "OIL", "parameter_name": "Specific Gravity", "test_type": "MEASUREMENT", "required": True, "order": 6, "unit": "g/ml", "description": "Specific gravity at 20°C"},
+        {"product_type": "OIL", "parameter_name": "Peroxide Value", "test_type": "MEASUREMENT", "required": False, "order": 7, "unit": "meq/kg", "max_value": 10.0, "description": "Oxidation indicator"},
+        {"product_type": "OIL", "parameter_name": "Container Integrity", "test_type": "PASS_FAIL", "required": True, "order": 8, "description": "Check for leaks or damage"},
+    ]
+    
+    for param_data in default_parameters:
+        parameter = {
+            "id": str(uuid.uuid4()),
+            **param_data,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        await db.qc_parameters.insert_one(parameter)
+
+# ==================== QC QUANTITY CLAIMS ENDPOINTS ====================
+
+@api_router.get("/procurement/quantity-claims")
+async def get_quantity_claims(status: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    """Get quantity claims for procurement/finance review"""
+    query = {}
+    if status:
+        query["claim_status"] = status
+    
+    claims = await db.quantity_claims.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return claims
+
+@api_router.put("/procurement/quantity-claims/{claim_id}")
+async def update_quantity_claim(claim_id: str, claim_status: str, claim_reason: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    """Update quantity claim status (procurement/finance only)"""
+    if not has_permission(current_user, required_roles=["admin", "procurement", "finance"], required_page="/procurement"):
+        raise HTTPException(status_code=403, detail="Only procurement/finance can update claims")
+    
+    update_data = {
+        "claim_status": claim_status,
+        "reviewed_by": current_user["id"],
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    if claim_reason:
+        update_data["claim_reason"] = claim_reason
+    
+    result = await db.quantity_claims.update_one(
+        {"id": claim_id},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    
+    claim = await db.quantity_claims.find_one({"id": claim_id}, {"_id": 0})
+    return claim
+
 @api_router.get("/qc/inspections")
 async def get_qc_inspections(status: Optional[str] = None, ref_type: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     """Get QC inspections"""
@@ -17282,7 +18018,7 @@ async def get_completed_qc_inspections(current_user: dict = Depends(get_current_
 @api_router.put("/qc/inspections/{inspection_id}")
 async def update_qc_inspection(inspection_id: str, data: QCInspectionUpdate, current_user: dict = Depends(get_current_user)):
     """Update QC inspection with test results"""
-    if current_user["role"] not in ["admin", "qc"]:
+    if not has_permission(current_user, required_roles=["admin", "qc"], required_page="/qc-inspection"):
         raise HTTPException(status_code=403, detail="Only QC can update inspections")
     
     update_data = {k: v for k, v in data.model_dump().items() if v is not None}
@@ -17296,6 +18032,78 @@ async def update_qc_inspection(inspection_id: str, data: QCInspectionUpdate, cur
         raise HTTPException(status_code=404, detail="Inspection not found")
     
     inspection = await db.qc_inspections.find_one({"id": inspection_id}, {"_id": 0})
+    
+    # Enrich with product info
+    inspection = await enrich_qc_inspection_with_product(inspection)
+    
+    return inspection
+
+@api_router.post("/qc/inspections")
+async def create_qc_inspection_new(data: QCInspectionCreate, current_user: dict = Depends(get_current_user)):
+    """Create a new QC inspection from discharge processing"""
+    if not has_permission(current_user, required_roles=["admin", "qc", "security"], required_page="/security-qc"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    # Generate QC number
+    qc_number = await generate_sequence("QC", "qc_inspections")
+    
+    # Determine status based on whether QC parameters are provided
+    # If qc_parameters are passed, it means QC has been performed
+    has_qc_results = data.qc_parameters and len(data.qc_parameters) > 0
+    all_passed = False
+    
+    if has_qc_results:
+        # Check if all required parameters passed
+        all_passed = all(param.get("result") == "PASS" for param in data.qc_parameters if param.get("required", True))
+        status = "PASSED" if all_passed else "FAILED"
+    else:
+        status = "IN_PROGRESS"
+    
+    inspection = {
+        "id": str(uuid.uuid4()),
+        "qc_number": qc_number,
+        "ref_type": data.ref_type,
+        "ref_id": data.ref_id,
+        "ref_number": data.ref_number,
+        "product_id": data.product_id,
+        "product_name": data.product_name,
+        "batch_number": data.batch_number,
+        "supplier": data.supplier,
+        "items": data.items or [],
+        "quantity": data.quantity,
+        "vehicle_number": data.vehicle_number,
+        "po_number": data.po_number,
+        "sampling_size": data.sampling_size,
+        "arrival_quantity": data.arrival_quantity,
+        "sample_type": data.sample_type,
+        "qc_parameters": data.qc_parameters or [],
+        "security_checklist_id": data.security_checklist_id,
+        "status": status,
+        "passed": all_passed if has_qc_results else None,
+        "created_by": current_user["id"],
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    if has_qc_results and status == "PASSED":
+        inspection["completed_by"] = current_user["id"]
+        inspection["completed_at"] = datetime.now(timezone.utc).isoformat()
+    
+    await db.qc_inspections.insert_one(inspection)
+    
+    # Remove MongoDB's _id field to avoid serialization issues
+    if "_id" in inspection:
+        del inspection["_id"]
+    
+    # If QC passed, trigger GRN/DO creation
+    if status == "PASSED":
+        if data.ref_type == "INWARD":
+            grn_result = await create_grn_from_qc(inspection, current_user)
+            inspection["grn_created"] = True
+            inspection["grn_number"] = grn_result.get("grn_number")
+        elif data.ref_type == "OUTWARD":
+            do_result = await create_do_from_qc(inspection, current_user)
+            inspection["do_created"] = True
+            inspection["do_number"] = do_result.get("do_number")
     
     # Enrich with product info
     inspection = await enrich_qc_inspection_with_product(inspection)
@@ -17347,7 +18155,7 @@ async def pass_qc_inspection(inspection_id: str, current_user: dict = Depends(ge
 @api_router.put("/qc/inspections/{inspection_id}/fail")
 async def fail_qc_inspection(inspection_id: str, reason: str = "", current_user: dict = Depends(get_current_user)):
     """Fail QC inspection"""
-    if current_user["role"] not in ["admin", "qc"]:
+    if not has_permission(current_user, required_roles=["admin", "qc"], required_page="/qc-inspection"):
         raise HTTPException(status_code=403, detail="Only QC can fail inspections")
     
     await db.qc_inspections.update_one(
@@ -17366,7 +18174,7 @@ async def fail_qc_inspection(inspection_id: str, reason: str = "", current_user:
 @api_router.post("/qc/inspections/{inspection_id}/generate-coa")
 async def generate_coa(inspection_id: str, current_user: dict = Depends(get_current_user)):
     """Generate Certificate of Analysis for outward shipment"""
-    if current_user["role"] not in ["admin", "qc"]:
+    if not has_permission(current_user, required_roles=["admin", "qc"], required_page="/qc-inspection"):
         raise HTTPException(status_code=403, detail="Only QC can generate COA")
     
     inspection = await db.qc_inspections.find_one({"id": inspection_id}, {"_id": 0})
@@ -17422,16 +18230,70 @@ async def create_grn_from_qc(inspection: dict, current_user: dict):
     
     grn_number = await generate_sequence("GRN", "grn")
     
+    # Get arrival quantity from inspection
+    arrival_qty = inspection.get("arrival_quantity")
+    
+    # Check for quantity mismatch and create quantity claims if needed
+    quantity_mismatch = False
+    has_pending_claims = False
+    
     grn_items = []
     for line in po_lines:
         item = await db.inventory_items.find_one({"id": line.get("item_id")}, {"_id": 0})
+        ordered_qty = line.get("qty", 0)
+        
+        # Determine received quantity
+        # If arrival_quantity is provided in inspection and there's only one line, use it
+        # Otherwise, assume full quantity received
+        received_qty = ordered_qty
+        if arrival_qty is not None and len(po_lines) == 1:
+            received_qty = arrival_qty
+            if received_qty < ordered_qty:
+                quantity_mismatch = True
+                pending_qty = ordered_qty - received_qty
+                
+                # Create quantity claim
+                claim = {
+                    "id": str(uuid.uuid4()),
+                    "po_id": po_id,
+                    "po_number": (await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})).get("po_number", "Unknown"),
+                    "po_line_id": line.get("id"),
+                    "product_name": line.get("item_name", "Unknown"),
+                    "ordered_qty": ordered_qty,
+                    "received_qty": received_qty,
+                    "pending_qty": pending_qty,
+                    "claim_status": "PENDING_REVIEW",
+                    "supplier_name": supplier_name,
+                    "qc_inspection_id": inspection.get("id"),
+                    "grn_number": grn_number,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+                await db.quantity_claims.insert_one(claim)
+                has_pending_claims = True
+        
         grn_items.append({
             "product_id": line.get("item_id"),
             "product_name": line.get("item_name") or (item.get("name") if item else "Unknown"),
             "sku": item.get("sku") if item else "-",
-            "quantity": line.get("qty", 0),
+            "quantity": received_qty,  # Use received quantity instead of ordered
+            "ordered_quantity": ordered_qty,  # Keep track of ordered quantity
             "unit": line.get("uom", "KG")
         })
+    
+    # Send notification if there are pending claims
+    if has_pending_claims:
+        po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+        await create_notification(
+            event_type="QUANTITY_CLAIM_CREATED",
+            title=f"Quantity Mismatch: {po.get('po_number', 'Unknown')}",
+            message=f"Received {arrival_qty}/{ordered_qty} units for {grn_items[0]['product_name']}. Partial GRN {grn_number} created. Claim pending review.",
+            link="/procurement/claims",
+            ref_type="QUANTITY_CLAIM",
+            ref_id=po_id,
+            target_roles=["procurement", "finance"],
+            notification_type="warning"
+        )
     
     grn = {
         "id": str(uuid.uuid4()),
@@ -18868,6 +19730,74 @@ async def migrate_vehicle_fields(current_user: dict = Depends(get_current_user))
         }
     }
 
+# File Upload/Download Endpoints
+@api_router.post("/files/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Upload a file and return the file path"""
+    try:
+        # Generate unique filename
+        file_ext = Path(file.filename).suffix if file.filename else ''
+        file_id = str(uuid.uuid4())
+        filename = f"{file_id}{file_ext}"
+        file_path = UPLOAD_DIR / filename
+        
+        # Save file
+        contents = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(contents)
+        
+        # Return file path relative to uploads directory
+        return {
+            "success": True,
+            "path": filename,
+            "file_id": file_id,
+            "id": filename,
+            "original_filename": file.filename
+        }
+    except Exception as e:
+        logging.error(f"File upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+
+
+
+@api_router.get("/files/{file_path:path}")
+async def get_file(
+    file_path: str,
+    token: Optional[str]=None,
+    current_user: dict = Depends(get_current_user_optional) 
+):
+    """Serve uploaded file"""
+    try:
+        file_full_path = UPLOAD_DIR / file_path
+        if not file_full_path.exists() or not file_full_path.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Security check: ensure file is within upload directory
+        if not str(file_full_path.resolve()).startswith(str(UPLOAD_DIR.resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Determine content type
+        content_type = "application/octet-stream"
+        if file_path.lower().endswith('.pdf'):
+            content_type = "application/pdf"
+        elif file_path.lower().endswith(('.jpg', '.jpeg')):
+            content_type = "image/jpeg"
+        elif file_path.lower().endswith('.png'):
+            content_type = "image/png"
+        
+        return StreamingResponse(
+            open(file_full_path, "rb"),
+            media_type=content_type,
+            headers={"Content-Disposition": f'inline; filename="{file_path}"'}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"File retrieval error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve file: {str(e)}")
 
 app.include_router(api_router)
 # API routes registered
@@ -19014,71 +19944,6 @@ async def delete_shipping_line(shipping_line_id: str, current_user: dict = Depen
         raise HTTPException(status_code=404, detail="Shipping line not found")
     
     return {"message": "Shipping line deleted successfully"}
-
-@api_router.post("/files/upload")
-async def upload_file(
-    file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user)
-):
-    """Upload a file and return the file path"""
-    try:
-        # Generate unique filename
-        file_ext = Path(file.filename).suffix if file.filename else ''
-        file_id = str(uuid.uuid4())
-        filename = f"{file_id}{file_ext}"
-        file_path = UPLOAD_DIR / filename
-        
-        # Save file
-        contents = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(contents)
-        
-        # Return file path relative to uploads directory
-        return {
-            "success": True,
-            "path": filename,
-            "file_id": file_id,
-            "id": filename,
-            "original_filename": file.filename
-        }
-    except Exception as e:
-        logging.error(f"File upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
-
-@api_router.get("/files/{file_path:path}")
-async def get_file(
-    file_path: str,
-    current_user: dict = Depends(get_current_user)
-):
-    """Serve uploaded file"""
-    try:
-        file_full_path = UPLOAD_DIR / file_path
-        if not file_full_path.exists() or not file_full_path.is_file():
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        # Security check: ensure file is within upload directory
-        if not str(file_full_path.resolve()).startswith(str(UPLOAD_DIR.resolve())):
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Determine content type
-        content_type = "application/octet-stream"
-        if file_path.lower().endswith('.pdf'):
-            content_type = "application/pdf"
-        elif file_path.lower().endswith(('.jpg', '.jpeg')):
-            content_type = "image/jpeg"
-        elif file_path.lower().endswith('.png'):
-            content_type = "image/png"
-        
-        return StreamingResponse(
-            open(file_full_path, "rb"),
-            media_type=content_type,
-            headers={"Content-Disposition": f'inline; filename="{file_path}"'}
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"File retrieval error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve file: {str(e)}")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

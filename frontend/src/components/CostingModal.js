@@ -3,16 +3,18 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
-import ExportContainerizedCosting from './costing/ExportContainerizedCosting';
-import ExportBulkCosting from './costing/ExportBulkCosting';
-import ExportGCCRoadCosting from './costing/ExportGCCRoadCosting';
-import ExportRoadCosting from './costing/ExportRoadCosting';
+// COMMENTED OUT - Unused costing models (keeping only 8 approved types)
+// import ExportContainerizedCosting from './costing/ExportContainerizedCosting';
+// import ExportBulkCosting from './costing/ExportBulkCosting';
+// import ExportGCCRoadCosting from './costing/ExportGCCRoadCosting';
+// import ExportRoadCosting from './costing/ExportRoadCosting';
+// import LocalDispatchCosting from './costing/LocalDispatchCosting';
+// ACTIVE COSTING MODELS (8 types):
 import Export40ftDGCosting from './costing/Export40ftDGCosting';
 import Export40ftNonDGCosting from './costing/Export40ftNonDGCosting';
 import Export20ftDGCosting from './costing/Export20ftDGCosting';
 import Export20ftNonDGCosting from './costing/Export20ftNonDGCosting';
 import GccByRoadCosting from './costing/GccByRoadCosting';
-import LocalDispatchCosting from './costing/LocalDispatchCosting';
 import LocalPurchaseSaleCosting from './costing/LocalPurchaseSaleCosting';
 import LocalBulkToPlantCosting from './costing/LocalBulkToPlantCosting';
 import LocalDrumToPlantCosting from './costing/LocalDrumToPlantCosting';
@@ -92,10 +94,9 @@ export default function CostingModal({ quotation, open, onClose, onConfirmed }) 
           const transportMode = (quotation?.transport_mode || '').toUpperCase();
           const currentCostingType = existingCosting.costing_type;
           
-          // If export with road transport, should be EXPORT_ROAD or EXPORT_GCC_ROAD
+          // If export with road transport, should be EXPORT_GCC_ROAD only
           if (orderType === 'EXPORT' && transportMode === 'ROAD') {
-            return !currentCostingType || 
-                   (currentCostingType !== 'EXPORT_ROAD' && currentCostingType !== 'EXPORT_GCC_ROAD');
+            return !currentCostingType || currentCostingType !== 'EXPORT_GCC_ROAD';
           }
           
           return false;
@@ -153,17 +154,7 @@ export default function CostingModal({ quotation, open, onClose, onConfirmed }) 
       return;
     }
 
-    // Validate required fields
-    const requiredFields = ['raw_material_cost'];
-    const missingFields = requiredFields.filter(field => {
-      const value = costs[field] ?? costing[field];
-      return value === undefined || value === null || value === '';
-    });
-
-    if (missingFields.length > 0) {
-      toast.error(`Please fill in required fields: ${missingFields.join(', ')}`);
-      return;
-    }
+    // Removed cost validations - allow saving regardless of cost breakdown values
 
     try {
       setLoading(true);
@@ -202,7 +193,23 @@ export default function CostingModal({ quotation, open, onClose, onConfirmed }) 
 
     try {
       setLoading(true);
+      
+      // FIRST: Save the custom_breakdown with net_profit_loss
+      const updateData = {
+        ...costing,
+        ...costs,
+        container_count: quotation.container_count || 1,
+        custom_breakdown: costs, // This includes net_profit_loss!
+        raw_material_source: costs.raw_material_source ?? costing.raw_material_source ?? 'SYSTEM',
+        packaging_type: costs.packaging_type ?? costing.packaging_type,
+        incoterm_type: costs.incoterm_type ?? costing.incoterm_type,
+      };
+      
+      await api.put(`/costing/${costing.id}`, updateData);
+      
+      // THEN: Confirm the costing
       await api.put(`/costing/${costing.id}/confirm`);
+      
       toast.success('Costing confirmed');
       if (onConfirmed) {
         onConfirmed();
@@ -232,22 +239,21 @@ export default function CostingModal({ quotation, open, onClose, onConfirmed }) 
     };
 
     switch (costingType) {
-      case 'EXPORT_CONTAINERIZED':
-        return <ExportContainerizedCosting {...commonProps} />;
-      case 'EXPORT_BULK':
-        return <ExportBulkCosting {...commonProps} />;
+      // COMMENTED OUT - Deprecated costing types
+      // case 'EXPORT_CONTAINERIZED':
+      //   return <ExportContainerizedCosting {...commonProps} />;
+      // case 'EXPORT_BULK':
+      //   return <ExportBulkCosting {...commonProps} />;
+      // case 'EXPORT_ROAD':
+      //   return <ExportRoadCosting {...commonProps} />;
+      // case 'LOCAL_DISPATCH':
+      //   return <LocalDispatchCosting {...commonProps} />;
+      
+      // GCC BY ROAD - Handles both export and local GCC road shipments (bulk + drums)
       case 'EXPORT_GCC_ROAD':
-        // For local GCC-by-road types, use the custom GCC-by-road sheet
-        if (
-          quotation.order_type === 'local' &&
-          (quotation.local_type === 'gcc_road_bulk' || quotation.local_type === 'gcc_road')
-        ) {
-          return <GccByRoadCosting {...commonProps} />;
-        }
-        // Otherwise keep using the existing Export GCC Road sheet
-        return <ExportGCCRoadCosting {...commonProps} />;
-      case 'EXPORT_ROAD':
-        return <ExportRoadCosting {...commonProps} />;
+        return <GccByRoadCosting {...commonProps} />;
+      
+      // CONTAINER TYPES (4 types)
       case 'EXPORT_40FT_DG':
         return <Export40ftDGCosting {...commonProps} />;
       case 'EXPORT_40FT_NON_DG':
@@ -256,14 +262,15 @@ export default function CostingModal({ quotation, open, onClose, onConfirmed }) 
         return <Export20ftDGCosting {...commonProps} />;
       case 'EXPORT_20FT_NON_DG':
         return <Export20ftNonDGCosting {...commonProps} />;
-      case 'LOCAL_DISPATCH':
-        return <LocalDispatchCosting {...commonProps} />;
+      
+      // LOCAL TYPES (3 types)
       case 'LOCAL_PURCHASE_SALE':
         return <LocalPurchaseSaleCosting {...commonProps} />;
       case 'LOCAL_BULK_TO_PLANT':
         return <LocalBulkToPlantCosting {...commonProps} />;
       case 'LOCAL_DRUM_TO_PLANT':
         return <LocalDrumToPlantCosting {...commonProps} />;
+      
       default:
         return <div>Unknown costing type: {costingType}</div>;
     }

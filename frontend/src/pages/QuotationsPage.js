@@ -218,19 +218,29 @@ export default function QuotationsPage() {
     loadData();
   }, []);
 
-  // Auto-set transport_mode to 'road' if GCC country selected
+  // Auto-set transport_mode based on incoterm and country
   useEffect(() => {
     const gccCountries = ['Saudi Arabia', 'Bahrain', 'Kuwait', 'Oman', 'Qatar'];
     const countryLower = form.country_of_destination?.trim().toLowerCase() || '';
     const isGCC = gccCountries.some(gcc => gcc.toLowerCase() === countryLower);
     
-    if (form.order_type === 'export' && isGCC) {
-      setForm(prev => ({...prev, transport_mode: 'road'}));
-    } else if (form.order_type === 'export' && countryLower && !isGCC) {
-      // Reset to ocean if not GCC (only if country is entered)
-      setForm(prev => ({...prev, transport_mode: prev.transport_mode === 'road' ? 'ocean' : prev.transport_mode}));
+    if (form.order_type === 'export') {
+      const incoterm = form.incoterm?.toUpperCase() || '';
+      
+      // FOB, CFR, CIF with containers = SEA transport (even for GCC)
+      if (['FOB', 'CFR', 'CIF'].includes(incoterm) && form.container_type) {
+        setForm(prev => ({...prev, transport_mode: 'ocean'}));
+      }
+      // DDP or EXW to GCC countries (no containers) = typically ROAD
+      else if (isGCC && ['DDP', 'EXW'].includes(incoterm) && !form.container_type) {
+        setForm(prev => ({...prev, transport_mode: 'road'}));
+      }
+      // Non-GCC exports default to ocean
+      else if (!isGCC && countryLower) {
+        setForm(prev => ({...prev, transport_mode: 'ocean'}));
+      }
     }
-  }, [form.country_of_destination, form.order_type]);
+  }, [form.country_of_destination, form.order_type, form.incoterm, form.container_type]);
 
   const loadData = async () => {
     try {
@@ -1843,7 +1853,7 @@ export default function QuotationsPage() {
                 <th>Country of Destination</th>
                 <th>Total</th>
                 <th>Cost Status</th>
-                <th>Margin</th>
+                <th>Net Profit</th>
                 <th>Status</th>
                 <th>Created</th>
                 <th>Actions</th>

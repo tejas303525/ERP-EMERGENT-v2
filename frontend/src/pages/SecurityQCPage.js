@@ -28,6 +28,16 @@ const SecurityQCPage = () => {
   const [vehicleBookingNotifications, setVehicleBookingNotifications] = useState([]);
   const [qcInspections, setQcInspections] = useState([]);
   const [allTransports, setAllTransports] = useState([]); // Store all transports including completed
+  const [showQCModal, setShowQCModal] = useState(false);
+  const [selectedQCInspection, setSelectedQCInspection] = useState(null);
+  const [showDischargeModal, setShowDischargeModal] = useState(false);
+  const [dischargeData, setDischargeData] = useState(null);
+  
+  // Outward transport modals
+  const [showVehicleArrivalModal, setShowVehicleArrivalModal] = useState(false);
+  const [showLoadingQCModal, setShowLoadingQCModal] = useState(false);
+  const [showDOModal, setShowDOModal] = useState(false);
+  const [arrivalData, setArrivalData] = useState(null);
 
   useEffect(() => {
     setDismissedNotifications(new Set());
@@ -67,7 +77,7 @@ const SecurityQCPage = () => {
   };
 
   // Helper function to get the correct URL for a delivery document
-  const getDeliveryDocumentUrl = async (doc) => {
+  const getDeliveryDocumentUrl = async (doc, deliveryNoteNumber = null) => {
     if (!doc) return null;
     if (doc.startsWith('http')) {
       return doc;
@@ -76,19 +86,15 @@ const SecurityQCPage = () => {
     const token = localStorage.getItem('erp_token');
     const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
 
-    // Check if this looks like a generated Delivery Note PDF (e.g., "DeliveryNote_DO-000043.pdf")
-    const deliveryNoteMatch = doc.match(/^DeliveryNote_(DO-\d+)\.pdf$/i);
-    if (deliveryNoteMatch) {
-      // Extract DO number from filename
-      const doNumber = deliveryNoteMatch[1];
+    // If we have a delivery note number (DO number), try to find the DO and use PDF generation
+    if (deliveryNoteNumber) {
       try {
-        // Fetch delivery orders to find the one with this DO number
         const response = await api.get('/delivery-orders');
         const deliveryOrders = response.data || [];
-        const deliveryOrder = deliveryOrders.find(item => item.do_number === doNumber);
+        const deliveryOrder = deliveryOrders.find(item => item.do_number === deliveryNoteNumber);
 
         if (deliveryOrder && deliveryOrder.id) {
-          // Use PDF generation endpoint
+          // Use PDF generation endpoint for DOs
           return `${backendUrl}/api/pdf/delivery-note/${deliveryOrder.id}?token=${token}`;
         }
       } catch (error) {
@@ -96,7 +102,24 @@ const SecurityQCPage = () => {
       }
     }
 
-    // Fallback to file endpoint
+    // Check if this looks like a generated Delivery Note PDF filename pattern
+    const deliveryNoteMatch = doc.match(/^DeliveryNote_(DO-\d+)\.pdf$/i);
+    if (deliveryNoteMatch) {
+      const doNumber = deliveryNoteMatch[1];
+      try {
+        const response = await api.get('/delivery-orders');
+        const deliveryOrders = response.data || [];
+        const deliveryOrder = deliveryOrders.find(item => item.do_number === doNumber);
+
+        if (deliveryOrder && deliveryOrder.id) {
+          return `${backendUrl}/api/pdf/delivery-note/${deliveryOrder.id}?token=${token}`;
+        }
+      } catch (error) {
+        console.error('Failed to fetch delivery order:', error);
+      }
+    }
+
+    // Fallback to file endpoint (for uploaded PDFs with UUID names)
     return `${backendUrl}/api/files/${doc}?token=${token}`;
   };
 
@@ -147,7 +170,91 @@ const SecurityQCPage = () => {
   const openChecklistModal = (transport, type) => {
     setSelectedTransport(transport);
     setChecklistType(type);
-    setShowChecklistModal(true);
+    // For inward transports, use the new discharge modal
+    if (type === 'INWARD') {
+      setShowDischargeModal(true);
+    } else if (type === 'OUTWARD') {
+      // For outward transports, use the vehicle arrival modal
+      setShowVehicleArrivalModal(true);
+    } else {
+      setShowChecklistModal(true);
+    }
+  };
+
+  const handleReportQC = (dischargeFormData) => {
+    // Store discharge data and open QC modal
+    setDischargeData(dischargeFormData);
+    setShowQCModal(true);
+    // Keep discharge modal open in background (it will close when QC is submitted)
+  };
+
+  // QC Inspection Handlers
+  const handleStartQCInspection = async (transport, refType = 'INWARD') => {
+    try {
+      await api.post('/qc/inspections', {
+        ref_type: refType,
+        ref_id: transport.id,
+        ref_number: transport.transport_number || transport.po_number || transport.job_number,
+        product_name: transport.products_summary || transport.product_names?.join(', ') || transport.product_name,
+        supplier: transport.supplier_name,
+        vehicle_number: transport.vehicle_number,
+        po_number: transport.po_number,
+        quantity: transport.quantity || 0,
+      });
+      
+      toast.success('QC Inspection started');
+      loadData(); // Refresh data
+    } catch (error) {
+      console.error('Failed to start QC inspection:', error);
+      toast.error('Failed to start QC inspection');
+    }
+  };
+
+  const handlePassQC = async (inspectionId) => {
+    if (!window.confirm('Are you sure you want to pass this QC inspection? This will trigger GRN/DO creation.')) {
+      return;
+    }
+    
+    try {
+      await api.put(`/qc/inspections/${inspectionId}/pass`);
+      toast.success('QC Inspection passed! Next steps triggered.');
+      loadData(); // Refresh data
+    } catch (error) {
+      console.error('Failed to pass QC:', error);
+      toast.error(error.response?.data?.detail || 'Failed to pass QC inspection');
+    }
+  };
+
+  const handleFailQC = async (inspectionId) => {
+    const reason = window.prompt('Enter reason for QC failure:');
+    if (!reason) return;
+    
+    try {
+      await api.put(`/qc/inspections/${inspectionId}/fail`, null, {
+        params: { reason }
+      });
+      toast.error('QC Inspection failed. Material on hold.');
+      loadData(); // Refresh data
+    } catch (error) {
+      console.error('Failed to fail QC:', error);
+      toast.error('Failed to update QC status');
+    }
+  };
+
+  const handleGenerateCOA = async (inspectionId) => {
+    try {
+      const response = await api.post(`/qc/inspections/${inspectionId}/generate-coa`);
+      toast.success(`COA generated: ${response.data.coa_number}`);
+      loadData(); // Refresh data
+    } catch (error) {
+      console.error('Failed to generate COA:', error);
+      toast.error(error.response?.data?.detail || 'Failed to generate COA');
+    }
+  };
+
+  const onViewQCInspection = (inspection) => {
+    setSelectedQCInspection(inspection);
+    setShowQCModal(true);
   };
 
   // Stats - transports are already filtered, so just count them
@@ -302,7 +409,7 @@ const SecurityQCPage = () => {
       )}
 
       {/* Inspection Status Alerts */}
-      {inspectionStatusAlerts.length > 0 && (
+      {/* {inspectionStatusAlerts.length > 0 && (
         <div className="mb-4 space-y-2">
           {inspectionStatusAlerts.map((alert, idx) => {
             const { transport, inspectionStatus } = alert;
@@ -384,43 +491,43 @@ const SecurityQCPage = () => {
             );
           })}
         </div>
-      )}
+      )} */}
 
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
-          <Shield className="w-8 h-8 text-emerald-500" />
+      <div className="mb-4">
+        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+          <Shield className="w-6 h-6 text-emerald-500" />
           Security & QC Module
         </h1>
-        <p className="text-muted-foreground mt-1">
+        <p className="text-sm text-muted-foreground mt-1">
           Cargo checklist, weighment, and QC inspection workflow
         </p>
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        <div className="glass p-4 rounded-lg border border-blue-500/30">
-          <p className="text-sm text-muted-foreground">Inward Pending Check</p>
-          <p className="text-2xl font-bold text-blue-400">{inwardPending}</p>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <div className="glass p-3 rounded-lg border border-blue-500/30">
+          <p className="text-xs text-muted-foreground">Inward Pending Check</p>
+          <p className="text-xl font-bold text-blue-400">{inwardPending}</p>
         </div>
-        <div className="glass p-4 rounded-lg border border-amber-500/30">
-          <p className="text-sm text-muted-foreground">Outward Pending Check</p>
-          <p className="text-2xl font-bold text-amber-400">{outwardPending}</p>
+        <div className="glass p-3 rounded-lg border border-amber-500/30">
+          <p className="text-xs text-muted-foreground">Outward Pending Check</p>
+          <p className="text-xl font-bold text-amber-400">{outwardPending}</p>
         </div>
-        <div className="glass p-4 rounded-lg border border-purple-500/30">
-          <p className="text-sm text-muted-foreground">In Progress Checklists</p>
-          <p className="text-2xl font-bold text-purple-400">{pendingChecklists.length}</p>
+        <div className="glass p-3 rounded-lg border border-purple-500/30">
+          <p className="text-xs text-muted-foreground">In Progress Checklists</p>
+          <p className="text-xl font-bold text-purple-400">{pendingChecklists.length}</p>
         </div>
-        <div className="glass p-4 rounded-lg border border-green-500/30">
-          <p className="text-sm text-muted-foreground">Total Active</p>
-          <p className="text-2xl font-bold text-green-400">
+        <div className="glass p-3 rounded-lg border border-green-500/30">
+          <p className="text-xs text-muted-foreground">Total Active</p>
+          <p className="text-xl font-bold text-green-400">
             {inwardTransports.length + outwardTransports.length}
           </p>
         </div>
       </div>
 
       {/* Workflow Overview */}
-      <div className="mb-6 p-4 glass rounded-lg border border-purple-500/30">
+      {/* <div className="mb-6 p-4 glass rounded-lg border border-purple-500/30">
         <div className="grid grid-cols-3 gap-4 text-sm">
           <div>
             <span className="text-blue-400 font-medium">Inward:</span>
@@ -435,37 +542,38 @@ const SecurityQCPage = () => {
             <span className="text-muted-foreground"> Monitor quotation requests to suppliers</span>
           </div>
         </div>
-      </div>
+      </div> */}
 
       {loading ? (
         <div className="flex items-center justify-center h-64">
           <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           {/* LEFT COLUMN - INWARD TRANSPORT */}
           <div className="glass rounded-lg border border-blue-500/30">
-            <div className="p-4 border-b border-border bg-blue-500/10 sticky top-0 z-10">
+            <div className="p-3 border-b border-border bg-blue-500/10 sticky top-0 z-10">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-semibold flex items-center gap-2">
-                    <ArrowDownToLine className="w-5 h-5 text-blue-400" />
+                  <h2 className="text-base font-semibold flex items-center gap-2">
+                    <ArrowDownToLine className="w-4 h-4 text-blue-400" />
                     Inward Transport
                     {inwardPending > 0 && (
-                      <Badge className="ml-2 bg-blue-500/20 text-blue-400">
+                      <Badge className="ml-2 bg-blue-500/20 text-blue-400 text-xs">
                         {inwardPending} Pending
                       </Badge>
                     )}
                   </h2>
-                  <p className="text-xs text-muted-foreground mt-1">
+                  <p className="text-xs text-muted-foreground mt-0.5">
                     Security → QC → GRN → Payables
                   </p>
                 </div>
               </div>
             </div>
-            <div className="p-4">
+            <div className="p-3">
               <InwardTransportTab
                 transports={inwardTransports}
+                qcInspections={qcInspections}
                 onOpenChecklist={(t) => openChecklistModal(t, 'INWARD')}
                 onViewDetails={(t) => {
                   setSelectedTransport(t);
@@ -476,6 +584,11 @@ const SecurityQCPage = () => {
                   setSelectedTransport(t);
                   setShowVehicleModal(true);
                 }}
+                onViewQCInspection={onViewQCInspection}
+                onStartQC={(t) => handleStartQCInspection(t, 'INWARD')}
+                onPassQC={handlePassQC}
+                onFailQC={handleFailQC}
+                onGenerateCOA={handleGenerateCOA}
                 onRefresh={loadData}
                 getDeliveryDocumentUrl={getDeliveryDocumentUrl}
               />
@@ -484,33 +597,44 @@ const SecurityQCPage = () => {
 
           {/* RIGHT COLUMN - OUTWARD TRANSPORT */}
           <div className="glass rounded-lg border border-amber-500/30">
-            <div className="p-4 border-b border-border bg-amber-500/10 sticky top-0 z-10">
+            <div className="p-3 border-b border-border bg-amber-500/10 sticky top-0 z-10">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-semibold flex items-center gap-2">
-                    <ArrowUpFromLine className="w-5 h-5 text-amber-400" />
+                  <h2 className="text-base font-semibold flex items-center gap-2">
+                    <ArrowUpFromLine className="w-4 h-4 text-amber-400" />
                     Outward Transport
                     {outwardPending > 0 && (
-                      <Badge className="ml-2 bg-amber-500/20 text-amber-400">
+                      <Badge className="ml-2 bg-amber-500/20 text-amber-400 text-xs">
                         {outwardPending} Pending
                       </Badge>
                     )}
                   </h2>
-                  <p className="text-xs text-muted-foreground mt-1">
+                  <p className="text-xs text-muted-foreground mt-0.5">
                     Security → QC → Delivery Order → Receivables
                   </p>
                 </div>
               </div>
             </div>
-            <div className="p-4">
+            <div className="p-3">
               <OutwardTransportTab
                 transports={outwardTransports}
+                qcInspections={qcInspections}
                 onOpenChecklist={(t) => openChecklistModal(t, 'OUTWARD')}
                 onViewDetails={(t) => {
                   setSelectedTransport(t);
-                  setChecklistType('OUTWARD');
-                  setShowViewModal(true);
+                  // If approved, open DO modal, otherwise view details
+                  if (t.security_checklist?.load_status === 'APPROVED') {
+                    setShowDOModal(true);
+                  } else {
+                    setChecklistType('OUTWARD');
+                    setShowViewModal(true);
+                  }
                 }}
+                onViewQCInspection={onViewQCInspection}
+                onStartQC={(t) => handleStartQCInspection(t, 'OUTWARD')}
+                onPassQC={handlePassQC}
+                onFailQC={handleFailQC}
+                onGenerateCOA={handleGenerateCOA}
                 onRefresh={loadData}
                 getDeliveryDocumentUrl={getDeliveryDocumentUrl}
               />
@@ -518,7 +642,7 @@ const SecurityQCPage = () => {
           </div>
 
           {/* THIRD COLUMN - RFQ WINDOW */}
-          <div className="glass rounded-lg border border-purple-500/30">
+          {/* <div className="glass rounded-lg border border-purple-500/30">
             <div className="p-4 border-b border-border bg-purple-500/10 sticky top-0 z-10">
               <div className="flex items-center justify-between">
                 <div>
@@ -531,11 +655,11 @@ const SecurityQCPage = () => {
                   </p>
                 </div>
               </div>
-            </div>
-            <div className="p-4">
+            </div> */}
+            {/* <div className="p-4">
               <RFQWindowTab />
-            </div>
-          </div>
+            </div> */}
+          {/* </div> */}
         </div>
       )}
 
@@ -553,6 +677,18 @@ const SecurityQCPage = () => {
             setSelectedTransport(null);
             loadData();
           }}
+        />
+      )}
+
+      {/* Discharge Processing Modal */}
+      {showDischargeModal && selectedTransport && (
+        <DischargeProcessingModal
+          transport={selectedTransport}
+          onClose={() => {
+            setShowDischargeModal(false);
+            setSelectedTransport(null);
+          }}
+          onReportQC={handleReportQC}
         />
       )}
 
@@ -579,27 +715,203 @@ const SecurityQCPage = () => {
           getDeliveryDocumentUrl={getDeliveryDocumentUrl}
         />
       )}
+
+      {/* QC Inspection Modal - New Flow */}
+      {showQCModal && dischargeData && (
+        <QCInspectionModal
+          dischargeData={dischargeData}
+          onClose={() => {
+            setShowQCModal(false);
+            setDischargeData(null);
+          }}
+          onComplete={() => {
+            setShowQCModal(false);
+            setShowDischargeModal(false);
+            setDischargeData(null);
+            setSelectedTransport(null);
+            loadData();
+          }}
+        />
+      )}
+
+      {/* Outward Transport Modals */}
+      {showVehicleArrivalModal && selectedTransport && (
+        <VehicleArrivalModal
+          transport={selectedTransport}
+          onClose={() => {
+            setShowVehicleArrivalModal(false);
+            setSelectedTransport(null);
+          }}
+          onOpenLoadingQC={(data) => {
+            setArrivalData(data);
+            setShowVehicleArrivalModal(false);
+            setShowLoadingQCModal(true);
+          }}
+        />
+      )}
+
+      {showLoadingQCModal && arrivalData && (
+        <LoadingQCModal
+          arrivalData={arrivalData}
+          onClose={() => {
+            setShowLoadingQCModal(false);
+            setArrivalData(null);
+          }}
+          onComplete={() => {
+            setShowLoadingQCModal(false);
+            setArrivalData(null);
+            setSelectedTransport(null);
+            loadData();
+          }}
+        />
+      )}
+
+      {showDOModal && selectedTransport && (
+        <DOIssuanceModal
+          transport={selectedTransport}
+          onClose={() => {
+            setShowDOModal(false);
+            setSelectedTransport(null);
+          }}
+          onComplete={() => {
+            setShowDOModal(false);
+            setSelectedTransport(null);
+            loadData();
+          }}
+        />
+      )}
+
+      {/* QC Inspection Modal - View Only (Old Flow) */}
+      {showQCModal && selectedQCInspection && !dischargeData && (
+        <Dialog open={true} onOpenChange={() => setShowQCModal(false)}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <ClipboardCheck className="w-5 h-5 text-blue-500" />
+                QC Inspection - {selectedQCInspection.qc_number || selectedQCInspection.ref_number}
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label className="text-muted-foreground text-xs">Reference</Label>
+                  <p className="font-mono">{selectedQCInspection.ref_number}</p>
+                </div>
+                <div>
+                  <Label className="text-muted-foreground text-xs">Type</Label>
+                  <Badge className={selectedQCInspection.ref_type === 'INWARD' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'}>
+                    {selectedQCInspection.ref_type}
+                  </Badge>
+                </div>
+                <div>
+                  <Label className="text-muted-foreground text-xs">Status</Label>
+                  <Badge className={
+                    selectedQCInspection.status === 'PASSED' ? 'bg-green-500/20 text-green-400' :
+                    selectedQCInspection.status === 'FAILED' ? 'bg-red-500/20 text-red-400' :
+                    'bg-blue-500/20 text-blue-400'
+                  }>
+                    {selectedQCInspection.status}
+                  </Badge>
+                </div>
+                <div>
+                  <Label className="text-muted-foreground text-xs">Product</Label>
+                  <p>{selectedQCInspection.product_name || '-'}</p>
+                </div>
+                <div>
+                  <Label className="text-muted-foreground text-xs">Supplier/Customer</Label>
+                  <p>{selectedQCInspection.supplier || selectedQCInspection.customer || '-'}</p>
+                </div>
+                <div>
+                  <Label className="text-muted-foreground text-xs">Vehicle Number</Label>
+                  <p className="font-mono">{selectedQCInspection.vehicle_number || '-'}</p>
+                </div>
+                {selectedQCInspection.batch_number && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Batch Number</Label>
+                    <p className="font-mono">{selectedQCInspection.batch_number}</p>
+                  </div>
+                )}
+                {selectedQCInspection.sampling_size && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Sampling Size</Label>
+                    <p>{selectedQCInspection.sampling_size}</p>
+                  </div>
+                )}
+                {selectedQCInspection.coa_number && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">COA Number</Label>
+                    <p className="font-mono text-purple-400">{selectedQCInspection.coa_number}</p>
+                  </div>
+                )}
+                {selectedQCInspection.quantity && (
+                  <div>
+                    <Label className="text-muted-foreground text-xs">Quantity</Label>
+                    <p>{selectedQCInspection.quantity}</p>
+                  </div>
+                )}
+              </div>
+              
+              {selectedQCInspection.inspector_notes && (
+                <div>
+                  <Label className="text-muted-foreground text-xs">Inspector Notes</Label>
+                  <p className="text-sm p-2 bg-muted/20 rounded">{selectedQCInspection.inspector_notes}</p>
+                </div>
+              )}
+              
+              {selectedQCInspection.test_results && (
+                <div>
+                  <Label className="text-muted-foreground text-xs">Test Results</Label>
+                  <pre className="text-xs p-2 bg-muted/20 rounded overflow-auto max-h-60">
+                    {JSON.stringify(selectedQCInspection.test_results, null, 2)}
+                  </pre>
+                </div>
+              )}
+              
+              {selectedQCInspection.specifications && (
+                <div>
+                  <Label className="text-muted-foreground text-xs">Specifications</Label>
+                  <pre className="text-xs p-2 bg-muted/20 rounded overflow-auto max-h-40">
+                    {JSON.stringify(selectedQCInspection.specifications, null, 2)}
+                  </pre>
+                </div>
+              )}
+              
+              {selectedQCInspection.items && selectedQCInspection.items.length > 0 && (
+                <div>
+                  <Label className="text-muted-foreground text-xs">Items</Label>
+                  <div className="space-y-2 mt-2">
+                    {selectedQCInspection.items.map((item, idx) => (
+                      <div key={idx} className="p-2 bg-muted/20 rounded text-sm">
+                        <p className="font-medium">{item.name || item.item_name}</p>
+                        {item.quantity && <p className="text-xs text-muted-foreground">Quantity: {item.quantity}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 };
 
 // ==================== INWARD TRANSPORT TAB ====================
-const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onViewVehicle, onRefresh, getDeliveryDocumentUrl }) => {
+const InwardTransportTab = ({ transports, qcInspections, onOpenChecklist, onViewDetails, onViewVehicle, onViewQCInspection, onStartQC, onPassQC, onFailQC, onGenerateCOA, onRefresh, getDeliveryDocumentUrl }) => {
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="glass rounded-lg border border-border">
-        <div className="p-4 border-b border-border flex justify-between items-center">
+        <div className="p-2 border-b border-border flex justify-between items-center">
           <div>
-            <h2 className="text-lg font-semibold flex items-center gap-2">
-              <ArrowDownToLine className="w-5 h-5 text-blue-400" />
+            <h2 className="text-sm font-semibold flex items-center gap-2">
+              <ArrowDownToLine className="w-4 h-4 text-blue-400" />
               Inward Cargo - Security Check
             </h2>
-            <p className="text-sm text-muted-foreground">
-              Checklist + Weighment → QC Inspection → GRN → Stock Update → Notify Payables
-            </p>
+          
           </div>
           <Button variant="outline" size="sm" onClick={onRefresh}>
-            <RefreshCw className="w-4 h-4 mr-2" />
+            <RefreshCw className="w-3 h-3 mr-1" />
             Refresh
           </Button>
         </div>
@@ -610,20 +922,16 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onView
             <p className="text-muted-foreground">No inward transports pending</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
+          <div className="overflow-x-auto max-w-full">
+            <table className="w-full min-w-[800px]">
               <thead className="bg-muted/30">
                 <tr>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">PO / Ref</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle Type</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Driver Name</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Note</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Security Status</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Date/Time</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">PO#</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Product</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Delivery Note</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Transporter Details</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Discharge Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -632,118 +940,129 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onView
                   const hasChecklist = !!checklist;
                   const isComplete = checklist?.status === 'COMPLETED';
                   
+                  // QC Inspection data
+                  const qcInspection = qcInspections?.find(ins => 
+                    ins.ref_id === transport.id || 
+                    ins.transport_id === transport.id ||
+                    ins.ref_number === transport.transport_number
+                  );
+                  const qcStatus = qcInspection?.status || 'PENDING';
+                  const qcPassed = qcInspection?.passed;
+                  
+                  // Determine discharge status
+                  const hasDischargeData = checklist && checklist.arrival_time;
+                  const arrivalQtyMatch = qcInspection && qcInspection.arrival_quantity && 
+                    qcInspection.arrival_quantity >= (transport.quantity || 0);
+                  
                   return (
                     <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
-                      <td className="p-3">
+                      {/* Date/Time Column */}
+                      <td className="p-2">
                         {transport.delivery_date ? (
-                          <span className="text-cyan-400 font-medium">
-                            {new Date(transport.delivery_date).toLocaleDateString()}
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground">-</span>
-                        )}
-                      </td>
-                      <td className="p-3 text-blue-400">{transport.po_number || transport.transport_number || '-'}</td>
-                      <td className="p-3 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}>
-                        {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}
-                      </td>
-                      <td className="p-3">{transport.supplier_name || '-'}</td>
-                      <td className="p-3">{transport.vehicle_number || '-'}</td>
-                      <td className="p-3">
-                        {transport.vehicle_type ? (
-                          <Badge variant="outline" className="text-xs">
-                            {transport.vehicle_type}
-                          </Badge>
-                        ) : (
-                          <span className="text-muted-foreground">-</span>
-                        )}
-                      </td>
-                      <td className="p-3">{transport.driver_name || '-'}</td>
-                      <td className="p-3">
-                        {transport.delivery_note_number || transport.delivery_note_document ? (
-                          <div className="flex items-center gap-2">
-                            <Badge variant="outline" className="text-xs">
-                              {transport.delivery_note_number || '-'}
-                            </Badge>
-                            {transport.delivery_note_document && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={async () => {
-                                  const doc = transport.delivery_note_document;
-                                  if (doc) {
-                                    const url = await getDeliveryDocumentUrl(doc);
-                                    if (url) {
-                                      window.open(url, '_blank');
-                                    }
-                                  }
-                                }}
-                                title="View Delivery Note"
-                              >
-                                <FileText className="w-3 h-3" />
-                              </Button>
+                          <div className="flex flex-col">
+                            <span className="text-cyan-400 font-medium text-sm">
+                              {new Date(transport.delivery_date).toLocaleDateString()}
+                            </span>
+                            {checklist?.arrival_time && (
+                              <span className="text-xs text-muted-foreground">
+                                {new Date(checklist.arrival_time).toLocaleTimeString()}
+                              </span>
                             )}
                           </div>
                         ) : (
                           <span className="text-muted-foreground">-</span>
                         )}
                       </td>
-                      <td className="p-3">
-                        {isComplete ? (
-                          <Badge className="bg-green-500/20 text-green-400">
-                            <Check className="w-3 h-3 mr-1" />
-                            Completed
-                          </Badge>
-                        ) : hasChecklist ? (
-                          <Badge className="bg-amber-500/20 text-amber-400">
-                            <Scale className="w-3 h-3 mr-1" />
-                            In Progress
-                          </Badge>
+                      
+                      {/* PO# Column */}
+                      <td className="p-2 text-blue-400 text-sm font-mono">
+                        {transport.po_number || transport.transport_number || '-'}
+                      </td>
+                      
+                      {/* Product Column */}
+                      <td className="p-2 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}>
+                        {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}
+                      </td>
+                      
+                      {/* Delivery Note Column */}
+                      <td className="p-2">
+                        {transport.delivery_note_document ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={async () => {
+                              const doc = transport.delivery_note_document;
+                              const doNumber = transport.delivery_note_number;
+                              if (doc) {
+                                const url = await getDeliveryDocumentUrl(doc, doNumber);
+                                if (url) {
+                                  window.open(url, '_blank');
+                                } else {
+                                  toast.error('Failed to load delivery note');
+                                }
+                              }
+                            }}
+                            title="View Delivery Note PDF"
+                          >
+                            <FileText className="w-3 h-3 mr-1" />
+                            View Note
+                          </Button>
                         ) : (
-                          <Badge className="bg-gray-500/20 text-gray-400">
-                            Pending
-                          </Badge>
+                          <span className="text-muted-foreground text-xs">No document</span>
                         )}
                       </td>
-                      <td className="p-3">
-                        <div className="flex gap-1">
-                          <Button 
-                            size="sm" 
-                            variant="ghost"
-                            onClick={() => onViewVehicle(transport)}
-                            title="View Vehicle Information"
-                          >
-                            <Eye className="w-4 h-4 mr-1" />
-                            View
-                          </Button>
-                          {isComplete && (
-                            <>
-                              {checklist?.gross_weight && checklist?.tare_weight && (
-                                <Button 
-                                  size="sm" 
-                                  variant="outline"
-                                  onClick={() => {
-                                    const token = localStorage.getItem('erp_token');
-                                    const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
-                                    window.open(`${backendUrl}/api/pdf/weighment-slip/${checklist.id}?token=${token}`, '_blank');
-                                  }}
-                                  title="Download Weighment Slip"
-                                >
-                                  <Download className="w-4 h-4" />
-                                </Button>
-                              )}
-                            </>
-                          )}
-                          {!isComplete && (
-                            <Button 
-                              size="sm" 
-                              onClick={() => onOpenChecklist(transport)}
-                            >
-                              <ClipboardCheck className="w-4 h-4 mr-1" />
-                              {hasChecklist ? 'Continue' : 'Start'} Check
-                            </Button>
-                          )}
-                        </div>
+                      
+                      {/* Transporter Details Column */}
+                      <td className="p-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onOpenChecklist(transport)}
+                          className="bg-blue-500/10 hover:bg-blue-500/20"
+                        >
+                          <Truck className="w-3 h-3 mr-1" />
+                          Process Arrival
+                        </Button>
+                      </td>
+                      
+                      {/* Discharge Status Column */}
+                      <td className="p-2">
+                        {qcPassed && qcInspection?.grn_created ? (
+                          <div className="flex flex-col gap-1">
+                            <Badge className="bg-green-500/20 text-green-400 text-xs">
+                              <Check className="w-3 h-3 mr-1" />
+                              GRN {qcInspection.grn_number || 'Created'}
+                            </Badge>
+                            {!arrivalQtyMatch && (
+                              <Badge className="bg-amber-500/20 text-amber-400 text-xs">
+                                Partial Delivery
+                              </Badge>
+                            )}
+                          </div>
+                        ) : qcPassed ? (
+                          <Badge className="bg-green-500/20 text-green-400 text-xs">
+                            <Check className="w-3 h-3 mr-1" />
+                            QC Passed
+                          </Badge>
+                        ) : qcInspection?.status === 'IN_PROGRESS' ? (
+                          <Badge className="bg-blue-500/20 text-blue-400 text-xs">
+                            <ClipboardCheck className="w-3 h-3 mr-1" />
+                            QC In Progress
+                          </Badge>
+                        ) : qcInspection?.status === 'FAILED' ? (
+                          <Badge className="bg-red-500/20 text-red-400 text-xs">
+                            <X className="w-3 h-3 mr-1" />
+                            QC Failed
+                          </Badge>
+                        ) : hasDischargeData ? (
+                          <Badge className="bg-purple-500/20 text-purple-400 text-xs">
+                            QC Pending
+                          </Badge>
+                        ) : (
+                          <Badge className="bg-gray-500/20 text-gray-400 text-xs">
+                            Awaiting Processing
+                          </Badge>
+                        )}
                       </td>
                     </tr>
                   );
@@ -758,22 +1077,22 @@ const InwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onView
 };
 
 // ==================== OUTWARD TRANSPORT TAB ====================
-const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRefresh, getDeliveryDocumentUrl }) => {
+const OutwardTransportTab = ({ transports, qcInspections, onOpenChecklist, onViewDetails, onViewQCInspection, onStartQC, onPassQC, onFailQC, onGenerateCOA, onRefresh, getDeliveryDocumentUrl }) => {
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="glass rounded-lg border border-border">
-        <div className="p-4 border-b border-border flex justify-between items-center">
+        <div className="p-2 border-b border-border flex justify-between items-center">
           <div>
-            <h2 className="text-lg font-semibold flex items-center gap-2">
-              <ArrowUpFromLine className="w-5 h-5 text-amber-400" />
+            <h2 className="text-sm font-semibold flex items-center gap-2">
+              <ArrowUpFromLine className="w-4 h-4 text-amber-400" />
               Outward Dispatch - Security Check
             </h2>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               Checklist + Weighment → QC Inspection → Delivery Order → Notify Receivables (Invoice)
             </p>
           </div>
           <Button variant="outline" size="sm" onClick={onRefresh}>
-            <RefreshCw className="w-4 h-4 mr-2" />
+            <RefreshCw className="w-3 h-3 mr-1" />
             Refresh
           </Button>
         </div>
@@ -784,19 +1103,16 @@ const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRef
             <p className="text-muted-foreground">No outward transports pending</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
+          <div className="overflow-x-auto max-w-full">
+            <table className="w-full min-w-[1000px]">
               <thead className="bg-muted/30">
                 <tr>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Date</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Job / DO</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Customer</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Type</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Container #</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Delivery Order</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Security Status</th>
-                  <th className="p-3 text-left text-xs font-medium text-muted-foreground">Actions</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Date/Time</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Job Order</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Plate/Container #</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Delivery Note</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Load</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Delivery Order</th>
                 </tr>
               </thead>
               <tbody>
@@ -805,116 +1121,99 @@ const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRef
                   const hasChecklist = !!checklist;
                   const isComplete = checklist?.status === 'COMPLETED';
                   
+                  // QC Inspection data
+                  const qcInspection = qcInspections?.find(ins => 
+                    ins.ref_id === transport.id || 
+                    ins.transport_id === transport.id ||
+                    ins.ref_number === transport.transport_number ||
+                    ins.ref_number === transport.job_number
+                  );
+                  const qcStatus = qcInspection?.status || 'PENDING';
+                  const qcPassed = qcInspection?.passed;
+                  
+                  const loadStatus = checklist?.load_status || 'ASSIGNED';
+                  const doCreated = transport.do_created || transport.do_number;
+                  
                   return (
                     <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
-                      <td className="p-3">
+                      {/* Date/Time */}
+                      <td className="p-2">
                         {transport.delivery_date ? (
-                          <span className="text-cyan-400 font-medium">
-                            {new Date(transport.delivery_date).toLocaleDateString()}
+                          <span className="text-cyan-400 font-medium text-sm">
+                            {new Date(transport.delivery_date).toLocaleDateString()} {new Date(transport.delivery_date).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}
                           </span>
                         ) : (
                           <span className="text-muted-foreground">-</span>
                         )}
                       </td>
-                      <td className="p-3 text-amber-400">
-                        {transport.job_numbers?.join(', ') || transport.do_number || '-'}
+                      
+                      {/* Job Order */}
+                      <td className="p-2">
+                        <span className="font-mono text-amber-400 text-sm">
+                          {transport.job_numbers?.join(', ') || transport.job_number || '-'}
+                        </span>
                       </td>
-                      <td className="p-3 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.product_name || '-'}>
-                        {transport.products_summary || transport.product_names?.join(', ') || transport.product_name || '-'}
+                      
+                      {/* Plate/Container # */}
+                      <td className="p-2">
+                        <span className="font-mono text-sm">
+                          {transport.vehicle_number || transport.container_number || '-'}
+                        </span>
                       </td>
-                      <td className="p-3">{transport.customer_name || '-'}</td>
-                      <td className="p-3">
-                        <Badge className={transport.transport_type === 'CONTAINER' ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'}>
-                          {transport.transport_type || 'LOCAL'}
-                        </Badge>
+                      
+                      {/* Delivery Note Button */}
+                      <td className="p-2">
+                        <Button 
+                          size="sm" 
+                          variant={checklist ? "outline" : "default"}
+                          onClick={() => onOpenChecklist(transport)}
+                          className="text-xs"
+                        >
+                          <Truck className="w-3 h-3 mr-1" />
+                          {checklist ? 'View Arrival' : 'Process Arrival'}
+                        </Button>
                       </td>
-                      <td className="p-3 font-mono text-sm">{transport.container_number || '-'}</td>
-                      <td className="p-3">
-                        {transport.delivery_order_number || transport.delivery_order_document ? (
-                          <div className="flex items-center gap-2">
-                            {transport.delivery_order_number && (
-                              <Badge variant="outline" className="text-xs text-amber-400">
-                                {transport.delivery_order_number}
-                              </Badge>
-                            )}
-                            {transport.delivery_order_document && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={async () => {
-                                  const doc = transport.delivery_order_document;
-                                  if (doc) {
-                                    const url = await getDeliveryDocumentUrl(doc);
-                                    if (url) {
-                                      window.open(url, '_blank');
-                                    }
-                                  }
-                                }}
-                                title="View Delivery Order PDF"
-                              >
-                                <FileText className="w-3 h-3" />
-                              </Button>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-muted-foreground">-</span>
-                        )}
-                      </td>
-                      <td className="p-3">
-                        {isComplete ? (
-                          <Badge className="bg-green-500/20 text-green-400">
+                      
+                      {/* Load Status */}
+                      <td className="p-2">
+                        {loadStatus === 'APPROVED' ? (
+                          <Badge className="bg-green-500/20 text-green-400 text-xs">
                             <Check className="w-3 h-3 mr-1" />
-                            Completed
+                            Approved
                           </Badge>
-                        ) : hasChecklist ? (
-                          <Badge className="bg-amber-500/20 text-amber-400">
-                            <Scale className="w-3 h-3 mr-1" />
-                            In Progress
+                        ) : loadStatus === 'LOADED' ? (
+                          <Badge className="bg-blue-500/20 text-blue-400 text-xs">
+                            <Package className="w-3 h-3 mr-1" />
+                            Loaded
                           </Badge>
                         ) : (
-                          <Badge className="bg-gray-500/20 text-gray-400">
-                            Pending
+                          <Badge className="bg-gray-500/20 text-gray-400 text-xs">
+                            Assigned
                           </Badge>
                         )}
                       </td>
-                      <td className="p-3">
-                        <div className="flex gap-1">
-                          {isComplete && (
-                            <>
-                              <Button 
-                                size="sm" 
-                                variant="outline"
-                                onClick={() => onViewDetails(transport)}
-                              >
-                                <Eye className="w-4 h-4 mr-1" />
-                                View Details
-                              </Button>
-                              {checklist?.gross_weight && checklist?.tare_weight && (
-                                <Button 
-                                  size="sm" 
-                                  variant="outline"
-                                  onClick={() => {
-                                    const token = localStorage.getItem('erp_token');
-                                    const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
-                                    window.open(`${backendUrl}/api/pdf/weighment-slip/${checklist.id}?token=${token}`, '_blank');
-                                  }}
-                                  title="Download Weighment Slip"
-                                >
-                                  <Download className="w-4 h-4" />
-                                </Button>
-                              )}
-                            </>
-                          )}
-                          {!isComplete && (
-                            <Button 
-                              size="sm" 
-                              onClick={() => onOpenChecklist(transport)}
-                            >
-                              <ClipboardCheck className="w-4 h-4 mr-1" />
-                              {hasChecklist ? 'Continue' : 'Start'} Check
-                            </Button>
-                          )}
-                        </div>
+                      
+                      {/* Delivery Order */}
+                      <td className="p-2">
+                        {doCreated ? (
+                          <div className="flex items-center gap-2">
+                            <Badge className="bg-green-500/20 text-green-400 text-xs">
+                              <FileText className="w-3 h-3 mr-1" />
+                              {transport.do_number || 'Issued'}
+                            </Badge>
+                          </div>
+                        ) : loadStatus === 'APPROVED' ? (
+                          <Button 
+                            size="sm" 
+                            onClick={() => onViewDetails(transport)}
+                            className="bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 text-xs"
+                          >
+                            <FileText className="w-3 h-3 mr-1" />
+                            Issue DO
+                          </Button>
+                        ) : (
+                          <span className="text-muted-foreground text-xs">Pending Approval</span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -928,97 +1227,97 @@ const OutwardTransportTab = ({ transports, onOpenChecklist, onViewDetails, onRef
   );
 };
 
-// ==================== RFQ WINDOW TAB ====================
-const RFQWindowTab = () => {
-  const [rfqs, setRfqs] = useState([]);
-  const [loading, setLoading] = useState(true);
+// // ==================== RFQ WINDOW TAB ====================
+// const RFQWindowTab = () => {
+//   const [rfqs, setRfqs] = useState([]);
+//   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    loadRFQs();
-  }, []);
+//   useEffect(() => {
+//     loadRFQs();
+//   }, []);
 
-  const loadRFQs = async () => {
-    try {
-      const res = await api.get('/rfq');
-      setRfqs(res.data || []);
-    } catch (error) {
-      console.error('Failed to load RFQs:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+//   const loadRFQs = async () => {
+//     try {
+//       const res = await api.get('/rfq');
+//       setRfqs(res.data || []);
+//     } catch (error) {
+//       console.error('Failed to load RFQs:', error);
+//     } finally {
+//       setLoading(false);
+//     }
+//   };
 
-  const statusColor = {
-    DRAFT: 'bg-gray-500/20 text-gray-400',
-    SENT: 'bg-blue-500/20 text-blue-400',
-    QUOTED: 'bg-green-500/20 text-green-400',
-    CONVERTED: 'bg-emerald-500/20 text-emerald-400'
-  };
+//   const statusColor = {
+//     DRAFT: 'bg-gray-500/20 text-gray-400',
+//     SENT: 'bg-blue-500/20 text-blue-400',
+//     QUOTED: 'bg-green-500/20 text-green-400',
+//     CONVERTED: 'bg-emerald-500/20 text-emerald-400'
+//   };
 
-  return (
-    <div className="glass rounded-lg border border-border">
-      <div className="p-4 border-b border-border">
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          <FileText className="w-5 h-5 text-blue-400" />
-          RFQ Status Window
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          View all Request for Quotations and their status
-        </p>
-      </div>
+//   return (
+//     <div className="glass rounded-lg border border-border">
+//       <div className="p-4 border-b border-border">
+//         <h2 className="text-lg font-semibold flex items-center gap-2">
+//           <FileText className="w-5 h-5 text-blue-400" />
+//           RFQ Status Window
+//         </h2>
+//         <p className="text-sm text-muted-foreground">
+//           View all Request for Quotations and their status
+//         </p>
+//       </div>
 
-      {loading ? (
-        <div className="p-8 text-center">
-          <RefreshCw className="w-6 h-6 animate-spin mx-auto text-muted-foreground" />
-        </div>
-      ) : rfqs.length === 0 ? (
-        <div className="p-8 text-center">
-          <FileText className="w-12 h-12 text-muted-foreground mx-auto mb-4 opacity-50" />
-          <p className="text-muted-foreground">No RFQs found</p>
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-muted/30">
-              <tr>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">RFQ Number</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Type</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Amount</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
-                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rfqs.map((rfq) => (
-                <tr key={rfq.id} className="border-b border-border/50 hover:bg-muted/10">
-                  <td className="p-3 font-mono font-medium">{rfq.rfq_number}</td>
-                  <td className="p-3">{rfq.supplier_name || '-'}</td>
-                  <td className="p-3">
-                    <Badge className={rfq.rfq_type === 'PACKAGING' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-amber-500/20 text-amber-400'}>
-                      {rfq.rfq_type || 'PRODUCT'}
-                    </Badge>
-                  </td>
-                  <td className="p-3 text-green-400 font-medium">
-                    {rfq.total_amount > 0 ? `${rfq.currency || 'USD'} ${rfq.total_amount?.toFixed(2)}` : '-'}
-                  </td>
-                  <td className="p-3">
-                    <Badge className={statusColor[rfq.status] || statusColor.DRAFT}>
-                      {rfq.status}
-                    </Badge>
-                  </td>
-                  <td className="p-3 text-sm text-muted-foreground">
-                    {new Date(rfq.created_at).toLocaleDateString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-};
+//       {loading ? (
+//         <div className="p-8 text-center">
+//           <RefreshCw className="w-6 h-6 animate-spin mx-auto text-muted-foreground" />
+//         </div>
+//       ) : rfqs.length === 0 ? (
+//         <div className="p-8 text-center">
+//           <FileText className="w-12 h-12 text-muted-foreground mx-auto mb-4 opacity-50" />
+//           <p className="text-muted-foreground">No RFQs found</p>
+//         </div>
+//       ) : (
+//         <div className="overflow-x-auto">
+//           <table className="w-full">
+//             <thead className="bg-muted/30">
+//               <tr>
+//                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">RFQ Number</th>
+//                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Supplier</th>
+//                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Type</th>
+//                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Amount</th>
+//                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Status</th>
+//                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Created</th>
+//               </tr>
+//             </thead>
+//             <tbody>
+//               {rfqs.map((rfq) => (
+//                 <tr key={rfq.id} className="border-b border-border/50 hover:bg-muted/10">
+//                   <td className="p-2 font-mono font-medium">{rfq.rfq_number}</td>
+//                   <td className="p-2">{rfq.supplier_name || '-'}</td>
+//                   <td className="p-2">
+//                     <Badge className={rfq.rfq_type === 'PACKAGING' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-amber-500/20 text-amber-400'}>
+//                       {rfq.rfq_type || 'PRODUCT'}
+//                     </Badge>
+//                   </td>
+//                   <td className="p-2 text-green-400 font-medium">
+//                     {rfq.total_amount > 0 ? `${rfq.currency || 'USD'} ${rfq.total_amount?.toFixed(2)}` : '-'}
+//                   </td>
+//                   <td className="p-2">
+//                     <Badge className={statusColor[rfq.status] || statusColor.DRAFT}>
+//                       {rfq.status}
+//                     </Badge>
+//                   </td>
+//                   <td className="p-2 text-sm text-muted-foreground">
+//                     {new Date(rfq.created_at).toLocaleDateString()}
+//                   </td>
+//                 </tr>
+//               ))}
+//             </tbody>
+//           </table>
+//         </div>
+//       )}
+//     </div>
+//   );
+// };
 
 // ==================== SECURITY CHECKLIST MODAL ====================
 const SecurityChecklistModal = ({ transport, checklistType, onClose, onComplete }) => {
@@ -1451,16 +1750,30 @@ const VehicleInfoModal = ({ transport, onClose, getDeliveryDocumentUrl }) => {
                         size="sm"
                         onClick={async () => {
                           try {
-                            // Fetch delivery order by DO number
-                            const response = await api.get('/delivery-orders');
-                            const deliveryOrder = response.data.find(
-                              (d) => d.do_number === transport.delivery_note_number
-                            );
+                            const doNumber = transport.delivery_note_number;
+                            // Try DO lookup first if we have the number
+                            if (doNumber) {
+                              const response = await api.get('/delivery-orders');
+                              const deliveryOrder = response.data.find(
+                                (d) => d.do_number === doNumber
+                              );
+                              
+                              if (deliveryOrder) {
+                                // Use the pdfAPI helper
+                                const pdfUrl = pdfAPI.getDeliveryNoteUrl(deliveryOrder.id);
+                                window.open(pdfUrl, '_blank');
+                                return;
+                              }
+                            }
                             
-                            if (deliveryOrder) {
-                              // Use the pdfAPI helper
-                              const pdfUrl = pdfAPI.getDeliveryNoteUrl(deliveryOrder.id);
-                              window.open(pdfUrl, '_blank');
+                            // Fallback to document file
+                            if (transport.delivery_note_document) {
+                              const url = await getDeliveryDocumentUrl(transport.delivery_note_document, doNumber);
+                              if (url) {
+                                window.open(url, '_blank');
+                              } else {
+                                toast.error('Delivery note PDF not found');
+                              }
                             } else {
                               toast.error('Delivery note PDF not found');
                             }
@@ -1484,7 +1797,13 @@ const VehicleInfoModal = ({ transport, onClose, getDeliveryDocumentUrl }) => {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => openDocument(transport.delivery_note_document)}
+                        onClick={async () => {
+                          const url = await getDeliveryDocumentUrl(transport.delivery_note_document, transport.delivery_note_number);
+                          if (url) {
+                            setDocumentUrl(url);
+                            setViewingDocument(true);
+                          }
+                        }}
                       >
                         <Eye className="w-4 h-4 mr-2" />
                         View PDF Document
@@ -1493,7 +1812,7 @@ const VehicleInfoModal = ({ transport, onClose, getDeliveryDocumentUrl }) => {
                         variant="ghost"
                         size="sm"
                         onClick={async () => {
-                          const url = await getDeliveryDocumentUrl(transport.delivery_note_document);
+                          const url = await getDeliveryDocumentUrl(transport.delivery_note_document, transport.delivery_note_number);
                           if (url) {
                             window.open(url, '_blank');
                           }
@@ -1531,7 +1850,13 @@ const VehicleInfoModal = ({ transport, onClose, getDeliveryDocumentUrl }) => {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => openDocument(transport.delivery_order_document)}
+                        onClick={async () => {
+                          const url = await getDeliveryDocumentUrl(transport.delivery_order_document, transport.delivery_order_number);
+                          if (url) {
+                            setDocumentUrl(url);
+                            setViewingDocument(true);
+                          }
+                        }}
                       >
                         <Eye className="w-4 h-4 mr-2" />
                         View PDF Document
@@ -1540,7 +1865,7 @@ const VehicleInfoModal = ({ transport, onClose, getDeliveryDocumentUrl }) => {
                         variant="ghost"
                         size="sm"
                         onClick={async () => {
-                          const url = await getDeliveryDocumentUrl(transport.delivery_order_document);
+                          const url = await getDeliveryDocumentUrl(transport.delivery_order_document, transport.delivery_order_number);
                           if (url) {
                             window.open(url, '_blank');
                           }
@@ -1926,7 +2251,7 @@ const DeliveryDocsTab = ({ inwardTransports, outwardTransports, onViewDetails, o
             <tbody>
               {allDocsWithDates.map((transport) => (
                 <tr key={`${transport.docType}-${transport.id}`} className="border-b border-border/50 hover:bg-muted/10">
-                  <td className="p-3">
+                  <td className="p-2">
                     <div className="flex items-center gap-2">
                       {transport.direction === 'inward' ? (
                         <ArrowDownToLine className="w-4 h-4 text-blue-400" />
@@ -1936,29 +2261,29 @@ const DeliveryDocsTab = ({ inwardTransports, outwardTransports, onViewDetails, o
                       <span className="text-sm font-medium capitalize">{transport.direction}</span>
                     </div>
                   </td>
-                  <td className="p-3">
+                  <td className="p-2">
                     <Badge className={transport.docType === 'DELIVERY_NOTE' ? "bg-blue-500/20 text-blue-400" : "bg-amber-500/20 text-amber-400"}>
                       {transport.docType.replace('_', ' ')}
                     </Badge>
                   </td>
-                  <td className="p-3">
+                  <td className="p-2">
                     <span className="font-mono font-medium">{transport.docNumber || '-'}</span>
                   </td>
-                  <td className="p-3">
+                  <td className="p-2">
                     <span className="font-mono text-sm">{transport.transport_number || transport.import_number || '-'}</span>
                   </td>
-                  <td className="p-3">
+                  <td className="p-2">
                     <span className="text-sm">{transport.po_number || transport.job_number || transport.job_numbers?.join(', ') || transport.import_number || '-'}</span>
                   </td>
-                  <td className="p-3">
+                  <td className="p-2">
                     <span className="text-sm">{transport.supplier_name || transport.customer_name || '-'}</span>
                   </td>
-                  <td className="p-3">
+                  <td className="p-2">
                     <span className="text-sm font-medium text-green-400">
                       {formatDate(transport.expectedDate)}
                     </span>
                   </td>
-                  <td className="p-3">
+                  <td className="p-2">
                     <div className="flex gap-1">
                       <Button size="sm" variant="outline" onClick={() => onViewDetails(transport)}>
                         <Eye className="w-4 h-4" />
@@ -1969,8 +2294,9 @@ const DeliveryDocsTab = ({ inwardTransports, outwardTransports, onViewDetails, o
                           variant="outline"
                           onClick={async () => {
                             const doc = transport.docDocument;
+                            const docNumber = transport.docNumber;
                             if (doc) {
-                              const url = await getDeliveryDocumentUrl(doc);
+                              const url = await getDeliveryDocumentUrl(doc, docNumber);
                               if (url) {
                                 window.open(url, '_blank');
                               }
@@ -1989,6 +2315,1125 @@ const DeliveryDocsTab = ({ inwardTransports, outwardTransports, onViewDetails, o
         </div>
       )}
     </div>
+  );
+};
+
+// ==================== VEHICLE ARRIVAL MODAL (OUTWARD) ====================
+const VehicleArrivalModal = ({ transport, onClose, onOpenLoadingQC }) => {
+  const [formData, setFormData] = useState({
+    arrival_time: new Date().toISOString(),
+    empty_weight: '',
+    vehicle_number: transport?.vehicle_number || '',
+    driver_name: transport?.driver_name || '',
+    transport_company: '',
+    arrival_checklist: {
+      vehicle_condition: false,
+      documents_verified: false,
+      driver_identity_checked: false,
+      safety_equipment: false,
+    },
+    notes: ''
+  });
+
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleSave = async () => {
+    try {
+      setIsSaving(true);
+      
+      // Create or update security checklist for outward transport
+      const checklistData = {
+        ref_type: 'OUTWARD',
+        ref_id: transport.id,
+        ref_number: transport.job_numbers?.[0] || transport.job_number || '',
+        checklist_type: 'OUTWARD',
+        arrival_time: formData.arrival_time,
+        tare_weight: parseFloat(formData.empty_weight) || null,
+        vehicle_number: formData.vehicle_number,
+        driver_name: formData.driver_name,
+        transport_company: formData.transport_company,
+        checklist_items: formData.arrival_checklist,
+        notes: formData.notes,
+      };
+
+      if (transport.security_checklist?.id) {
+        await api.put(`/security/checklists/${transport.security_checklist.id}`, checklistData);
+      } else {
+        await api.post('/security/checklists', checklistData);
+      }
+
+      toast.success('Vehicle arrival details saved');
+      onClose();
+      window.location.reload(); // Refresh to show updated data
+    } catch (error) {
+      console.error('Failed to save arrival details:', error);
+      toast.error('Failed to save arrival details');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleLoadingQC = async () => {
+    // Save first, then open loading QC modal
+    try {
+      setIsSaving(true);
+      
+      const checklistData = {
+        ref_type: 'OUTWARD',
+        ref_id: transport.id,
+        ref_number: transport.job_numbers?.[0] || transport.job_number || '',
+        checklist_type: 'OUTWARD',
+        arrival_time: formData.arrival_time,
+        tare_weight: parseFloat(formData.empty_weight) || null,
+        vehicle_number: formData.vehicle_number,
+        driver_name: formData.driver_name,
+        transport_company: formData.transport_company,
+        checklist_items: formData.arrival_checklist,
+        notes: formData.notes,
+      };
+
+      let checklistId;
+      if (transport.security_checklist?.id) {
+        await api.put(`/security/checklists/${transport.security_checklist.id}`, checklistData);
+        checklistId = transport.security_checklist.id;
+      } else {
+        const res = await api.post('/security/checklists', checklistData);
+        checklistId = res.data.id;
+      }
+
+      onOpenLoadingQC({
+        ...formData,
+        checklistId,
+        transport
+      });
+    } catch (error) {
+      console.error('Failed to save arrival details:', error);
+      toast.error('Failed to save arrival details');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Vehicle Arrival - {transport?.job_numbers?.join(', ') || transport?.job_number}</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4 mt-4">
+          {/* Arrival Time */}
+          <div>
+            <Label>Arrival Time</Label>
+            <Input
+              type="datetime-local"
+              value={formData.arrival_time ? new Date(formData.arrival_time).toISOString().slice(0, 16) : ''}
+              onChange={(e) => setFormData(prev => ({ ...prev, arrival_time: new Date(e.target.value).toISOString() }))}
+            />
+          </div>
+
+          {/* Empty Weight */}
+          <div>
+            <Label>Empty Weight (Tare) - kg</Label>
+            <Input
+              type="number"
+              step="0.01"
+              value={formData.empty_weight}
+              onChange={(e) => setFormData(prev => ({ ...prev, empty_weight: e.target.value }))}
+              placeholder="Vehicle empty weight"
+            />
+          </div>
+
+          {/* Vehicle Details */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label>Vehicle Number</Label>
+              <Input
+                value={formData.vehicle_number}
+                onChange={(e) => setFormData(prev => ({ ...prev, vehicle_number: e.target.value }))}
+                placeholder="Vehicle plate number"
+              />
+            </div>
+            <div>
+              <Label>Driver Name</Label>
+              <Input
+                value={formData.driver_name}
+                onChange={(e) => setFormData(prev => ({ ...prev, driver_name: e.target.value }))}
+                placeholder="Driver name"
+              />
+            </div>
+          </div>
+
+          <div>
+            <Label>Transport Company</Label>
+            <Input
+              value={formData.transport_company}
+              onChange={(e) => setFormData(prev => ({ ...prev, transport_company: e.target.value }))}
+              placeholder="Transport company name"
+            />
+          </div>
+
+          {/* Arrival Checklist */}
+          <div className="border border-border rounded-lg p-4">
+            <Label className="text-base mb-3 block">Arrival Checklist</Label>
+            <div className="space-y-2">
+              {Object.entries(formData.arrival_checklist).map(([key, value]) => (
+                <div key={key} className="flex items-center space-x-2">
+                  <Checkbox
+                    id={key}
+                    checked={value}
+                    onCheckedChange={(checked) => 
+                      setFormData(prev => ({
+                        ...prev,
+                        arrival_checklist: { ...prev.arrival_checklist, [key]: checked }
+                      }))
+                    }
+                  />
+                  <label htmlFor={key} className="text-sm cursor-pointer">
+                    {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Notes */}
+          <div>
+            <Label>Notes</Label>
+            <Input
+              value={formData.notes}
+              onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
+              placeholder="Additional notes"
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 mt-6">
+          <Button variant="outline" onClick={onClose} disabled={isSaving}>Cancel</Button>
+          <Button onClick={handleSave} disabled={isSaving}>
+            {isSaving ? 'Saving...' : 'Save'}
+          </Button>
+          <Button 
+            onClick={handleLoadingQC} 
+            disabled={isSaving}
+            className="bg-blue-500 hover:bg-blue-600"
+          >
+            {isSaving ? 'Saving...' : 'Report Loading QC'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// ==================== LOADING QC MODAL (OUTWARD) ====================
+const LoadingQCModal = ({ arrivalData, onClose, onComplete }) => {
+  const [batchNumber, setBatchNumber] = useState('');
+  const [loadStatus, setLoadStatus] = useState('ASSIGNED');
+  const [batchFound, setBatchFound] = useState(false);
+  const [productionType, setProductionType] = useState('');
+  const [grossWeight, setGrossWeight] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const transport = arrivalData.transport;
+  const emptyWeight = parseFloat(arrivalData.empty_weight) || 0;
+  const netWeight = grossWeight ? parseFloat(grossWeight) - emptyWeight : 0;
+
+  useEffect(() => {
+    fetchBatchNumber();
+  }, []);
+
+  const fetchBatchNumber = async () => {
+    const jobNumber = transport.job_numbers?.[0] || transport.job_number;
+    if (!jobNumber) return;
+
+    try {
+      const response = await api.get(`/production/logs/batch/${jobNumber}`);
+      if (response.data.found) {
+        setBatchNumber(response.data.batch_number);
+        setProductionType(response.data.production_type);
+        setBatchFound(true);
+      }
+    } catch (error) {
+      console.error('Failed to fetch batch:', error);
+    }
+  };
+
+  const handleApprove = async () => {
+    if (!batchNumber) {
+      toast.error('Batch number is required');
+      return;
+    }
+
+    if (loadStatus !== 'LOADED') {
+      toast.error('Please set status to LOADED before approving');
+      return;
+    }
+
+    try {
+      setIsSaving(true);
+
+      // Update security checklist with loading data and batch
+      await api.put(`/security/checklists/${arrivalData.checklistId}`, {
+        gross_weight: parseFloat(grossWeight),
+        net_weight: netWeight,
+        load_status: 'APPROVED',
+        batch_number: batchNumber,
+        loading_time: new Date().toISOString(),
+      });
+
+      toast.success('Loading approved successfully');
+      onComplete();
+    } catch (error) {
+      console.error('Failed to approve loading:', error);
+      toast.error('Failed to approve loading');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Loading QC - {transport?.job_numbers?.join(', ') || transport?.job_number}</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4 mt-4">
+          {/* Header Info */}
+          <div className="grid grid-cols-3 gap-4 p-4 bg-muted/20 rounded">
+            <div>
+              <Label>Job Order</Label>
+              <p className="font-mono text-amber-400 text-sm">
+                {transport?.job_numbers?.join(', ') || transport?.job_number}
+              </p>
+            </div>
+            <div>
+              <Label>Vehicle</Label>
+              <p className="font-mono text-sm">{arrivalData.vehicle_number}</p>
+            </div>
+            <div>
+              <Label>Status</Label>
+              <select
+                value={loadStatus}
+                onChange={(e) => setLoadStatus(e.target.value)}
+                className="w-full p-2 rounded border border-border bg-background text-sm"
+              >
+                <option value="ASSIGNED">Assigned</option>
+                <option value="LOADED">Loaded</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Weighment */}
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <Label>Empty Weight (kg)</Label>
+              <Input
+                type="number"
+                value={emptyWeight}
+                disabled
+                className="bg-muted"
+              />
+            </div>
+            <div>
+              <Label>Gross Weight (kg)</Label>
+              <Input
+                type="number"
+                step="0.01"
+                value={grossWeight}
+                onChange={(e) => setGrossWeight(e.target.value)}
+                placeholder="Loaded weight"
+              />
+            </div>
+            <div>
+              <Label>Net Weight (kg)</Label>
+              <Input
+                type="number"
+                value={netWeight.toFixed(2)}
+                disabled
+                className="bg-muted"
+              />
+            </div>
+          </div>
+
+          {/* Batch Number */}
+          <div>
+            <Label>Batch Number {!batchFound && '*'}</Label>
+            <div className="flex gap-2 items-center">
+              <Input
+                value={batchNumber}
+                onChange={(e) => setBatchNumber(e.target.value)}
+                placeholder={batchFound ? "Auto-filled from production" : "Enter batch number"}
+                disabled={batchFound}
+                className={batchFound ? 'bg-muted' : ''}
+              />
+              {batchFound && (
+                <Badge className="bg-green-500/20 text-green-400">
+                  <Check className="w-3 h-3 mr-1" />
+                  From Production
+                </Badge>
+              )}
+            </div>
+          </div>
+
+          {productionType && (
+            <div>
+              <Label>Production Type</Label>
+              <Badge>{productionType.toUpperCase()}</Badge>
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 mt-6">
+          <Button variant="outline" onClick={onClose} disabled={isSaving}>Cancel</Button>
+          <Button
+            onClick={handleApprove}
+            disabled={loadStatus !== 'LOADED' || !batchNumber || !grossWeight || isSaving}
+            className="bg-green-500 hover:bg-green-600"
+          >
+            {isSaving ? 'Approving...' : 'Approve'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// ==================== DO ISSUANCE MODAL (OUTWARD) ====================
+const DOIssuanceModal = ({ transport, onClose, onComplete }) => {
+  const [formData, setFormData] = useState({
+    exit_empty_weight: '',
+    exit_gross_weight: '',
+  });
+  const [isIssuing, setIsIssuing] = useState(false);
+
+  const checklist = transport.security_checklist;
+  const batchNumber = checklist?.batch_number || '';
+  
+  const exit_net_weight = formData.exit_gross_weight && formData.exit_empty_weight
+    ? parseFloat(formData.exit_gross_weight) - parseFloat(formData.exit_empty_weight)
+    : 0;
+
+    const handleIssueDO = async () => {
+      // Validate required fields
+      if (!formData.exit_empty_weight || !formData.exit_gross_weight) {
+        toast.error('Please enter both empty and gross weights');
+        return;
+      }
+
+      if (!batchNumber || batchNumber.trim() === '') {
+        toast.error('Batch number is required. Please ensure the security checklist has a batch number assigned.');
+        return;
+      }
+
+      if (!transport.job_order_id) {
+        toast.error('Job order ID is missing');
+        return;
+      }
+    
+      try {
+        setIsIssuing(true);
+    
+        // Issue DO through security endpoint
+        const response = await api.post('/delivery-orders/from-security', {
+          job_order_id: transport.job_order_id,
+          batch_number: batchNumber,
+          exit_empty_weight: parseFloat(formData.exit_empty_weight),
+          exit_gross_weight: parseFloat(formData.exit_gross_weight),
+          exit_net_weight: exit_net_weight,
+        });
+    
+        toast.success(`Delivery Order ${response.data.do_number} issued successfully`);
+        onComplete();
+      } catch (error) {
+        console.error('Failed to issue DO:', error);
+        
+        // Handle validation errors (array of error objects)
+        let errorMessage = 'Failed to issue DO';
+        if (error.response?.data?.detail) {
+          const detail = error.response.data.detail;
+          if (Array.isArray(detail)) {
+            // Extract messages from validation error array
+            errorMessage = detail.map(err => err.msg || JSON.stringify(err)).join(', ');
+          } else if (typeof detail === 'string') {
+            errorMessage = detail;
+          } else {
+            errorMessage = JSON.stringify(detail);
+          }
+        }
+        
+        toast.error(errorMessage);
+      } finally {
+        setIsIssuing(false);
+      }
+    };
+
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Issue Delivery Order</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4 mt-4">
+          {/* Job Order Info */}
+          <div className="p-4 bg-muted/20 rounded">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Job Order</Label>
+                <p className="font-mono text-amber-400 text-sm">
+                  {transport.job_numbers?.join(', ') || transport.job_number}
+                </p>
+              </div>
+              <div>
+                <Label>Batch Number</Label>
+                <p className="font-mono text-sm">{batchNumber || '-'}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Exit Weighment */}
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <Label>Exit Empty Weight (kg)</Label>
+              <Input
+                type="number"
+                step="0.01"
+                value={formData.exit_empty_weight}
+                onChange={(e) => setFormData(prev => ({...prev, exit_empty_weight: e.target.value}))}
+                placeholder="Empty weight"
+              />
+            </div>
+            <div>
+              <Label>Exit Gross Weight (kg)</Label>
+              <Input
+                type="number"
+                step="0.01"
+                value={formData.exit_gross_weight}
+                onChange={(e) => setFormData(prev => ({...prev, exit_gross_weight: e.target.value}))}
+                placeholder="Loaded weight"
+              />
+            </div>
+            <div>
+              <Label>Exit Net Weight (kg)</Label>
+              <Input
+                type="number"
+                value={exit_net_weight.toFixed(2)}
+                disabled
+                className="bg-muted"
+              />
+            </div>
+          </div>
+
+          <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded">
+            <p className="text-sm text-amber-400">
+              <strong>Note:</strong> Issuing this DO will automatically reduce stock based on the job order's packaging type.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 mt-6">
+          <Button variant="outline" onClick={onClose} disabled={isIssuing}>Cancel</Button>
+          <Button
+            onClick={handleIssueDO}
+            disabled={!formData.exit_empty_weight || !formData.exit_gross_weight || isIssuing}
+            className="bg-blue-500 hover:bg-blue-600"
+          >
+            {isIssuing ? 'Issuing...' : 'Issue DO'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// ==================== DISCHARGE PROCESSING MODAL ====================
+const DischargeProcessingModal = ({ transport, onClose, onReportQC }) => {
+  const [formData, setFormData] = useState({
+    arrival_time: new Date().toISOString(),
+    arrival_quantity: '',
+    empty_weight: '',
+    gross_weight: '',
+    vehicle_number: transport?.vehicle_number || '',
+    driver_name: transport?.driver_name || '',
+    transport_company: '',
+    discharge_checklist: {
+      container_condition: false,
+      seal_intact: false,
+      no_visible_damage: false,
+      documents_verified: false,
+      safety_compliance: false,
+    },
+    notes: ''
+  });
+
+  const [isSaving, setIsSaving] = useState(false);
+
+  const net_weight = formData.gross_weight && formData.empty_weight 
+    ? parseFloat(formData.gross_weight) - parseFloat(formData.empty_weight)
+    : 0;
+
+  const handleChange = (field, value) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleChecklistChange = (field, checked) => {
+    setFormData(prev => ({
+      ...prev,
+      discharge_checklist: {
+        ...prev.discharge_checklist,
+        [field]: checked
+      }
+    }));
+  };
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      // Save discharge data to security checklist
+      const checklistData = {
+        ref_type: 'INWARD',
+        ref_id: transport.id,
+        ref_number: transport.po_number || transport.transport_number,
+        checklist_type: 'INWARD',
+        arrival_time: formData.arrival_time,
+        arrival_quantity: parseFloat(formData.arrival_quantity),
+        tare_weight: parseFloat(formData.empty_weight),
+        gross_weight: parseFloat(formData.gross_weight),
+        net_weight: net_weight,
+        vehicle_number: formData.vehicle_number,
+        driver_name: formData.driver_name,
+        transport_company: formData.transport_company,
+        discharge_checklist_items: formData.discharge_checklist,
+        notes: formData.notes,
+        status: 'COMPLETED'
+      };
+
+      await api.post('/security/checklists', checklistData);
+      toast.success('Discharge data saved successfully');
+      onClose();
+    } catch (error) {
+      console.error('Failed to save discharge data:', error);
+      toast.error('Failed to save discharge data');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleReportQC = async () => {
+    // First save the discharge data
+    setIsSaving(true);
+    try {
+      const checklistData = {
+        ref_type: 'INWARD',
+        ref_id: transport.id,
+        ref_number: transport.po_number || transport.transport_number,
+        checklist_type: 'INWARD',
+        arrival_time: formData.arrival_time,
+        arrival_quantity: parseFloat(formData.arrival_quantity),
+        tare_weight: parseFloat(formData.empty_weight),
+        gross_weight: parseFloat(formData.gross_weight),
+        net_weight: net_weight,
+        vehicle_number: formData.vehicle_number,
+        driver_name: formData.driver_name,
+        transport_company: formData.transport_company,
+        discharge_checklist_items: formData.discharge_checklist,
+        notes: formData.notes,
+        status: 'COMPLETED'
+      };
+
+      const response = await api.post('/security/checklists', checklistData);
+      
+      // Pass the saved data to QC modal
+      onReportQC({
+        ...formData,
+        net_weight,
+        checklist_id: response.data.id,
+        transport
+      });
+    } catch (error) {
+      console.error('Failed to save discharge data:', error);
+      toast.error('Failed to save discharge data');
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Truck className="w-5 h-5 text-blue-500" />
+            Process Arrival - {transport?.po_number || transport?.transport_number}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-6">
+          {/* Arrival Information */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">Arrival Information</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label className="text-xs">Arrival Time</Label>
+                <Input
+                  type="datetime-local"
+                  value={formData.arrival_time.slice(0, 16)}
+                  onChange={(e) => handleChange('arrival_time', new Date(e.target.value).toISOString())}
+                  className="text-sm"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Arrival Quantity</Label>
+                <Input
+                  type="number"
+                  placeholder="Enter quantity received"
+                  value={formData.arrival_quantity}
+                  onChange={(e) => handleChange('arrival_quantity', e.target.value)}
+                  className="text-sm"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Weighment */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">Weighment</h3>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <Label className="text-xs">Empty Weight (kg)</Label>
+                <Input
+                  type="number"
+                  placeholder="Tare weight"
+                  value={formData.empty_weight}
+                  onChange={(e) => handleChange('empty_weight', e.target.value)}
+                  className="text-sm"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Gross Weight (kg)</Label>
+                <Input
+                  type="number"
+                  placeholder="Total weight"
+                  value={formData.gross_weight}
+                  onChange={(e) => handleChange('gross_weight', e.target.value)}
+                  className="text-sm"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Net Weight (kg)</Label>
+                <Input
+                  type="number"
+                  value={net_weight.toFixed(2)}
+                  disabled
+                  className="text-sm bg-muted"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Vehicle Details */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">Vehicle Details</h3>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <Label className="text-xs">Vehicle Number</Label>
+                <Input
+                  type="text"
+                  placeholder="Vehicle registration"
+                  value={formData.vehicle_number}
+                  onChange={(e) => handleChange('vehicle_number', e.target.value)}
+                  className="text-sm"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Driver Name</Label>
+                <Input
+                  type="text"
+                  placeholder="Driver name"
+                  value={formData.driver_name}
+                  onChange={(e) => handleChange('driver_name', e.target.value)}
+                  className="text-sm"
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Transport Company</Label>
+                <Input
+                  type="text"
+                  placeholder="Company name"
+                  value={formData.transport_company}
+                  onChange={(e) => handleChange('transport_company', e.target.value)}
+                  className="text-sm"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Discharge Checklist */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">Discharge Checklist</h3>
+            <div className="space-y-2">
+              {Object.entries({
+                container_condition: 'Container/Package in Good Condition',
+                seal_intact: 'Seal Intact (if applicable)',
+                no_visible_damage: 'No Visible Damage',
+                documents_verified: 'Documents Verified',
+                safety_compliance: 'Safety Compliance Checked'
+              }).map(([key, label]) => (
+                <div key={key} className="flex items-center space-x-2">
+                  <Checkbox
+                    id={key}
+                    checked={formData.discharge_checklist[key]}
+                    onCheckedChange={(checked) => handleChecklistChange(key, checked)}
+                  />
+                  <Label htmlFor={key} className="text-sm cursor-pointer">
+                    {label}
+                  </Label>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Notes */}
+          <div>
+            <Label className="text-xs">Notes</Label>
+            <textarea
+              className="w-full min-h-[80px] p-2 text-sm border rounded-md bg-background"
+              placeholder="Additional notes or observations..."
+              value={formData.notes}
+              onChange={(e) => handleChange('notes', e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t">
+          <Button variant="outline" onClick={onClose} disabled={isSaving}>
+            Cancel
+          </Button>
+          <Button variant="outline" onClick={handleSave} disabled={isSaving}>
+            Save
+          </Button>
+          <Button onClick={handleReportQC} disabled={isSaving} className="bg-blue-500 hover:bg-blue-600">
+            <ClipboardCheck className="w-4 h-4 mr-2" />
+            Report QC
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// ==================== QC INSPECTION MODAL ====================
+const QCInspectionModal = ({ dischargeData, onClose, onComplete }) => {
+  const [sampleType, setSampleType] = useState('SOLVENT');
+  const [batchNumber, setBatchNumber] = useState('');
+  const [qcParameters, setQcParameters] = useState([]);
+  const [parameterResults, setParameterResults] = useState({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    loadQCParameters(sampleType);
+  }, [sampleType]);
+
+  const loadQCParameters = async (type) => {
+    setIsLoading(true);
+    try {
+      const response = await api.get(`/qc/parameters?product_type=${type}`);
+      setQcParameters(response.data);
+      
+      // Initialize parameter results
+      const initialResults = {};
+      response.data.forEach(param => {
+        initialResults[param.id] = {
+          parameter_id: param.id,
+          parameter_name: param.parameter_name,
+          result: null,
+          reason: '',
+          required: param.required
+        };
+      });
+      setParameterResults(initialResults);
+    } catch (error) {
+      console.error('Failed to load QC parameters:', error);
+      toast.error('Failed to load QC parameters');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleParameterResult = (parameterId, result) => {
+    setParameterResults(prev => ({
+      ...prev,
+      [parameterId]: {
+        ...prev[parameterId],
+        result
+      }
+    }));
+  };
+
+  const handleParameterReason = (parameterId, reason) => {
+    setParameterResults(prev => ({
+      ...prev,
+      [parameterId]: {
+        ...prev[parameterId],
+        reason
+      }
+    }));
+  };
+
+  const allRequiredParamsFilled = () => {
+    return qcParameters
+      .filter(param => param.required)
+      .every(param => parameterResults[param.id]?.result !== null);
+  };
+
+  const allParametersPassed = () => {
+    return Object.values(parameterResults).every(result => result.result === 'PASS' || !result.required);
+  };
+
+  const handleSubmit = async () => {
+    if (!batchNumber) {
+      toast.error('Please enter batch number');
+      return;
+    }
+
+    if (!allRequiredParamsFilled()) {
+      toast.error('Please complete all required QC parameters');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const qcData = {
+        ref_type: 'INWARD',
+        ref_id: dischargeData.transport.id,
+        ref_number: dischargeData.transport.po_number || dischargeData.transport.transport_number,
+        product_name: dischargeData.transport.products_summary || dischargeData.transport.product_names?.join(', '),
+        supplier: dischargeData.transport.supplier_name,
+        batch_number: batchNumber,
+        sample_type: sampleType,
+        arrival_quantity: parseFloat(dischargeData.arrival_quantity) || null,
+        qc_parameters: Object.values(parameterResults).map(result => ({
+          parameter_id: result.parameter_id,
+          parameter_name: result.parameter_name,
+          result: result.result,
+          reason: result.reason,
+          required: result.required
+        })),
+        security_checklist_id: dischargeData.checklist_id,
+        vehicle_number: dischargeData.vehicle_number,
+        po_number: dischargeData.transport.po_number
+      };
+
+      await api.post('/qc/inspections', qcData);
+      
+      if (allParametersPassed()) {
+        toast.success('QC Inspection passed! GRN will be created.');
+      } else {
+        toast.error('QC Inspection failed. Material on hold.');
+      }
+
+      onComplete();
+    } catch (error) {
+      console.error('Failed to submit QC inspection:', error);
+      toast.error('Failed to submit QC inspection');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const passedCount = Object.values(parameterResults).filter(r => r.result === 'PASS').length;
+  const failedCount = Object.values(parameterResults).filter(r => r.result === 'FAIL').length;
+
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ClipboardCheck className="w-5 h-5 text-blue-500" />
+            QC Inspection - {dischargeData?.transport?.po_number || 'N/A'}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-6">
+          {/* Header Information */}
+          <div className="grid grid-cols-4 gap-4 p-4 bg-muted/20 rounded-lg">
+            <div>
+              <Label className="text-xs text-muted-foreground">Date/Time</Label>
+              <p className="text-sm font-medium">{new Date(dischargeData?.arrival_time).toLocaleString()}</p>
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">PO#</Label>
+              <p className="text-sm font-mono text-blue-400">{dischargeData?.transport?.po_number || '-'}</p>
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">Product</Label>
+              <p className="text-sm">{dischargeData?.transport?.products_summary || '-'}</p>
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">Delivery Note</Label>
+              <p className="text-sm">{dischargeData?.transport?.delivery_note_number || '-'}</p>
+            </div>
+          </div>
+
+          {/* Sample Type Selection */}
+          <div className="space-y-2">
+            <Label className="text-sm font-semibold">Sample Type</Label>
+            <div className="flex gap-4">
+              <div className="flex items-center space-x-2">
+                <input
+                  type="radio"
+                  id="solvent"
+                  name="sampleType"
+                  value="SOLVENT"
+                  checked={sampleType === 'SOLVENT'}
+                  onChange={(e) => setSampleType(e.target.value)}
+                  className="cursor-pointer"
+                />
+                <Label htmlFor="solvent" className="cursor-pointer">Solvent</Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="radio"
+                  id="oil"
+                  name="sampleType"
+                  value="OIL"
+                  checked={sampleType === 'OIL'}
+                  onChange={(e) => setSampleType(e.target.value)}
+                  className="cursor-pointer"
+                />
+                <Label htmlFor="oil" className="cursor-pointer">Oil</Label>
+              </div>
+            </div>
+          </div>
+
+          {/* Batch Number */}
+          <div>
+            <Label className="text-sm font-semibold">Batch Number *</Label>
+            <Input
+              type="text"
+              placeholder="Enter batch number"
+              value={batchNumber}
+              onChange={(e) => setBatchNumber(e.target.value)}
+              className="max-w-md"
+            />
+          </div>
+
+          {/* QC Parameters Table */}
+          <div className="space-y-2">
+            <Label className="text-sm font-semibold">QC Parameters</Label>
+            {isLoading ? (
+              <div className="flex justify-center p-8">
+                <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full">
+                  <thead className="bg-muted/30">
+                    <tr>
+                      <th className="p-2 text-left text-xs font-medium">Parameter</th>
+                      <th className="p-2 text-left text-xs font-medium">Type</th>
+                      <th className="p-2 text-left text-xs font-medium">Result</th>
+                      <th className="p-2 text-left text-xs font-medium">Reason (if fail)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {qcParameters.map((param) => (
+                      <tr key={param.id} className="border-b border-border/50">
+                        <td className="p-2 text-sm">
+                          {param.parameter_name}
+                          {param.required && <span className="text-red-400 ml-1">*</span>}
+                        </td>
+                        <td className="p-2 text-xs text-muted-foreground">
+                          {param.test_type}
+                        </td>
+                        <td className="p-2">
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant={parameterResults[param.id]?.result === 'PASS' ? 'default' : 'outline'}
+                              className={parameterResults[param.id]?.result === 'PASS' 
+                                ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' 
+                                : ''}
+                              onClick={() => handleParameterResult(param.id, 'PASS')}
+                            >
+                              <Check className="w-3 h-3 mr-1" />
+                              Pass
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant={parameterResults[param.id]?.result === 'FAIL' ? 'default' : 'outline'}
+                              className={parameterResults[param.id]?.result === 'FAIL' 
+                                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' 
+                                : ''}
+                              onClick={() => handleParameterResult(param.id, 'FAIL')}
+                            >
+                              <X className="w-3 h-3 mr-1" />
+                              Fail
+                            </Button>
+                          </div>
+                        </td>
+                        <td className="p-2">
+                          {parameterResults[param.id]?.result === 'FAIL' && (
+                            <Input
+                              type="text"
+                              placeholder="Enter reason"
+                              value={parameterResults[param.id]?.reason || ''}
+                              onChange={(e) => handleParameterReason(param.id, e.target.value)}
+                              className="text-sm"
+                            />
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Summary */}
+          <div className="grid grid-cols-3 gap-4 p-4 bg-muted/20 rounded-lg">
+            <div>
+              <Label className="text-xs text-muted-foreground">Total Parameters</Label>
+              <p className="text-lg font-bold">{qcParameters.length}</p>
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">Passed</Label>
+              <p className="text-lg font-bold text-green-400">{passedCount}</p>
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">Failed</Label>
+              <p className="text-lg font-bold text-red-400">{failedCount}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t">
+          <Button variant="outline" onClick={onClose} disabled={isSubmitting}>
+            Cancel
+          </Button>
+          <Button 
+            onClick={handleSubmit} 
+            disabled={isSubmitting || !allRequiredParamsFilled() || !batchNumber}
+            className="bg-blue-500 hover:bg-blue-600"
+          >
+            {isSubmitting ? (
+              <>
+                <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                Submitting...
+              </>
+            ) : (
+              <>
+                <Check className="w-4 h-4 mr-2" />
+                Submit QC
+              </>
+            )}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 };
 

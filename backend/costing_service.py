@@ -25,24 +25,28 @@ class CostingService:
     ) -> str:
         """
         Determine costing type based on order characteristics
-        Returns: EXPORT_CONTAINERIZED, EXPORT_BULK, EXPORT_GCC_ROAD, EXPORT_ROAD, EXPORT_40FT_DG, EXPORT_40FT_NON_DG, EXPORT_20FT_DG, EXPORT_20FT_NON_DG, LOCAL_DISPATCH, LOCAL_PURCHASE_SALE, LOCAL_BULK_TO_PLANT, or LOCAL_DRUM_TO_PLANT
+        
+        ACTIVE COSTING TYPES (8 only):
+        - EXPORT_GCC_ROAD (GCC road shipments - bulk or drums)
+        - EXPORT_40FT_DG (40ft container - dangerous goods)
+        - EXPORT_40FT_NON_DG (40ft container - non-dangerous goods)
+        - EXPORT_20FT_DG (20ft container - dangerous goods)
+        - EXPORT_20FT_NON_DG (20ft container - non-dangerous goods)
+        - LOCAL_PURCHASE_SALE (local direct sales)
+        - LOCAL_BULK_TO_PLANT (local bulk to plant)
+        - LOCAL_DRUM_TO_PLANT (local drums to plant)
+        
+        DEPRECATED: EXPORT_CONTAINERIZED, EXPORT_BULK, EXPORT_ROAD, LOCAL_DISPATCH
         """
         order_type_upper = (order_type or "").upper()
         packaging_upper = (packaging or "Bulk").upper()
         
-        # Export orders with road transport mode
+        # Export orders with road transport mode → Always EXPORT_GCC_ROAD
         is_road = transport_mode and transport_mode.upper() == "ROAD"
         
         if order_type_upper == "EXPORT" and is_road:
-            # GCC countries by road = special export type
-            gcc_countries = ["SAUDI ARABIA", "BAHRAIN", "KUWAIT", "OMAN", "QATAR"]
-            country_upper = (country_of_destination or "").upper()
-            is_gcc = country_upper in gcc_countries
-            
-            if is_gcc:
-                return "EXPORT_GCC_ROAD"  # GCC road export
-            else:
-                return "EXPORT_ROAD"  # General export road
+            # All road exports go to GCC_BY_ROAD (handles both GCC and non-GCC)
+            return "EXPORT_GCC_ROAD"
         
         # Local orders: check local_type for different costing types
         if order_type_upper == "LOCAL":
@@ -56,34 +60,32 @@ class CostingService:
             elif local_type_lower in ("gcc_road_bulk", "gcc_road"):
                 # GCC by road (bulk or drums) – use same costing sheet as EXPORT_GCC_ROAD
                 return "EXPORT_GCC_ROAD"
-            return "LOCAL_DISPATCH"
+            # Default local to purchase/sale
+            return "LOCAL_PURCHASE_SALE"
         
-        # Export orders: check if bulk or packaged
+        # Export orders: Must specify container type for sea/ocean shipments
         if order_type_upper == "EXPORT":
-            # Check if packaging is bulk
-            if packaging_upper == "BULK" or not packaging or packaging.strip() == "":
-                return "EXPORT_BULK"
-            else:
-                # Packaged (drums, pallets, containers)
-                # Check for DG container types (only for sea/ocean transport)
-                is_sea = transport_mode and transport_mode.upper() in ["SEA", "OCEAN"]
-                if is_sea and container_type:
-                    container_type_upper = container_type.upper()
-                    if container_type_upper == "40FT" or container_type_upper == "40":
-                        if is_dg:
-                            return "EXPORT_40FT_DG"
-                        else:
-                            return "EXPORT_40FT_NON_DG"
-                    elif container_type_upper == "20FT" or container_type_upper == "20":
-                        if is_dg:
-                            return "EXPORT_20FT_DG"
-                        else:
-                            return "EXPORT_20FT_NON_DG"
-                # Default to EXPORT_CONTAINERIZED for other cases
-                return "EXPORT_CONTAINERIZED"
+            # Check for container types (only for sea/ocean transport)
+            is_sea = transport_mode and transport_mode.upper() in ["SEA", "OCEAN"]
+            if is_sea and container_type:
+                container_type_upper = container_type.upper()
+                if container_type_upper == "40FT" or container_type_upper == "40":
+                    if is_dg:
+                        return "EXPORT_40FT_DG"
+                    else:
+                        return "EXPORT_40FT_NON_DG"
+                elif container_type_upper == "20FT" or container_type_upper == "20":
+                    if is_dg:
+                        return "EXPORT_20FT_DG"
+                    else:
+                        return "EXPORT_20FT_NON_DG"
+            
+            # Default: Assume 40FT non-DG for bulk/flexitank or unspecified containers
+            # (Most common case for bulk = flexitank in 40ft container)
+            return "EXPORT_40FT_NON_DG"
         
-        # Default to LOCAL_DISPATCH if unclear
-        return "LOCAL_DISPATCH"
+        # Final fallback: local purchase/sale
+        return "LOCAL_PURCHASE_SALE"
     
     async def get_raw_material_cost(
         self,
@@ -93,7 +95,7 @@ class CostingService:
     ) -> Dict[str, any]:
         """
         Get raw material cost from different sources
-        Returns: {cost: float, source: str, details: dict}
+        Returns: {cost: float, source: str, details: dict, warning: str (optional)}
         """
         if source == "INVENTORY_AVG":
             # Calculate weighted average from inventory movements
@@ -137,9 +139,28 @@ class CostingService:
                             "source": "INVENTORY_AVG",
                             "details": {"method": "weighted_average", "samples": len(grn_items)}
                         }
+                
+                # FALLBACK: Try product's price fields before returning 0
+                if product:
+                    # Check price fields in order: price_usd, price_aed, price_eur
+                    fallback_price = product.get("price_usd") or product.get("price_aed") or product.get("price_eur") or 0.0
+                    if fallback_price > 0:
+                        return {
+                            "cost": fallback_price * quantity,
+                            "unit_cost": fallback_price,
+                            "source": "PRODUCT_PRICE_FALLBACK",
+                            "details": {"method": "product_master_price"},
+                            "warning": "Using product master price - no GRN/PO history found"
+                        }
             
-            # Fallback: return 0 if no data
-            return {"cost": 0.0, "unit_cost": 0.0, "source": "INVENTORY_AVG", "details": {"method": "no_data"}}
+            # Last resort: return 0 with explicit warning
+            return {
+                "cost": 0.0, 
+                "unit_cost": 0.0, 
+                "source": "NONE", 
+                "details": {"method": "no_data"},
+                "warning": "⚠️ No cost data available - manual entry required"
+            }
         
         elif source == "LATEST_PO":
             # Get latest approved PO price

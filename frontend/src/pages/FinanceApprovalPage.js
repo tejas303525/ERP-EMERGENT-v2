@@ -676,9 +676,9 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
   const customTotalFromRows = costRows.reduce((sum, row) => sum + (row.total || 0), 0);
   
   // Use costing.total_cost directly - the backend calculates this correctly for all costing types
-  const totalCost = costing?.total_cost && costing.total_cost > 0
-    ? costing.total_cost
-    : (usesCustomTotal ? customTotalFromRows : 0);
+  const totalCost = (costing?.total_cost && costing.total_cost > 0)
+  ? costing.total_cost
+  : customTotalFromRows || 0;
 
   return (
     <div className="glass p-4 rounded-lg border border-border" data-testid={`quotation-${quotation.id}`}>
@@ -793,36 +793,55 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
             <div className="text-center py-4 text-muted-foreground">Loading costing...</div>
           ) : costing ? (
             <div className="bg-muted/20 border border-border rounded-lg p-4">
-              <div className="flex items-center justify-between">
-                <div>
+                <div className="flex items-center justify-between">
+                  <div>
                   {(() => {
-                    const profit = (quotation.total || 0) - totalCost;
-                    const profitPercentage = quotation.total > 0 ? (profit / quotation.total) * 100 : 0;
-                    return (
-                      <>
-                        <p className="text-xs text-muted-foreground mb-1">Net {profit >= 0 ? 'Profit' : 'Loss'}</p>
-                        <p className={`text-2xl font-bold ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          {profit >= 0 ? '+' : ''}{quotation.currency} {profit.toFixed(2)}
-                        </p>
-                        <p className={`text-sm mt-1 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                          {profitPercentage >= 0 ? '+' : ''}{profitPercentage.toFixed(2)}% margin
-                        </p>
-                      </>
-                    );
-                  })()}
-                </div>
-                <div className="text-right">
-                  <p className="text-xs text-muted-foreground mb-1">Selling Price</p>
-                  <p className="text-lg font-semibold text-green-400">
-                    {quotation.currency} {quotation.total?.toFixed(2) || '0.00'}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">Total Cost</p>
-                  <p className="text-sm font-medium">
-                    {quotation.currency} {totalCost.toFixed(2)}
-                  </p>
+                        // DEBUG: Log the costing data to see what we're getting
+    console.log('=== PROFIT DEBUG for', quotation.pfi_number, '===');
+    console.log('costing object:', costing);
+    console.log('custom_breakdown:', costing?.custom_breakdown);
+    console.log('custom_breakdown.net_profit_loss:', costing?.custom_breakdown?.net_profit_loss);
+    console.log('costing.margin_amount:', costing?.margin_amount);
+    console.log('quotation.margin_amount:', quotation?.margin_amount);
+    console.log('totalCost:', totalCost);
+    console.log('quotation.total:', quotation.total);
+    console.log('===========================');
+    // Use Net Profit/-Loss directly from costing modal calculation
+    // Priority 1: Use net_profit_loss from custom_breakdown (from costing modal)
+    // Priority 2: Use margin_amount from costing record (saved value)
+    // Priority 3: Fallback to calculated value
+    const profit = costing?.custom_breakdown?.net_profit_loss 
+      ?? costing?.margin_amount 
+      ?? ((quotation.total || 0) - totalCost);
+    
+    const profitPercentage = costing?.margin_percentage 
+      ?? (quotation.total > 0 ? (profit / quotation.total) * 100 : 0);
+    
+    return (
+      <>
+        <p className="text-xs text-muted-foreground mb-1">Net {profit >= 0 ? 'Profit' : 'Loss'}</p>
+        <p className={`text-2xl font-bold ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+          {profit >= 0 ? '+' : ''}{quotation.currency} {profit.toFixed(2)}
+        </p>
+        <p className={`text-sm mt-1 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+          {profitPercentage >= 0 ? '+' : ''}{profitPercentage.toFixed(2)}% margin
+        </p>
+      </>
+    );
+  })()}
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs text-muted-foreground mb-1">Selling Price</p>
+                    <p className="text-lg font-semibold text-green-400">
+                      {quotation.currency} {quotation.total?.toFixed(2) || '0.00'}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">Total Cost</p>
+                    <p className="text-sm font-medium">
+                      {quotation.currency} {totalCost.toFixed(2)}
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
           ) : (
             <div className="text-center py-4 text-amber-400 text-sm border border-amber-500/30 bg-amber-500/10 rounded p-4">
               <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />

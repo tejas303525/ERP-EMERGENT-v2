@@ -343,6 +343,7 @@ export default function ShippingPage() {
       });
       
       setJobOrders(availableExportJobs);
+      setBookings(enrichedBookings);
     } catch (error) {
       toast.error('Failed to load data');
       // Set empty arrays on error to prevent rendering issues
@@ -544,6 +545,14 @@ export default function ShippingPage() {
       return;
     }
     try {
+      console.log('📦 Updating CRO with data:', croForm);
+      console.log('📦 CRO Details:', {
+        si_cutoff: croForm.si_cutoff,
+        pull_out_date: croForm.pull_out_date,
+        gate_in_date: croForm.gate_in_date,
+        vgm_cutoff: croForm.vgm_cutoff
+      });
+      
       await shippingAPI.updateCRO(selectedBooking.id, croForm);
       const isPOImport = selectedBooking?.is_po_import || selectedBooking?.ref_type === 'PO_IMPORT';
       if (isPOImport) {
@@ -554,6 +563,7 @@ export default function ShippingPage() {
       setCroOpen(false);
       loadData();
     } catch (error) {
+      console.error('❌ CRO Update Error:', error.response?.data);
       toast.error(error.response?.data?.detail || 'Failed to update CRO');
     }
   };
@@ -846,44 +856,84 @@ export default function ShippingPage() {
                   {/* Job Order Selection for Export */}
                   {bookingType === 'export' && (
                     <div>
-                      <Label className="mb-2 block">
-                        Select Job Orders (Ready for Dispatch)
-                      </Label>
-                      <div className="border border-border rounded-sm max-h-48 overflow-y-auto">
-                        {jobOrders.length > 0 ? jobOrders.map(job => (
-                          <div key={job.id} className="flex items-center gap-3 p-3 border-b border-border last:border-0 hover:bg-muted/30">
-                            <Checkbox
-                              checked={form.job_order_ids.includes(job.id)}
-                              onCheckedChange={() => toggleJobSelection(job.id)}
-                            />
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2">
-                                <p className="font-mono text-sm">{job.job_number}</p>
-                                {job.status && (
-                                  <Badge variant="outline" className="text-xs">
-                                    {job.status}
-                                  </Badge>
-                                )}
-                                {job.incoterm && (
-                                  <Badge variant="outline" className="text-xs">
-                                    {job.incoterm}
-                                  </Badge>
-                                )}
+                      {form.job_order_ids.length > 0 ? (
+                        // Job already selected - show selected job info
+                        <div>
+                          <Label className="mb-2 block">Selected Job Order</Label>
+                          <div className="border border-border rounded-sm bg-muted/20 p-4">
+                            {jobOrders.filter(job => form.job_order_ids.includes(job.id)).map(job => (
+                              <div key={job.id} className="flex items-center gap-3">
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <p className="font-mono text-sm font-medium">{job.job_number}</p>
+                                    {job.incoterm && (
+                                      <Badge variant="outline" className="text-xs">
+                                        {job.incoterm}
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  <p className="text-xs text-muted-foreground mt-1">
+                                    <span className="font-medium">{job.customer_name || 'Customer'}</span>
+                                    {job.delivery_date && (
+                                      <span> • Delivery: {new Date(job.delivery_date).toLocaleDateString()}</span>
+                                    )}
+                                  </p>
+                                </div>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => setForm(prev => ({ ...prev, job_order_ids: [] }))}
+                                  title="Change job order"
+                                >
+                                  Change
+                                </Button>
                               </div>
-                              <p className="text-xs text-muted-foreground">
-                                <span className="font-medium">{job.customer_name || 'Customer'} - </span>
-                                {job.delivery_date ? (
-                                  <span>Delivery: {new Date(job.delivery_date).toLocaleDateString()}</span>
-                                ) : (
-                                  <span>No delivery date</span>
-                                )}
-                              </p>
-                            </div>
+                            ))}
                           </div>
-                        )) : (
-                          <p className="p-4 text-center text-muted-foreground text-sm">No export job orders (FOB/CFR/CIF/CIP) ready for shipping</p>
-                        )}
-                      </div>
+                        </div>
+                      ) : (
+                        // No job selected - show selection list
+                        <div>
+                          <Label className="mb-2 block">
+                            Select Job Orders (Ready for Dispatch)
+                          </Label>
+                          <div className="border border-border rounded-sm max-h-48 overflow-y-auto">
+                            {jobOrders.length > 0 ? jobOrders.map(job => (
+                              <div key={job.id} className="flex items-center gap-3 p-3 border-b border-border last:border-0 hover:bg-muted/30">
+                                <Checkbox
+                                  checked={form.job_order_ids.includes(job.id)}
+                                  onCheckedChange={() => toggleJobSelection(job.id)}
+                                />
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <p className="font-mono text-sm">{job.job_number}</p>
+                                    {job.status && (
+                                      <Badge variant="outline" className="text-xs">
+                                        {job.status}
+                                      </Badge>
+                                    )}
+                                    {job.incoterm && (
+                                      <Badge variant="outline" className="text-xs">
+                                        {job.incoterm}
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  <p className="text-xs text-muted-foreground">
+                                    <span className="font-medium">{job.customer_name || 'Customer'} - </span>
+                                    {job.delivery_date ? (
+                                      <span>Delivery: {new Date(job.delivery_date).toLocaleDateString()}</span>
+                                    ) : (
+                                      <span>No delivery date</span>
+                                    )}
+                                  </p>
+                                </div>
+                              </div>
+                            )) : (
+                              <p className="p-4 text-center text-muted-foreground text-sm">No export job orders (FOB/CFR/CIF/CIP) ready for shipping</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1593,63 +1643,32 @@ export default function ShippingPage() {
                           {canCreate && (
                             <>
                               {isUnbooked ? (
-                                // Unbooked job buttons
-                                <>
-                                  {!isFOB && (
-                                    // For CFR/CIF/CIP: Show booking details button first
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      onClick={() => {
-                                        // Pre-fill form with job and open create dialog
-                                        setForm(prev => ({
-                                          ...prev,
-                                          job_order_ids: booking.job_order_ids,
-                                          booking_source: 'SELLER'
-                                        }));
-                                        setBookingType('export');
-                                        setCreateOpen(true);
-                                      }}
-                                      title="Create Booking Details"
-                                      data-testid={`create-booking-${booking.job_number}`}
-                                    >
-                                      <Edit2 className="w-4 h-4" />
-                                    </Button>
-                                  )}
-                                  {/* For FOB: Only CRO button (creates booking with CRO) */}
-                                  {/* For CFR/CIF/CIP: CRO button (after booking created) */}
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                                    onClick={() => {
-                                      if (isFOB) {
-                                        // FOB: Create booking with CRO
-                                        setForm(prev => ({
-                                          ...prev,
-                                          job_order_ids: booking.job_order_ids,
-                                          booking_source: 'CUSTOMER',
-                                          cro_number: '',
-                                          vessel_name: '',
-                                          vessel_date: '',
-                                          cutoff_date: '',
-                                          shipping_line: '',
-                                          container_type: '20ft',
-                                          container_count: 1
-                                        }));
-                                        setBookingType('export');
-                                        setCreateOpen(true);
-                                      } else {
-                                        // CFR/CIF/CIP: Open CRO dialog after booking exists
-                                        // For now, show message to create booking first
-                                        toast.info('Please create booking details first, then add CRO');
-                                      }
-                                    }}
-                                    title={isFOB ? "Enter CRO Details (Create Booking)" : "Enter CRO Details"}
-                                    data-testid={`cro-job-${booking.job_number}`}
-                                  >
-                                    <FileText className="w-4 h-4" />
-                                  </Button>
-                                </>
+                                // Unbooked job - Show "Book Shipping" button
+                                <Button
+                                  size="sm"
+                                  onClick={() => {
+                                    // Pre-fill form with job and open create dialog
+                                    setForm(prev => ({
+                                      ...prev,
+                                      job_order_ids: booking.job_order_ids,
+                                      booking_source: isFOB ? 'CUSTOMER' : 'SELLER',
+                                      cro_number: '',
+                                      vessel_name: '',
+                                      vessel_date: '',
+                                      cutoff_date: '',
+                                      shipping_line: '',
+                                      container_type: booking.jobData?.container_type || '20ft',
+                                      container_count: booking.jobData?.container_count || 1
+                                    }));
+                                    setBookingType('export');
+                                    setCreateOpen(true);
+                                  }}
+                                  title={isFOB ? "Book Shipping (Enter CRO)" : "Book Shipping"}
+                                  data-testid={`book-shipping-${booking.job_number}`}
+                                >
+                                  <Plus className="w-4 h-4 mr-1" />
+                                  Book Shipping
+                                </Button>
                               ) : (
                                 // Existing booking buttons
                                 <>

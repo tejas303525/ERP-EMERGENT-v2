@@ -395,7 +395,7 @@ const ViewQuote = () => {
               <>
                 <li>INCOTERMS: {quotation.incoterm || 'N/A'}</li>
                 <li>PAYMENT TERMS: {quotation.payment_terms || 'N/A'}</li>
-                <li>MODE OF TRANSPORT: {quotation.mode_of_transport || 'ROAD'}</li>
+                <li>MODE OF TRANSPORT: {quotation.transport_mode || 'ROAD'}</li>
                 <li>QUANTITY TOLERANCE : ±5%</li>
                 <li>SUPPLY AND DELIVERY OF THE PRODUCTS AS PER ABOVE MENTIONED DETAILS.</li>
                 <li>ALL BANKING CHARGES ARE ON APPLICANT ACCOUNT EXCEPT NEGOTIATION CHARGES, DISCOUNTING CHARGES TO BORNE BY THE APPLICANT</li>
