@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
-import { formatDate, getStatusColor } from '../lib/utils';
+import { formatDate, getStatusColor, hasPagePermission } from '../lib/utils';
 import { Plus, FileCheck, Download, FileText, Package, Globe, Ship, FileCheck as COAIcon } from 'lucide-react';
 
 const DOCUMENT_TYPES = [
@@ -77,7 +77,7 @@ export default function DocumentationPage() {
     return found ? found.label : type;
   };
 
-  const canCreate = ['admin', 'documentation'].includes(user?.role);
+  const canCreate = hasPagePermission(user, '/documentation', ['admin', 'documentation']);
 
   const getDocumentIcon = (docType) => {
     const icons = {

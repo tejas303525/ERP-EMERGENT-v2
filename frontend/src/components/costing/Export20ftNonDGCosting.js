@@ -185,10 +185,29 @@ export default function Export20ftNonDGCosting({ costing, quotation, onUpdate })
     newCosts.total_cost_usd = newCosts.total_charges_usd + (newCosts.total_ocean_freight_cost_usd || 0);
     
     // Auto-calculate Loaded Weight in MT from Drum/CTN and KG/Drum&CTN
+    // Handle both single product (legacy) and multi-product fields
     if (field === 'drum_ctn' || field === 'kg_per_drum_ctn') {
       const drumCtn = newCosts.drum_ctn || 0;
       const kgPerDrum = newCosts.kg_per_drum_ctn || 0;
       newCosts.loaded_weight_mt = (drumCtn * kgPerDrum) / 1000;
+    }
+    
+    // Handle product-specific fields (indexed by item index)
+    if (field.startsWith('drum_ctn_') || field.startsWith('kg_per_drum_ctn_')) {
+      const itemIdx = field.split('_').pop();
+      const drumCtn = newCosts[`drum_ctn_${itemIdx}`] || 0;
+      const kgPerDrum = newCosts[`kg_per_drum_ctn_${itemIdx}`] || 0;
+      newCosts[`loaded_weight_mt_${itemIdx}`] = (drumCtn * kgPerDrum) / 1000;
+      
+      // Recalculate totals across all products
+      const items = quotation?.items || [];
+      let totalMT = 0;
+      items.forEach((_, idx) => {
+        const itemDrumCtn = newCosts[`drum_ctn_${idx}`] || newCosts.drum_ctn || 0;
+        const itemKgPerDrum = newCosts[`kg_per_drum_ctn_${idx}`] || newCosts.kg_per_drum_ctn || 0;
+        totalMT += (itemDrumCtn * itemKgPerDrum) / 1000;
+      });
+      newCosts.loaded_weight_mt = totalMT;
     }
     
     // Calculate cost per MT
@@ -448,53 +467,124 @@ export default function Export20ftNonDGCosting({ costing, quotation, onUpdate })
         <CardHeader>
           <CardTitle className="text-sm">Section D: Product Details</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <Label>PRODUCT NAME</Label>
-              <Input
-                type="text"
-                value={costs.product_name || quotation?.items?.[0]?.product_name || ''}
-                onChange={(e) => handleChange('product_name', e.target.value)}
-              />
+        <CardContent className="space-y-4">
+          {quotation?.items && quotation.items.length > 0 ? (
+            <>
+              {quotation.items.map((item, itemIdx) => (
+                <div key={itemIdx} className="border border-border rounded-lg p-4 space-y-3 bg-muted/10">
+                  <div className="font-semibold text-sm mb-2 text-blue-400">{item.product_name}</div>
+                  <div className="grid grid-cols-3 gap-4">
+                    <div>
+                      <Label>PRODUCT NAME</Label>
+                      <Input
+                        type="text"
+                        value={costs[`product_name_${itemIdx}`] || item.product_name || ''}
+                        onChange={(e) => handleChange(`product_name_${itemIdx}`, e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label>Drum/CTN</Label>
+                      <Input
+                        type="number"
+                        value={costs[`drum_ctn_${itemIdx}`] !== undefined ? costs[`drum_ctn_${itemIdx}`] : (itemIdx === 0 ? (costs.drum_ctn || 0) : 0)}
+                        onChange={(e) => handleChange(`drum_ctn_${itemIdx}`, parseFloat(e.target.value) || 0)}
+                        step="0.01"
+                      />
+                    </div>
+                    <div>
+                      <Label>KG/ Drum&CTN</Label>
+                      <Input
+                        type="number"
+                        value={costs[`kg_per_drum_ctn_${itemIdx}`] !== undefined ? costs[`kg_per_drum_ctn_${itemIdx}`] : (itemIdx === 0 ? (costs.kg_per_drum_ctn || 0) : 0)}
+                        onChange={(e) => handleChange(`kg_per_drum_ctn_${itemIdx}`, parseFloat(e.target.value) || 0)}
+                        step="0.01"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <Label>Loaded Weight in MT</Label>
+                    <Input
+                      type="number"
+                      value={(costs[`loaded_weight_mt_${itemIdx}`] || (costs[`drum_ctn_${itemIdx}`] !== undefined ? ((costs[`drum_ctn_${itemIdx}`] || 0) * (costs[`kg_per_drum_ctn_${itemIdx}`] || 0)) / 1000 : (itemIdx === 0 ? (costs.loaded_weight_mt || 0) : 0)))?.toFixed(2) || '0.00'}
+                      readOnly
+                      className="w-32 text-right bg-muted font-mono"
+                    />
+                  </div>
+                </div>
+              ))}
+              {/* Overall totals */}
+              <div className="border-t border-border pt-3 mt-3">
+                <div className="flex justify-between items-center">
+                  <Label className="font-semibold">Total Loaded Weight in MT - All Products</Label>
+                  <Input
+                    type="number"
+                    value={costs.loaded_weight_mt?.toFixed(2) || '0.00'}
+                    readOnly
+                    className="w-32 text-right bg-muted font-mono font-semibold"
+                  />
+                </div>
+                <div className="flex justify-between items-center mt-3">
+                  <Label className="font-semibold">Cost Per MT ($)</Label>
+                  <Input
+                    type="number"
+                    value={costs.cost_per_mt?.toFixed(2) || '0.00'}
+                    readOnly
+                    className="w-32 text-right bg-muted font-mono font-semibold"
+                  />
+                </div>
+              </div>
+            </>
+          ) : (
+            // Fallback to single product display
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <Label>PRODUCT NAME</Label>
+                  <Input
+                    type="text"
+                    value={costs.product_name || quotation?.items?.[0]?.product_name || ''}
+                    onChange={(e) => handleChange('product_name', e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label>Drum/CTN</Label>
+                  <Input
+                    type="number"
+                    value={costs.drum_ctn || 0}
+                    onChange={(e) => handleChange('drum_ctn', parseFloat(e.target.value) || 0)}
+                    step="0.01"
+                  />
+                </div>
+                <div>
+                  <Label>KG/ Drum&CTN</Label>
+                  <Input
+                    type="number"
+                    value={costs.kg_per_drum_ctn || 0}
+                    onChange={(e) => handleChange('kg_per_drum_ctn', parseFloat(e.target.value) || 0)}
+                    step="0.01"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-between items-center">
+                <Label>Loaded Weight in MT</Label>
+                <Input
+                  type="number"
+                  value={costs.loaded_weight_mt?.toFixed(2) || '0.00'}
+                  readOnly
+                  className="w-32 text-right bg-muted font-mono"
+                />
+              </div>
+              <div className="flex justify-between items-center">
+                <Label>Cost Per MT ($)</Label>
+                <Input
+                  type="number"
+                  value={costs.cost_per_mt?.toFixed(2) || '0.00'}
+                  readOnly
+                  className="w-32 text-right bg-muted font-mono"
+                />
+              </div>
             </div>
-            <div>
-              <Label>Drum/CTN</Label>
-              <Input
-                type="number"
-                value={costs.drum_ctn || 0}
-                onChange={(e) => handleChange('drum_ctn', parseFloat(e.target.value) || 0)}
-                step="0.01"
-              />
-            </div>
-            <div>
-              <Label>KG/ Drum&CTN</Label>
-              <Input
-                type="number"
-                value={costs.kg_per_drum_ctn || 0}
-                onChange={(e) => handleChange('kg_per_drum_ctn', parseFloat(e.target.value) || 0)}
-                step="0.01"
-              />
-            </div>
-          </div>
-          <div className="flex justify-between items-center">
-            <Label>Loaded Weight in MT</Label>
-            <Input
-              type="number"
-              value={costs.loaded_weight_mt?.toFixed(2) || '0.00'}
-              readOnly
-              className="w-32 text-right bg-muted font-mono"
-            />
-          </div>
-          <div className="flex justify-between items-center">
-            <Label>Cost Per MT ($)</Label>
-            <Input
-              type="number"
-              value={costs.cost_per_mt?.toFixed(2) || '0.00'}
-              readOnly
-              className="w-32 text-right bg-muted font-mono"
-            />
-          </div>
+          )}
         </CardContent>
       </Card>
 

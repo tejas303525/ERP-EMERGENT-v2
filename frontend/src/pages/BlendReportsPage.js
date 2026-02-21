@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from '../components/ui/textarea';
 import { Card, CardContent } from '../components/ui/card';
 import { toast } from 'sonner';
-import { formatDate, getStatusColor } from '../lib/utils';
+import { formatDate, getStatusColor, hasPagePermission } from '../lib/utils';
 import { Plus, FileText, Check, Download, Eye, Trash2 } from 'lucide-react';
 
 export default function BlendReportsPage() {
@@ -191,8 +191,8 @@ export default function BlendReportsPage() {
     });
   };
 
-  const canCreate = ['admin', 'production', 'qc'].includes(user?.role);
-  const canApprove = ['admin', 'qc'].includes(user?.role);
+  const canCreate = hasPagePermission(user, '/blend-reports', ['admin', 'production', 'qc']);
+  const canApprove = hasPagePermission(user, '/blend-reports', ['admin', 'qc']);
 
   return (
     <div className="page-container" data-testid="blend-reports-page">

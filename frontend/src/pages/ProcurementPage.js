@@ -23,6 +23,7 @@ const ProcurementPage = () => {
   const [shortages, setShortages] = useState({ raw_shortages: [], pack_shortages: [] });
   const [lowStockItems, setLowStockItems] = useState([]);
   const [purchaseOrders, setPurchaseOrders] = useState([]);
+  const [grnSummary, setGrnSummary] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [paymentTerms, setPaymentTerms] = useState(PAYMENT_TERMS);
@@ -34,23 +35,33 @@ const ProcurementPage = () => {
 
   useEffect(() => {
     loadData();
+    
+    // Auto-refresh every 10 seconds to ensure shortages are always up-to-date
+    const interval = setInterval(() => {
+      loadData();
+    }, 10000); // 10 seconds
+    
+    // Cleanup interval on unmount
+    return () => clearInterval(interval);
   }, []);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const [shortagesRes, poRes, suppRes, settingsRes, lowStockRes] = await Promise.all([
+      const [shortagesRes, poRes, suppRes, settingsRes, lowStockRes, grnSummaryRes] = await Promise.all([
         api.get('/procurement/shortages'),
         api.get('/purchase-orders'),
         api.get('/suppliers'),
         api.get('/settings/all').catch(() => ({ data: {} })),
-        api.get('/inventory/low-stock').catch(() => ({ data: { items: [] } }))
+        api.get('/inventory/low-stock').catch(() => ({ data: { items: [] } })),
+        api.get('/grn/summary?variance=EXCESS_RECEIPT,SHORT').catch(() => ({ data: [] }))
       ]);
       
       setShortages(shortagesRes.data);
       setPurchaseOrders(poRes.data || []);
       setSuppliers(suppRes.data || []);
       setLowStockItems(lowStockRes.data?.items || []);
+      setGrnSummary(grnSummaryRes.data || []);
       
       const settings = settingsRes.data || {};
       const paymentTermsFromSettings = settings.payment_terms || [];
@@ -155,6 +166,57 @@ const ProcurementPage = () => {
         </div>
       </div>
 
+      {/* PO Discrepancy Alerts */}
+      {grnSummary.filter(g => g.variance_flag === 'EXCESS_RECEIPT' || g.remaining_qty > 0).length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <AlertTriangle className="w-5 h-5 text-amber-500" />
+            <p className="font-semibold text-amber-800">Purchase Orders with Quantity Discrepancies</p>
+          </div>
+          <div className="space-y-2">
+            {grnSummary
+              .filter(g => g.variance_flag === 'EXCESS_RECEIPT' || g.remaining_qty > 0)
+              .reduce((acc, grn) => {
+                const existing = acc.find(a => a.po_number === grn.po_number);
+                if (existing) {
+                  existing.items.push(grn);
+                } else {
+                  acc.push({ po_number: grn.po_number, items: [grn] });
+                }
+                return acc;
+              }, [])
+              .map((poGroup, idx) => (
+                <div key={idx} className="bg-white rounded p-3 border border-amber-200">
+                  <p className="font-medium text-sm text-amber-900 mb-2">
+                    PO: <span className="font-mono">{poGroup.po_number}</span>
+                  </p>
+                  {poGroup.items.map((item, itemIdx) => (
+                    <div key={itemIdx} className="text-xs text-amber-800 ml-4 mb-1">
+                      {item.variance_flag === 'EXCESS_RECEIPT' && (
+                        <span className="text-red-600">
+                          ⚠️ <strong>{item.item_name}</strong>: Received {item.total_received} {item.unit} 
+                          (Ordered: {item.ordered_qty} {item.unit}) - 
+                          <strong> Excess: {(item.total_received - item.ordered_qty).toFixed(2)} {item.unit}</strong>
+                          - Claim required from supplier
+                        </span>
+                      )}
+                      {item.remaining_qty > 0 && item.variance_flag !== 'EXCESS_RECEIPT' && (
+                        <span className="text-yellow-700">
+                          ⚠️ <strong>{item.item_name}</strong>: Partial delivery - 
+                          <strong> {item.remaining_qty} {item.unit} pending</strong> - Follow up required
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+          </div>
+          <p className="text-xs text-amber-700 mt-3 italic">
+            Finance has been notified. Please follow up with suppliers to resolve discrepancies.
+          </p>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex gap-2 mb-6 flex-wrap">
         <Button
@@ -205,6 +267,20 @@ const ProcurementPage = () => {
         >
           <Package className="w-4 h-4 mr-2" />
           PO History
+        </Button>
+        <Button
+          variant={activeTab === 'grn-summary' ? 'default' : 'outline'}
+          onClick={() => setActiveTab('grn-summary')}
+          className={grnSummary.length > 0 ? 'border-yellow-500/50' : ''}
+          data-testid="tab-grn-summary"
+        >
+          <FileText className="w-4 h-4 mr-2" />
+          GRN Summary
+          {grnSummary.length > 0 && (
+            <span className="ml-2 px-1.5 py-0.5 text-xs rounded bg-yellow-500/20 text-yellow-400">
+              {grnSummary.length}
+            </span>
+          )}
         </Button>
       </div>
 
@@ -289,6 +365,105 @@ const ProcurementPage = () => {
           {/* PO History Tab */}
           {activeTab === 'history' && (
             <POHistoryTab purchaseOrders={purchaseOrders} />
+          )}
+
+          {/* GRN Summary Tab */}
+          {activeTab === 'grn-summary' && (
+            <div className="space-y-4">
+              {/* Banner Alerts */}
+              {grnSummary.filter(g => g.variance_flag === 'EXCESS_RECEIPT').length > 0 && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <AlertTriangle className="w-5 h-5 text-red-500" />
+                    <p className="font-semibold text-red-800">Excess Receipts Detected</p>
+                  </div>
+                  <p className="text-sm text-red-700">
+                    {grnSummary.filter(g => g.variance_flag === 'EXCESS_RECEIPT').length} item(s) received in excess of ordered quantity. 
+                    Contact supplier to resolve.
+                  </p>
+                </div>
+              )}
+              
+              {grnSummary.filter(g => g.remaining_qty > 0).length > 0 && (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <AlertTriangle className="w-5 h-5 text-yellow-500" />
+                    <p className="font-semibold text-yellow-800">Partial Deliveries</p>
+                  </div>
+                  <p className="text-sm text-yellow-700">
+                    {grnSummary.filter(g => g.remaining_qty > 0).length} item(s) have remaining quantities not yet received. 
+                    Follow up with supplier for remaining delivery.
+                  </p>
+                </div>
+              )}
+
+              {grnSummary.length === 0 ? (
+                <div className="bg-white p-8 rounded-lg border border-border text-center">
+                  <Package className="w-12 h-12 text-green-500 mx-auto mb-4 opacity-50" />
+                  <p className="text-muted-foreground">No partial deliveries or excess receipts</p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-lg border border-border overflow-hidden">
+                  <table className="w-full">
+                    <thead className="bg-muted/50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">GRN Number</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">PO Number</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">Item</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold">Ordered Qty</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold">Received (This Delivery)</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold">Total Received</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold">Remaining Qty</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">Variance</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {grnSummary.map((grn, idx) => (
+                        <tr 
+                          key={idx} 
+                          className={`border-t border-border hover:bg-muted/30 ${
+                            grn.variance_flag === 'EXCESS_RECEIPT' ? 'bg-red-50/50' : 
+                            grn.remaining_qty > 0 ? 'bg-yellow-50/50' : ''
+                          }`}
+                        >
+                          <td className="px-4 py-3 text-sm font-medium">{grn.grn_number}</td>
+                          <td className="px-4 py-3 text-sm">{grn.po_number || '-'}</td>
+                          <td className="px-4 py-3 text-sm">
+                            <div>
+                              <div className="font-medium">{grn.item_name}</div>
+                              <div className="text-xs text-muted-foreground">{grn.sku}</div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-right font-mono">{grn.ordered_qty} {grn.unit}</td>
+                          <td className="px-4 py-3 text-sm text-right font-mono">{grn.received_qty} {grn.unit}</td>
+                          <td className="px-4 py-3 text-sm text-right font-mono">{grn.total_received} {grn.unit}</td>
+                          <td className="px-4 py-3 text-sm text-right font-mono">{grn.remaining_qty} {grn.unit}</td>
+                          <td className="px-4 py-3 text-sm">
+                            {grn.variance_flag === 'EXCESS_RECEIPT' && (
+                              <Badge variant="destructive">Excess</Badge>
+                            )}
+                            {grn.variance_flag === 'SHORT' && (
+                              <Badge variant="outline">Short</Badge>
+                            )}
+                            {grn.variance_flag === 'NONE' && (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            <Button size="sm" variant="outline" onClick={() => {
+                              toast.info('Contact supplier functionality coming soon');
+                            }}>
+                              Contact Supplier
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           )}
         </>
       )}
@@ -643,15 +818,42 @@ const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, on
   
   const [packagingMaterials, setPackagingMaterials] = useState([]);
   const [loadingPackaging, setLoadingPackaging] = useState(false);
+  const [lastTransportCost, setLastTransportCost] = useState(null);
+  const [loadingTransportCost, setLoadingTransportCost] = useState(false);
   
   const [lines, setLines] = useState(
     selectedItems.map(item => {
       let qty = item.shortage || 0;
       let uom = item.uom || 'KG';
-      if (uom === 'KG' || uom === 'kg') {
+      
+      console.log('[ProcurementPage] Processing shortage item:', {
+        item_name: item.item_name,
+        original_shortage: qty,
+        original_uom: uom
+      });
+      
+      // Only convert KG to MT if UOM is actually KG (not already MT or other unit)
+      const uomUpper = uom.toUpperCase();
+      if (uomUpper === 'KG' && qty >= 1000) {
+        // Only convert if qty is large enough (>= 1000 KG = 1 MT)
         qty = qty / 1000;
         uom = 'MT';
+        console.log('[ProcurementPage] Converted KG to MT:', qty);
+      } else if (uomUpper === 'KG' && qty < 1000) {
+        // Keep in KG if less than 1 MT
+        console.log('[ProcurementPage] Keeping in KG (< 1 MT):', qty);
+      } else if (uomUpper === 'MT' && qty < 1 && qty > 0) {
+        // Safety check: If UOM is MT but quantity is less than 1, it might be incorrectly stored
+        // Check if it should actually be in KG (e.g., 0.0148 MT = 14.8 KG)
+        // But for procurement, we'll trust the backend and keep as-is
+        console.log('[ProcurementPage] MT quantity < 1, keeping as-is:', qty);
       }
+      // If already MT or EA or other unit, use as-is
+      
+      // Auto-detect procurement type: if item_type is PACK, it's packaging material (always Bulk)
+      // For RAW/TRADED: default to Bulk (user can change to Drummed if needed)
+      const procurementType = item.item_type === 'PACK' ? 'Bulk' : 'Bulk';
+      
       return {
         item_id: item.item_id,
         item_name: item.item_name,
@@ -662,7 +864,7 @@ const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, on
         unit_price: 0,
         job_number: item.job_number,
         job_id: item.job_id,
-        procurement_type: (item.item_type === 'RAW' || item.item_type === 'TRADED') ? 'Bulk' : 'Bulk',
+        procurement_type: procurementType,
         packaging_item_id: null,
         packaging_qty: 0
       };
@@ -684,6 +886,48 @@ const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, on
     };
     loadPackagingMaterials();
   }, []);
+
+  // Fetch last transport cost when supplier is selected
+  useEffect(() => {
+    const fetchLastTransportCost = async () => {
+      if (!form.supplier_id) {
+        setLastTransportCost(null);
+        return;
+      }
+      
+      setLoadingTransportCost(true);
+      try {
+        const res = await api.get('/purchase-orders/last-transport-cost', {
+          params: { supplier_id: form.supplier_id }
+        });
+        if (res.data && res.data.last_transport_cost) {
+          setLastTransportCost(res.data);
+          
+          // Pre-fill unit_price for transportation-related items
+          const transportKeywords = ["transport", "freight", "shipping", "delivery", "logistics", "carriage"];
+          setLines(prevLines => prevLines.map(line => {
+            const itemName = (line.item_name || "").toLowerCase();
+            const isTransportItem = transportKeywords.some(keyword => itemName.includes(keyword));
+            
+            // If this is a transport item and unit_price is 0, pre-fill it
+            if (isTransportItem && line.unit_price === 0) {
+              return { ...line, unit_price: res.data.last_transport_cost };
+            }
+            return line;
+          }));
+        } else {
+          setLastTransportCost(null);
+        }
+      } catch (error) {
+        console.error('Failed to fetch last transport cost:', error);
+        setLastTransportCost(null);
+      } finally {
+        setLoadingTransportCost(false);
+      }
+    };
+    
+    fetchLastTransportCost();
+  }, [form.supplier_id]);
 
   const selectedSupplier = suppliers.find(s => s.id === form.supplier_id);
   const billingCompany = companies.find(c => c.id === form.billing_company_id);
@@ -780,9 +1024,18 @@ const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, on
     }
   };
 
-  const calculatePackagingQty = (qtyMT, packagingItem) => {
-    if (!packagingItem || qtyMT <= 0) return 0;
-    const qtyKG = qtyMT * 1000;
+  const calculatePackagingQty = (qty, packagingItem, uom = 'MT') => {
+    if (!packagingItem || qty <= 0) return 0;
+    // Convert to KG based on UOM
+    let qtyKG;
+    if (uom === 'MT') {
+      qtyKG = qty * 1000;
+    } else if (uom === 'KG') {
+      qtyKG = qty;
+    } else {
+      // Default to KG if unknown
+      qtyKG = qty;
+    }
     const capacity = packagingItem.capacity_liters || packagingItem.net_weight_kg_default || 200;
     const netWeightPerUnit = capacity * 0.85;
     return Math.ceil(qtyKG / netWeightPerUnit);
@@ -815,9 +1068,23 @@ const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, on
                   </SelectContent>
                 </Select>
                 {selectedSupplier && (
-                  <div className="mt-2 p-2 rounded bg-gray-50 text-sm">
-                    <MapPin className="w-3 h-3 inline mr-1" />
-                    {selectedSupplier.address || selectedSupplier.email || 'No contact info'}
+                  <div className="mt-2 space-y-1">
+                    <div className="p-2 rounded bg-gray-50 text-sm">
+                      <MapPin className="w-3 h-3 inline mr-1" />
+                      {selectedSupplier.address || selectedSupplier.email || 'No contact info'}
+                    </div>
+                    {loadingTransportCost ? (
+                      <div className="p-2 rounded bg-blue-50 text-sm text-blue-600">
+                        Loading last transport cost...
+                      </div>
+                    ) : lastTransportCost ? (
+                      <div className="p-2 rounded bg-green-50 text-sm text-green-700">
+                        <span className="font-medium">Last paid:</span> {lastTransportCost.currency} {lastTransportCost.last_transport_cost.toFixed(2)}
+                        {lastTransportCost.po_number && (
+                          <span className="text-xs text-gray-600 ml-2">(PO: {lastTransportCost.po_number})</span>
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                 )}
               </div>
@@ -1026,7 +1293,7 @@ const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, on
                                     newLines[idx].packaging_item_id = value;
                                     const packagingItem = packagingMaterials.find(p => p.id === value);
                                     if (packagingItem) {
-                                      newLines[idx].packaging_qty = calculatePackagingQty(newLines[idx].qty, packagingItem);
+                                      newLines[idx].packaging_qty = calculatePackagingQty(newLines[idx].qty, packagingItem, newLines[idx].uom);
                                     }
                                     setLines(newLines);
                                   }}
@@ -1079,7 +1346,7 @@ const GeneratePOModal = ({ selectedItems, suppliers, companies, paymentTerms, on
                               if (newLines[idx].procurement_type === 'Drummed' && newLines[idx].packaging_item_id) {
                                 const packagingItem = packagingMaterials.find(p => p.id === newLines[idx].packaging_item_id);
                                 if (packagingItem) {
-                                  newLines[idx].packaging_qty = calculatePackagingQty(newQty, packagingItem);
+                                  newLines[idx].packaging_qty = calculatePackagingQty(newQty, packagingItem, newLines[idx].uom);
                                 }
                               }
                               setLines(newLines);

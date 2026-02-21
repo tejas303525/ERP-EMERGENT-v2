@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Card, CardContent } from '../components/ui/card';
 import { toast } from 'sonner';
-import { formatDate, getStatusColor } from '../lib/utils';
+import { formatDate, getStatusColor, hasPagePermission } from '../lib/utils';
 import { Truck, Edit2, Calendar, Ship, Package, AlertCircle } from 'lucide-react';
 
 const STATUSES = ['pending', 'assigned', 'dispatched', 'at_factory', 'loaded', 'delivered_to_port'];
@@ -77,7 +77,7 @@ export default function TransportPage() {
 
   const filteredSchedules = statusFilter === 'all' ? schedules : schedules.filter(s => s.status === statusFilter);
   const pendingAssignment = schedules.filter(s => s.status === 'pending' && !s.transporter).length;
-  const canEdit = ['admin', 'transport'].includes(user?.role);
+  const canEdit = hasPagePermission(user, '/transport', ['admin', 'transport']);
 
   // Group by pickup date
   const groupedByDate = filteredSchedules.reduce((acc, schedule) => {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { receivablesAPI, salesOrderAPI } from '../lib/api';
+import { receivablesAPI, salesOrderAPI, paymentAPI } from '../lib/api';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Receipt, Check, Clock, AlertTriangle, FileText, Plus, Building, Ship, DollarSign, Download, History, Eye } from 'lucide-react';
@@ -46,11 +46,25 @@ const ReceivablesPage = () => {
       return;
     }
     try {
-      await receivablesAPI.recordPayment(showPaymentModal.id, {
-        amount: parseFloat(paymentAmount),
-        payment_method: paymentMethod,
-        payment_reference: paymentReference
-      });
+      // Check if this is a Sales Contract (SPA) or an Invoice
+      if (showPaymentModal.type === 'spa') {
+        // Use paymentAPI for Sales Contracts
+        await paymentAPI.create({
+          sales_order_id: showPaymentModal.id,
+          amount: parseFloat(paymentAmount),
+          currency: showPaymentModal.currency || 'USD',
+          payment_method: paymentMethod,
+          reference: paymentReference,
+          notes: ''
+        });
+      } else {
+        // Use receivablesAPI for Invoices
+        await receivablesAPI.recordPayment(showPaymentModal.id, {
+          amount: parseFloat(paymentAmount),
+          payment_method: paymentMethod,
+          payment_reference: paymentReference
+        });
+      }
       toast.success('Payment recorded');
       setShowPaymentModal(null);
       setPaymentAmount('');

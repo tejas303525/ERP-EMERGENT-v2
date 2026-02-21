@@ -11,7 +11,7 @@ import { Textarea } from '../components/ui/textarea';
 import { Checkbox } from '../components/ui/checkbox';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { toast } from 'sonner';
-import { formatDate, getStatusColor } from '../lib/utils';
+import { formatDate, getStatusColor, hasPagePermission } from '../lib/utils';
 import { Plus, Ship, Edit2, FileText, AlertTriangle, Package } from 'lucide-react';
 
 const CONTAINER_TYPES = ['20ft', '40ft', '40ft_hc'];
@@ -683,13 +683,33 @@ export default function ShippingPage() {
       }
     });
 
+  // Helper function to get delivery date from booking (from job orders)
+  const getDeliveryDateFromBooking = (booking) => {
+    // Check if booking has job_orders array with delivery_date
+    if (booking.job_orders && Array.isArray(booking.job_orders) && booking.job_orders.length > 0) {
+      // Get the earliest delivery date from all job orders
+      const deliveryDates = booking.job_orders
+        .map(job => job.delivery_date || job.expected_delivery_date)
+        .filter(Boolean)
+        .map(date => new Date(date))
+        .filter(date => !isNaN(date.getTime()));
+      
+      if (deliveryDates.length > 0) {
+        return new Date(Math.min(...deliveryDates.map(d => d.getTime())));
+      }
+    }
+    // Fallback to created_at or vessel_date if no delivery date found
+    return new Date(booking.created_at || booking.vessel_date || 0);
+  };
+
   // Combine existing bookings with unbooked jobs
   const existingExportBookings = bookings
     .filter(b => b.ref_type !== 'PO_IMPORT' && !b.po_id && (!b.po_ids || b.po_ids.length === 0))
     .sort((a, b) => {
-      const dateA = new Date(a.created_at || a.vessel_date || 0);
-      const dateB = new Date(b.created_at || b.vessel_date || 0);
-      return dateB - dateA; // Descending (newest first)
+      // Sort by delivery date from job orders (ascending - earliest first)
+      const dateA = getDeliveryDateFromBooking(a);
+      const dateB = getDeliveryDateFromBooking(b);
+      return dateA - dateB; // Ascending (earliest delivery date first)
     });
 
   // Convert unbooked jobs to booking-like objects for display
@@ -719,12 +739,36 @@ export default function ShippingPage() {
       jobData: job // Store full job data
     }))
     .sort((a, b) => {
-      // Sort by job number
+      // Sort by delivery date from job data (ascending - earliest first)
+      const dateA = a.jobData?.delivery_date || a.jobData?.expected_delivery_date;
+      const dateB = b.jobData?.delivery_date || b.jobData?.expected_delivery_date;
+      
+      if (dateA && dateB) {
+        return new Date(dateA) - new Date(dateB);
+      }
+      if (dateA) return -1; // A has date, B doesn't - A comes first
+      if (dateB) return 1;  // B has date, A doesn't - B comes first
+      // Both missing dates - fallback to job number
       return (a.job_number || '').localeCompare(b.job_number || '');
     });
 
-  // Combine bookings and unbooked jobs
-  const exportBookings = [...existingExportBookings, ...unbookedJobs];
+  // Combine bookings and unbooked jobs, then sort by delivery date
+  const exportBookings = [...existingExportBookings, ...unbookedJobs].sort((a, b) => {
+    // Get delivery dates
+    const dateA = a.isUnbookedJob 
+      ? (a.jobData?.delivery_date || a.jobData?.expected_delivery_date)
+      : getDeliveryDateFromBooking(a);
+    const dateB = b.isUnbookedJob
+      ? (b.jobData?.delivery_date || b.jobData?.expected_delivery_date)
+      : getDeliveryDateFromBooking(b);
+    
+    // Convert to Date objects for comparison
+    const dateAObj = dateA ? new Date(dateA) : new Date(0);
+    const dateBObj = dateB ? new Date(dateB) : new Date(0);
+    
+    // Sort ascending (earliest delivery date first)
+    return dateAObj - dateBObj;
+  });
 
   // Apply status filter to active tab
   const filteredBookings = activeTab === 'import' 
@@ -732,7 +776,7 @@ export default function ShippingPage() {
     : (statusFilter === 'all' ? exportBookings : exportBookings.filter(b => b.status === statusFilter));
   
   const pendingCRO = bookings.filter(b => b.status === 'pending').length;
-  const canCreate = ['admin', 'shipping'].includes(user?.role);
+  const canCreate = hasPagePermission(user, '/shipping', ['admin', 'shipping']);
 
   return (
     <div className="page-container" data-testid="shipping-page">

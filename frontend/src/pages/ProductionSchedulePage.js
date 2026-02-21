@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Label } from '../components/ui/label';
 import { toast } from 'sonner';
-import { getPriorityColor, formatDate } from '../lib/utils';
+import { getPriorityColor, formatDate, hasPagePermission } from '../lib/utils';
 import { 
   Factory, 
   CheckCircle, 
@@ -246,7 +246,7 @@ export default function ProductionSchedulePage() {
     }
   };
 
-  const canManage = ['admin', 'production'].includes(user?.role);
+  const canManage = hasPagePermission(user, '/production-schedule', ['admin', 'production']);
 
   // Category Jobs Table Component (Compact version for small windows)
   const CategoryJobsTable = ({ jobs, category, compact = false }) => {

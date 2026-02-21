@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
-import { formatDate, getStatusColor, getPriorityColor } from '../lib/utils';
+import { formatDate, getStatusColor, getPriorityColor, hasPagePermission } from '../lib/utils';
 import { Plus, Factory, Eye, Play, Trash2, AlertTriangle, Check, Loader2, Printer, Download, Search, RefreshCw, FileText, Package } from 'lucide-react';
 import api from '../lib/api';
 import {
@@ -23,7 +23,7 @@ import {
 } from '../components/ui/pagination';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'];
-const STATUSES = ['pending', 'approved', 'in_production', 'procurement', 'ready_for_dispatch'];
+const STATUSES = ['pending', 'approved', 'in_production', 'procurement', 'ready_for_dispatch', 'dispatched', 'closed'];
 
 const LABEL_TRANSLATIONS = {
   en: {
@@ -278,6 +278,30 @@ export default function JobOrdersPage() {
     } catch (error) {
       console.error('Failed to sync packaging:', error);
       toast.error('Failed to sync packaging');
+    }
+  };
+
+  const recalculateBomShortages = async (jobId) => {
+    try {
+      setLoadingAvailability(true);
+      const response = await api.post(`/job-orders/${jobId}/recalculate-bom-shortages`);
+      if (response.data.success) {
+        toast.success(`BOM shortages recalculated: ${response.data.raw_shortages_found} RAW material(s) found`);
+        // Reload the data to show updated shortages
+        loadData();
+        // If viewing this job, refresh the view
+        if (selectedJob && selectedJob.id === jobId) {
+          const jobRes = await jobOrderAPI.getOne(jobId);
+          setSelectedJob(jobRes.data);
+        }
+      } else {
+        toast.error(response.data.message || 'Failed to recalculate BOM shortages');
+      }
+    } catch (error) {
+      console.error('Failed to recalculate BOM shortages:', error);
+      toast.error('Failed to recalculate BOM shortages: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setLoadingAvailability(false);
     }
   };
 
@@ -744,7 +768,7 @@ export default function JobOrdersPage() {
     }
   }, [searchTerm]);
 
-  const canManageJobs = ['admin', 'production', 'procurement', 'sales'].includes(user?.role);
+  const canManageJobs = hasPagePermission(user, '/job-orders', ['admin', 'production', 'procurement', 'sales']);
 
   // Check availability for all jobs that need procurement
   const checkAvailabilityForAll = async () => {
@@ -795,55 +819,83 @@ export default function JobOrdersPage() {
   };
 
   // Refresh BOM availability for a job order
+  // Checks in order: 1) product_packaging (filled drums), 2) product (bulk stock), 3) BOM items (raw materials), 4) packaging items (empty drums)
   const refreshBomAvailability = async (job) => {
     setLoadingAvailability(true);
     const availabilityMap = {};
     
     try {
-      // Get BOM items
-      const bomItems = job?.bom || [];
-      
-      // Get packaging items from material_shortages
-      const packagingItems = (job?.material_shortages || []).filter(s => s.item_type === 'PACK');
-      
-      // Combine all items to check
-      const allItemsToCheck = [
-        ...bomItems.map(item => ({
-          itemId: item.product_id || item.material_item_id,
-          type: 'BOM'
-        })),
-        ...packagingItems.map(item => ({
-          itemId: item.item_id,
-          type: 'PACK'
-        }))
-      ];
-      
-      if (allItemsToCheck.length === 0) {
-        setBomAvailability({});
-        setLoadingAvailability(false);
-        return;
+      // FIRST: Check product_packaging availability (filled drums) - highest priority
+      if (job?.product_id && job?.packaging && job?.packaging !== 'Bulk') {
+        try {
+          const productPackagingRes = await api.get(
+            `/products/${job.product_id}/packaging/${encodeURIComponent(job.packaging)}`
+          );
+          const productPackaging = productPackagingRes.data;
+          if (productPackaging) {
+            availabilityMap['product_packaging'] = productPackaging.quantity || 0;
+          } else {
+            availabilityMap['product_packaging'] = 0;
+          }
+        } catch (err) {
+          console.warn('Failed to check product_packaging:', err);
+          availabilityMap['product_packaging'] = 0;
+        }
       }
       
-      // Fetch current availability for each item
-      const availabilityPromises = allItemsToCheck.map(async (item) => {
+      // SECOND: Check product availability (bulk stock)
+      if (job?.product_id) {
         try {
-          if (!item.itemId) return null;
+          const productRes = await api.get(`/products/${job.product_id}`);
+          availabilityMap['product'] = productRes.data?.current_stock || 0;
+        } catch (err) {
+          console.warn('Failed to check product stock:', err);
+          availabilityMap['product'] = 0;
+        }
+      }
+      
+      // THIRD: Check BOM items (raw materials)
+      const bomItems = job?.bom || [];
+      const bomPromises = bomItems.map(async (item) => {
+        try {
+          const itemId = item.product_id || item.material_item_id;
+          if (!itemId) return null;
           
-          const availRes = await api.get(`/inventory-items/${item.itemId}/availability`);
+          const availRes = await api.get(`/inventory-items/${itemId}/availability`);
           return {
-            itemId: item.itemId,
+            itemId: itemId,
             available: availRes.data?.available || 0
           };
         } catch (err) {
           console.warn(`Failed to check availability for ${item.itemId}:`, err);
           return {
-            itemId: item.itemId,
+            itemId: item.product_id || item.material_item_id,
             available: 0
           };
         }
       });
       
-      const results = await Promise.all(availabilityPromises);
+      // FOURTH: Check packaging items (empty drums)
+      const packagingItems = (job?.material_shortages || []).filter(s => s.item_type === 'PACK');
+      const packagingPromises = packagingItems.map(async (item) => {
+        try {
+          if (!item.item_id) return null;
+          
+          const availRes = await api.get(`/inventory-items/${item.item_id}/availability`);
+          return {
+            itemId: item.item_id,
+            available: availRes.data?.available || 0
+          };
+        } catch (err) {
+          console.warn(`Failed to check packaging availability:`, err);
+          return {
+            itemId: item.item_id,
+            available: 0
+          };
+        }
+      });
+      
+      const results = await Promise.all([...bomPromises, ...packagingPromises]);
       results.forEach(result => {
         if (result) {
           availabilityMap[result.itemId] = result.available;
@@ -1169,6 +1221,39 @@ export default function JobOrdersPage() {
             <RefreshCw className="w-4 h-4 mr-2" />
             Refresh
           </Button>
+        </div>
+      </div>
+
+      {/* Job Status Counters */}
+      <div className="grid grid-cols-2 gap-4 mb-6">
+        <div className="border rounded-lg p-4 bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-blue-600 dark:text-blue-400">Open Job Orders</p>
+              <p className="text-xs text-muted-foreground mt-1">Not yet dispatched</p>
+            </div>
+            <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">
+              {new Set(jobs.filter(j => j.status !== 'dispatched' && j.status !== 'closed').map(j => j.job_number)).size}
+            </div>
+          </div>
+        </div>
+        
+        <div className="border rounded-lg p-4 bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-green-600 dark:text-green-400">Closed Job Orders</p>
+              <p className="text-xs text-muted-foreground mt-1">Dispatched</p>
+            </div>
+            <div className="text-3xl font-bold text-green-600 dark:text-green-400">
+              {new Set(jobs.filter(j => j.status === 'closed').map(j => j.job_number)).size}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Filters and Controls */}
+      <div className="module-header mb-6">
+        <div className="module-actions w-full">
           <div className="relative w-64">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
             <Input
@@ -1543,26 +1628,34 @@ export default function JobOrdersPage() {
             <p className="empty-state-description">Create a new job order from a Sales Order</p>
           </div>
         ) : (
-          <table className="erp-table w-full">
-            <thead>
-              <tr>
-                <th>Job Number</th>
-                <th>Customer</th>
-                <th>Product</th>
-                <th>Quantity</th>
-                <th>MT</th>
-                <th>MT Product</th>
-                <th>Priority</th>
-                <th>Status</th>
-                <th>Procurement</th>
-                <th>Country of Destination</th>
-                <th>Created</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
+          <div className="overflow-x-auto">
+            <table className="erp-table w-full">
+              <thead>
+                <tr>
+                  <th>Job Number</th>
+                  <th>Customer</th>
+                  <th>Product</th>
+                  <th>Ordered Qty</th>
+                  <th>Dispatched Qty</th>
+                  <th>Pending Qty</th>
+                  <th>MT</th>
+                  <th>MT Product</th>
+                  <th>Priority</th>
+                  <th>Status</th>
+                  <th>Procurement</th>
+                  <th>Country of Destination</th>
+                  <th>Created</th>
+                  <th className="sticky right-0 bg-background z-10">Actions</th>
+                </tr>
+              </thead>
             <tbody>
               {filteredJobs.map((job) => {
                 const procStatus = getProcurementStatus(job);
+                // Calculate pending quantity: use remaining_qty if defined, otherwise calculate from quantity - dispatched_qty
+                const pendingQty = job.remaining_qty !== undefined 
+                  ? job.remaining_qty 
+                  : Math.max(0, (job.quantity || 0) - (job.dispatched_qty || 0));
+                
                 return (
                   <tr key={job.id} data-testid={`job-row-${job.job_number}`}>
                     <td className="font-medium">{job.job_number}</td>
@@ -1574,7 +1667,18 @@ export default function JobOrdersPage() {
                       <span className="text-xs text-muted-foreground">{job.product_sku}</span>
                     </td>
                     <td className="font-mono">
-                      {job.quantity} {job.packaging || 'units'}
+                      {job.quantity} {job.unit || job.packaging || 'MT'}
+                    </td>
+                    <td className="font-mono text-blue-600 dark:text-blue-400">
+                      {job.dispatched_qty || 0} {job.unit || job.packaging || 'MT'}
+                    </td>
+                    <td className={`font-mono ${pendingQty > 0 ? 'text-yellow-600 dark:text-yellow-400 font-semibold' : 'text-green-600 dark:text-green-400'}`}>
+                      {pendingQty} {job.unit || job.packaging || 'MT'}
+                      {pendingQty > 0 && (
+                        <Badge variant="outline" className="ml-2 text-xs">
+                          Pending
+                        </Badge>
+                      )}
                     </td>
                     <td className="font-mono text-muted-foreground">
                       {job.total_weight_mt ? job.total_weight_mt.toFixed(3) : '-'}
@@ -1663,7 +1767,7 @@ export default function JobOrdersPage() {
                       )}
                     </td>
                     <td>{formatDate(job.created_at)}</td>
-                    <td>
+                    <td className="sticky right-0 bg-background z-10">
                       <div className="flex gap-1">
                         <Button variant="ghost" size="icon" onClick={async () => { 
                           setSelectedJob(job); 
@@ -1719,6 +1823,7 @@ export default function JobOrdersPage() {
               })}
             </tbody>
           </table>
+          </div>
         )}
         
         {/* Pagination Controls */}
@@ -2028,16 +2133,28 @@ export default function JobOrdersPage() {
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <h4 className="font-medium">Bill of Materials</h4>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => refreshBomAvailability(selectedJob)}
-                      disabled={loadingAvailability}
-                      className="h-7"
-                    >
-                      <RefreshCw className={`w-3 h-3 mr-1 ${loadingAvailability ? 'animate-spin' : ''}`} />
-                      Refresh
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => refreshBomAvailability(selectedJob)}
+                        disabled={loadingAvailability}
+                        className="h-7"
+                      >
+                        <RefreshCw className={`w-3 h-3 mr-1 ${loadingAvailability ? 'animate-spin' : ''}`} />
+                        Refresh
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => recalculateBomShortages(selectedJob.id)}
+                        disabled={loadingAvailability}
+                        className="h-7 bg-blue-500/10 hover:bg-blue-500/20 border-blue-500/30 text-blue-400"
+                      >
+                        <RefreshCw className={`w-3 h-3 mr-1 ${loadingAvailability ? 'animate-spin' : ''}`} />
+                        Recalculate from BOM
+                      </Button>
+                    </div>
                   </div>
                   <div className="data-grid max-h-64 overflow-y-auto">
                     <table className="erp-table w-full">

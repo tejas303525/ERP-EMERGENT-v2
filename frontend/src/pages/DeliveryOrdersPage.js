@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
-import { formatDate } from '../lib/utils';
+import { formatDate, hasPagePermission } from '../lib/utils';
 import { Plus, ClipboardList, Download, Eye } from 'lucide-react';
 
 export default function DeliveryOrdersPage() {
@@ -78,7 +78,7 @@ export default function DeliveryOrdersPage() {
     }
   };
 
-  const canCreate = ['admin', 'security'].includes(user?.role);
+  const canCreate = hasPagePermission(user, '/delivery-orders', ['admin', 'security']);
 
   return (
     <div className="page-container" data-testid="delivery-orders-page">
@@ -212,45 +212,141 @@ export default function DeliveryOrdersPage() {
               </tr>
             </thead>
             <tbody>
-              {deliveryOrders.map((dorder) => (
-                <tr key={dorder.id} data-testid={`do-row-${dorder.do_number}`}>
-                  <td className="font-medium">{dorder.do_number}</td>
-                  <td>{dorder.job_number}</td>
-                  <td>{dorder.product_name}</td>
-                  <td className="font-mono">{dorder.quantity}</td>
-                  <td>{dorder.vehicle_type || '-'}</td>
-                  <td>{dorder.vehicle_number || '-'}</td>
-                  <td>{dorder.driver_name || '-'}</td>
-                  <td>{formatDate(dorder.issued_at)}</td>
-                  <td>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => {
-                          setSelectedDO(dorder);
-                          setViewOpen(true);
-                        }}
-                        title="View Details"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => {
-                          const token = localStorage.getItem('erp_token');
-                          const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
-                          window.open(`${backendUrl}/api/pdf/delivery-note/${dorder.id}?token=${token}`, '_blank');
-                        }}
-                        title="Download PDF"
-                      >
-                        <Download className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {deliveryOrders.map((dorder) => {
+                const isBulk = dorder.is_bulk === true;
+                const lineItems = dorder.line_items || [];
+                
+                return (
+                  <tr key={dorder.id} data-testid={`do-row-${dorder.do_number}`}>
+                    <td className="font-medium">{dorder.do_number}</td>
+                    <td>
+                      {isBulk ? (
+                        <span className="text-xs text-muted-foreground">
+                          {dorder.job_count || lineItems.length} {dorder.job_count === 1 ? 'Job' : 'Jobs'}
+                        </span>
+                      ) : (
+                        dorder.job_number || '-'
+                      )}
+                    </td>
+                    <td>
+                      {isBulk && lineItems.length > 0 ? (
+                        <div className="space-y-1">
+                          {lineItems.slice(0, 2).map((item, idx) => (
+                            <div key={idx} className="text-sm">
+                              {item.product_name || 'N/A'}
+                              {item.packaging && (
+                                <span className="text-xs text-muted-foreground ml-1">
+                                  ({item.packaging})
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                          {lineItems.length > 2 && (
+                            <div className="text-xs text-muted-foreground">
+                              +{lineItems.length - 2} more
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        dorder.product_name || '-'
+                      )}
+                    </td>
+                    <td className="font-mono">
+                      {isBulk && lineItems.length > 0 ? (
+                        <div className="space-y-1">
+                          {lineItems.slice(0, 2).map((item, idx) => {
+                            // Display format: "80 EA (14.8 MT)" for drums, "14.8 MT" for bulk
+                            let displayText;
+                            if (item.unit && item.unit !== 'MT') {
+                              // Drums: show "80 EA (14.8 MT)"
+                              // Calculate quantity_mt if missing (for old DOs)
+                              let qtyMt = item.quantity_mt;
+                              if (!qtyMt && item.quantity && item.net_weight_kg) {
+                                qtyMt = (item.quantity * item.net_weight_kg) / 1000;
+                              } else if (!qtyMt && item.quantity) {
+                                // Fallback: assume 185 kg per drum
+                                qtyMt = (item.quantity * 185) / 1000;
+                              }
+                              if (qtyMt) {
+                                displayText = `${item.quantity} ${item.unit} (${qtyMt.toFixed(2)} MT)`;
+                              } else {
+                                displayText = `${item.quantity} ${item.unit}`;
+                              }
+                            } else {
+                              // Bulk: show "14.8 MT"
+                              const qty = item.quantity_mt || item.quantity || 0;
+                              displayText = `${qty.toFixed(2)} MT`;
+                            }
+                            return (
+                              <div key={idx} className="text-sm">
+                                {displayText}
+                              </div>
+                            );
+                          })}
+                          {lineItems.length > 2 && (
+                            <div className="text-xs text-muted-foreground">
+                              ...
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        (() => {
+                          // Single DO: show "80 EA (14.8 MT)" for drums, "14.8 MT" for bulk
+                          if (dorder.unit && dorder.unit !== 'MT') {
+                            // Calculate quantity_mt if missing (for old DOs)
+                            let qtyMt = dorder.quantity_mt;
+                            if (!qtyMt && dorder.quantity && dorder.net_weight_kg) {
+                              qtyMt = (dorder.quantity * dorder.net_weight_kg) / 1000;
+                            } else if (!qtyMt && dorder.quantity) {
+                              // Fallback: assume 185 kg per drum
+                              qtyMt = (dorder.quantity * 185) / 1000;
+                            }
+                            if (qtyMt) {
+                              return `${dorder.quantity} ${dorder.unit} (${qtyMt.toFixed(2)} MT)`;
+                            } else {
+                              return `${dorder.quantity} ${dorder.unit}`;
+                            }
+                          } else {
+                            const qty = dorder.quantity_mt || dorder.quantity || 0;
+                            return `${qty.toFixed(2)} MT`;
+                          }
+                        })()
+                      )}
+                    </td>
+                    <td>{dorder.vehicle_type || '-'}</td>
+                    <td>{dorder.vehicle_number || '-'}</td>
+                    <td>{dorder.driver_name || '-'}</td>
+                    <td>{formatDate(dorder.issued_at)}</td>
+                    <td>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => {
+                            setSelectedDO(dorder);
+                            setViewOpen(true);
+                          }}
+                          title="View Details"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => {
+                            const token = localStorage.getItem('erp_token');
+                            const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+                            window.open(`${backendUrl}/api/pdf/delivery-note/${dorder.id}?token=${token}`, '_blank');
+                          }}
+                          title="Download PDF"
+                        >
+                          <Download className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -270,17 +366,27 @@ export default function DeliveryOrdersPage() {
                   <p className="font-medium">{selectedDO.do_number}</p>
                 </div>
                 <div>
-                  <span className="text-muted-foreground">Job Number:</span>
-                  <p className="font-medium">{selectedDO.job_number}</p>
+                  <span className="text-muted-foreground">
+                    {selectedDO.is_bulk ? 'Job Count:' : 'Job Number:'}
+                  </span>
+                  <p className="font-medium">
+                    {selectedDO.is_bulk 
+                      ? `${selectedDO.job_count || (selectedDO.line_items?.length || 0)} Jobs`
+                      : (selectedDO.job_number || '-')}
+                  </p>
                 </div>
-                <div>
-                  <span className="text-muted-foreground">Product:</span>
-                  <p className="font-medium">{selectedDO.product_name}</p>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">Quantity:</span>
-                  <p className="font-medium">{selectedDO.quantity}</p>
-                </div>
+                {!selectedDO.is_bulk && (
+                  <>
+                    <div>
+                      <span className="text-muted-foreground">Product:</span>
+                      <p className="font-medium">{selectedDO.product_name || '-'}</p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Quantity:</span>
+                      <p className="font-medium">{selectedDO.quantity || '-'} {selectedDO.unit || ''}</p>
+                    </div>
+                  </>
+                )}
                 <div>
                   <span className="text-muted-foreground">Vehicle Type:</span>
                   <p className="font-medium">{selectedDO.vehicle_type || '-'}</p>
@@ -310,6 +416,66 @@ export default function DeliveryOrdersPage() {
                   </div>
                 )}
               </div>
+
+              {/* Bulk DO Products Table */}
+              {selectedDO.is_bulk && selectedDO.line_items && selectedDO.line_items.length > 0 && (
+                <div className="space-y-2 pt-2 border-t">
+                  <h4 className="font-medium text-sm">Products ({selectedDO.line_items.length})</h4>
+                  <div className="overflow-x-auto">
+                    <table className="erp-table w-full text-sm">
+                      <thead>
+                        <tr>
+                          <th>Job Number</th>
+                          <th>Product</th>
+                          <th>Packaging</th>
+                          <th>Quantity</th>
+                          <th>Net Weight (MT)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedDO.line_items.map((item, idx) => (
+                          <tr key={idx}>
+                            <td>{item.job_number || '-'}</td>
+                            <td className="font-medium">{item.product_name || '-'}</td>
+                            <td>{item.packaging || '-'}</td>
+                            <td className="font-mono">
+                              {item.quantity} {item.unit || ''}
+                            </td>
+                            <td className="font-mono">
+                              {item.net_weight_mt ? item.net_weight_mt.toFixed(3) : '-'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Weight Information for Bulk DOs */}
+              {selectedDO.is_bulk && (
+                <div className="grid grid-cols-3 gap-4 text-sm pt-2 border-t">
+                  {selectedDO.exit_empty_weight && (
+                    <div>
+                      <span className="text-muted-foreground">Empty Weight:</span>
+                      <p className="font-medium">{selectedDO.exit_empty_weight} kg</p>
+                    </div>
+                  )}
+                  {selectedDO.exit_gross_weight && (
+                    <div>
+                      <span className="text-muted-foreground">Gross Weight:</span>
+                      <p className="font-medium">{selectedDO.exit_gross_weight} kg</p>
+                    </div>
+                  )}
+                  {selectedDO.exit_net_weight && (
+                    <div>
+                      <span className="text-muted-foreground">Net Weight:</span>
+                      <p className="font-medium">{selectedDO.exit_net_weight} kg</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-4 border-t">
                 <Button variant="outline" onClick={() => setViewOpen(false)}>
                   Close

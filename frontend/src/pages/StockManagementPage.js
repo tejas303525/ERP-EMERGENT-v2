@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { 
   Package, Plus, Minus, RefreshCw, Search, Edit, History,
-  Box, Boxes, ArrowUpCircle, ArrowDownCircle, FileText
+  Box, Boxes, ArrowUpCircle, ArrowDownCircle, FileText, Trash2
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
@@ -46,6 +46,20 @@ const StockManagementPage = () => {
   const openAdjustModal = (item) => {
     setSelectedItem(item);
     setShowAdjustModal(true);
+  };
+
+  const handleDelete = async (item) => {
+    if (!window.confirm(`Delete "${item.name}"?\n\nThis will mark it as inactive. Make sure stock is zero.`)) {
+      return;
+    }
+    
+    try {
+      await api.delete(`/inventory-items/${item.id}`);
+      toast.success(`${item.name} deleted successfully`);
+      loadData(); // Reload the data
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to delete item. Make sure stock is zero.');
+    }
   };
 
   // Filter items
@@ -226,10 +240,21 @@ const StockManagementPage = () => {
                         <td className="p-3 text-cyan-400">{item.available?.toFixed(2) || item.current_stock?.toFixed(2)}</td>
                         <td className="p-3">{item.unit}</td>
                         <td className="p-3">
-                          <Button size="sm" variant="outline" onClick={() => openAdjustModal(item)}>
-                            <Edit className="w-4 h-4 mr-1" />
-                            Adjust
-                          </Button>
+                          <div className="flex gap-2">
+                            <Button size="sm" variant="outline" onClick={() => openAdjustModal(item)}>
+                              <Edit className="w-4 h-4 mr-1" />
+                              Adjust
+                            </Button>
+                            <Button 
+                              size="sm" 
+                              variant="outline" 
+                              className="border-red-500/50 text-red-400 hover:bg-red-500/10"
+                              onClick={() => handleDelete(item)}
+                              title="Delete item (stock must be zero)"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          </div>
                         </td>
                       </tr>
                     ))

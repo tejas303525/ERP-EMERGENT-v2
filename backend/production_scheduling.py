@@ -41,6 +41,8 @@ class InventoryItemCreate(BaseModel):
     item_type: str  # RAW or PACK
     uom: str  # KG or EA
     is_active: bool = True
+    capacity_liters: Optional[float] = None  # For packaging items (drum/IBC capacity)
+    net_weight_kg: Optional[float] = None  # For packaging items (default net weight per unit)
 
 class InventoryItem(InventoryItemCreate):
     model_config = ConfigDict(extra="ignore")

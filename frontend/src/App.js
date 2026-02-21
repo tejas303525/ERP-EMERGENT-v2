@@ -13,6 +13,8 @@ import SalesOrdersPage from './pages/SalesOrdersPage';
 import JobOrdersPage from './pages/JobOrdersPage';
 import InventoryPage from './pages/InventoryPage';
 import GRNPage from './pages/GRNPage';
+// PartialDeliveriesPage removed - functionality integrated into GRN page
+import OutboundPartialDeliveriesPage from './pages/OutboundPartialDeliveriesPage';
 import DeliveryOrdersPage from './pages/DeliveryOrdersPage';
 import ShippingPage from './pages/ShippingPage';
 import TransportPage from './pages/TransportPage';
@@ -78,6 +80,8 @@ const AppRoutes = () => {
                 <Route path="/job-orders" element={<JobOrdersPage />} />
                 <Route path="/inventory" element={<InventoryPage />} />
                 <Route path="/grn" element={<GRNPage />} />
+                {/* Partial deliveries route removed - functionality integrated into GRN page */}
+                <Route path="/outbound-partial-deliveries" element={<OutboundPartialDeliveriesPage />} />
                 <Route path="/delivery-orders" element={<DeliveryOrdersPage />} />
                 <Route path="/shipping" element={<ShippingPage />} />
                 <Route path="/transport" element={<TransportPage />} />

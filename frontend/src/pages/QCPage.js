@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
-import { formatDate, getStatusColor } from '../lib/utils';
+import { formatDate, getStatusColor, hasPagePermission } from '../lib/utils';
 import { Plus, ClipboardCheck, Check, X, Pause } from 'lucide-react';
 
 const STATUSES = ['pending', 'passed', 'failed', 'hold'];
@@ -108,7 +108,7 @@ export default function QCPage() {
   };
 
   const filteredBatches = statusFilter === 'all' ? batches : batches.filter(b => b.status === statusFilter);
-  const canCreate = ['admin', 'qc'].includes(user?.role);
+  const canCreate = hasPagePermission(user, '/qc', ['admin', 'qc']);
 
   return (
     <div className="page-container" data-testid="qc-page">

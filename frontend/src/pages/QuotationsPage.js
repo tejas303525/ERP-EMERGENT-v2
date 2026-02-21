@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from '../components/ui/textarea';
 import { Checkbox } from '../components/ui/checkbox';
 import { toast } from 'sonner';
-import { formatCurrency, formatDate, getStatusColor, cn } from '../lib/utils';
+import { formatCurrency, formatDate, getStatusColor, cn, hasPagePermission } from '../lib/utils';
 import { Plus, FileText, Check, X, Eye, Trash2, Download, Globe, MapPin, Ship, AlertTriangle, Edit, RefreshCw, DollarSign } from 'lucide-react';
 
 // Helper function to format FastAPI validation errors
@@ -250,20 +250,20 @@ export default function QuotationsPage() {
         productAPI.getAll(),
         api.get('/settings/all').catch(() => ({ data: {} })),
         api.get('/settings/bank-accounts').catch(() => ({ data: [] })), // Fetch bank accounts separately for non-admin users
-        api.get('/settings/packaging-types').catch(() => ({ data: [] })), // Fetch packaging types from dedicated endpoint
+        api.get('/inventory-items/packaging/for-quotation').catch(() => ({ data: [] })), // Fetch packaging from inventory_items (item_type=PACK)
         api.get('/settings/payment-terms').catch(() => ({ data: [] })) // Fetch payment terms from dedicated endpoint
       ]);
       setQuotations(quotationsRes.data);
       setCustomers(customersRes.data);
       setProducts(productsRes.data.filter(p => p.category === 'finished_product'));
       
-      // Load packaging types from dedicated endpoint (works for non-admin users)
-      const packagingFromSettings = packagingRes.data || [];
+      // Load packaging from inventory_items (item_type=PACK) - single source of truth
+      const packagingFromInventory = packagingRes.data || [];
       // Store full packaging objects
-      setPackagingObjects(packagingFromSettings);
-      // Always include "Bulk" as the first option, then add settings packaging types
-      const allPackaging = ['Bulk', ...packagingFromSettings.map(p => p.name || p).filter(p => p !== 'Bulk')];
-      setPackagingTypes(allPackaging.length > 1 ? allPackaging : DEFAULT_PACKAGING);
+      setPackagingObjects(packagingFromInventory);
+      // Extract names for dropdown (Bulk is already included from backend)
+      const allPackaging = packagingFromInventory.map(p => p.name);
+      setPackagingTypes(allPackaging.length > 0 ? allPackaging : DEFAULT_PACKAGING);
       
       // Load bank accounts from dedicated endpoint (works for non-admin users)
       setBankAccounts(banksRes.data || []);
@@ -532,18 +532,47 @@ export default function QuotationsPage() {
       return;
     }
     
-    // Validate container allocation for export orders
-    if (form.order_type === 'export' && form.container_count > 0) {
-      const requestedContainers = newItem.container_count_per_item || 0;
+    // Validate container allocation for export orders - MIXED LOADING SUPPORT
+    if (form.order_type === 'export' && form.container_count > 0 && form.container_type) {
+      // Calculate weight of new item first
+      let newItemWeightMT = 0;
+      const uom = newItem.uom || inferUOMFromPackaging(newItem.packaging);
       
-      if (requestedContainers <= 0) {
-        toast.error('Please enter number of containers for this item');
-        return;
+      if (uom === 'per_unit') {
+        if (newItem.net_weight_kg) {
+          newItemWeightMT = (newItem.net_weight_kg * newItem.quantity) / 1000;
+        }
+      } else if (uom === 'per_liter') {
+        if (newItem.net_weight_kg) {
+          newItemWeightMT = (newItem.net_weight_kg * newItem.quantity) / 1000;
+        } else {
+          newItemWeightMT = newItem.quantity / 1000; // Approximate for liquids
+        }
+      } else { // per_mt
+        if (newItem.net_weight_kg) {
+          newItemWeightMT = (newItem.net_weight_kg * newItem.quantity) / 1000;
+        } else {
+          newItemWeightMT = newItem.quantity; // Bulk - quantity is in MT
+        }
       }
       
-      const alloc = calculateContainerAllocation();
-      if (alloc.remaining < requestedContainers) {
-        toast.error(`Only ${alloc.remaining} containers remaining. Cannot allocate ${requestedContainers} containers.`);
+      // Calculate current container's used capacity
+      const containerItems = form.items.filter(item => item.container_number === currentContainer);
+      const currentContainerMT = containerItems.reduce((sum, item) => sum + (item.weight_mt || 0), 0);
+      
+      // Get max capacity for this container type
+      const containerType = CONTAINER_TYPES.find(c => c.value === form.container_type);
+      const maxCapacityMT = containerType ? containerType.max_mt : 28;
+      
+      // Check if adding this item would exceed container capacity
+      if (currentContainerMT + newItemWeightMT > maxCapacityMT) {
+        toast.error(
+          `Container ${currentContainer} capacity exceeded! ` +
+          `Current: ${currentContainerMT.toFixed(2)} MT, ` +
+          `Adding: ${newItemWeightMT.toFixed(2)} MT, ` +
+          `Max: ${maxCapacityMT} MT. ` +
+          `Please select a different container or add more containers.`
+        );
         return;
       }
     }
@@ -635,6 +664,35 @@ export default function QuotationsPage() {
   };
 
   const containerAllocation = calculateContainerAllocation();
+
+  // Calculate weight capacity per container for mixed loading
+  const calculateContainerCapacity = () => {
+    if (form.order_type !== 'export' || !form.container_type || form.container_count === 0) {
+      return [];
+    }
+    
+    const containerType = CONTAINER_TYPES.find(c => c.value === form.container_type);
+    const maxCapacityMT = containerType ? containerType.max_mt : 28;
+    
+    const containers = [];
+    for (let i = 1; i <= form.container_count; i++) {
+      const containerItems = form.items.filter(item => item.container_number === i);
+      const usedMT = containerItems.reduce((sum, item) => sum + (item.weight_mt || 0), 0);
+      const remainingMT = Math.max(0, maxCapacityMT - usedMT);
+      const percentUsed = (usedMT / maxCapacityMT) * 100;
+      
+      containers.push({
+        number: i,
+        usedMT: usedMT,
+        remainingMT: remainingMT,
+        maxCapacityMT: maxCapacityMT,
+        percentUsed: percentUsed,
+        items: containerItems
+      });
+    }
+    
+    return containers;
+  };
 
   // Handle container count change and auto-generate packing_display
   const handleContainerCountChange = (count) => {
@@ -1373,37 +1431,38 @@ export default function QuotationsPage() {
                       </p>
                     </div>
                     
-                    {/* Container Allocation Status */}
+                    {/* Container Capacity Status - Mixed Loading Support */}
                     {form.container_count > 0 && (
                       <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-4">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className="text-sm font-medium text-amber-400">Container Allocation</p>
-                            <p className="text-xs text-muted-foreground">
-                              Total: {containerAllocation.total} containers
-                            </p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-sm">
-                              <span className="text-muted-foreground">Used:</span>{' '}
-                              <span className={containerAllocation.totalUsed > 0 ? 'text-amber-400 font-medium' : 'text-muted-foreground'}>
-                                {containerAllocation.totalUsed}
-                              </span>
-                            </p>
-                            <p className="text-sm">
-                              <span className="text-muted-foreground">Remaining:</span>{' '}
-                              <span className={containerAllocation.remaining > 0 ? 'text-green-400 font-medium' : 'text-red-400 font-medium'}>
-                                {containerAllocation.remaining}
-                              </span>
-                            </p>
-                          </div>
+                        <p className="text-sm font-medium text-amber-400 mb-2">Container Capacity Status (Mixed Loading)</p>
+                        <div className="space-y-2">
+                          {calculateContainerCapacity().map(container => (
+                            <div key={container.number} className="flex items-center justify-between text-xs">
+                              <div className="flex items-center gap-2">
+                                <Badge 
+                                  variant={container.number === currentContainer ? "default" : "outline"} 
+                                  className={container.number === currentContainer ? "bg-cyan-500 hover:bg-cyan-600" : ""}
+                                >
+                                  Container {container.number}
+                                </Badge>
+                                <span className="text-muted-foreground">
+                                  {container.usedMT.toFixed(2)} / {container.maxCapacityMT} MT
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="w-24 h-2 bg-gray-700 rounded-full overflow-hidden">
+                                  <div 
+                                    className={`h-full ${container.percentUsed > 90 ? 'bg-red-500' : container.percentUsed > 70 ? 'bg-amber-500' : 'bg-green-500'}`}
+                                    style={{width: `${Math.min(container.percentUsed, 100)}%`}}
+                                  ></div>
+                                </div>
+                                <span className={container.remainingMT > 0 ? 'text-green-400 font-medium' : 'text-red-400 font-medium'}>
+                                  {container.remainingMT.toFixed(2)} MT left
+                                </span>
+                              </div>
+                            </div>
+                          ))}
                         </div>
-                        {containerAllocation.remaining === 0 && (
-                          <p className="text-xs text-amber-400 mt-2 flex items-center gap-1">
-                            <AlertTriangle className="w-3 h-3" />
-                            All containers have been allocated
-                          </p>
-                        )}
                       </div>
                     )}
                   </>
@@ -1523,27 +1582,26 @@ export default function QuotationsPage() {
                     <h4 className="font-medium text-sm mb-3 text-amber-400">Export Details for Current Item</h4>
                     <div className="grid grid-cols-4 gap-3">
                       <div>
-                        <Label className="text-xs">Number of Containers *</Label>
+                        <Label className="text-xs">Number of Containers (Optional)</Label>
                         <Input
                           type="number"
-                          placeholder="e.g., 5"
+                          placeholder="0 for mixed loading"
                           value={newItem.container_count_per_item || ''}
                           onChange={(e) => {
                             const count = parseInt(e.target.value) || 0;
                             handleContainerCountChange(count);
                           }}
                           className="text-sm"
-                          min="1"
+                          min="0"
                           max={containerAllocation.remaining + (newItem.container_count_per_item || 0)}
                         />
-                        {newItem.container_count_per_item > 0 && (
+                        {newItem.container_count_per_item > 0 ? (
                           <p className="text-xs text-muted-foreground mt-1">
-                            {newItem.container_count_per_item} × {form.container_type || '20ft'} = {newItem.container_count_per_item * (CONTAINER_TYPES.find(c => c.value === form.container_type)?.max_mt || 28)} MT capacity
+                            FCL: {newItem.container_count_per_item} × {form.container_type || '20ft'}
                           </p>
-                        )}
-                        {containerAllocation.remaining < (newItem.container_count_per_item || 0) && (
-                          <p className="text-xs text-red-400 mt-1">
-                            Only {containerAllocation.remaining} containers available
+                        ) : (
+                          <p className="text-xs text-green-400 mt-1">
+                            Mixed loading to Container {currentContainer}
                           </p>
                         )}
                       </div>
@@ -1929,7 +1987,7 @@ export default function QuotationsPage() {
                       <Button variant="ghost" size="icon" onClick={() => handleDownloadPDF(q.id, q.pfi_number)}>
                         <Download className="w-4 h-4" />
                       </Button>
-                      {q.status === 'pending' && (user?.role === 'admin' || user?.role === 'finance') && (
+                      {q.status === 'pending' && hasPagePermission(user, '/quotations', ['admin', 'finance']) && (
                         <>
                           <Button 
                             variant="ghost" 
@@ -1946,12 +2004,12 @@ export default function QuotationsPage() {
                           </Button>
                         </>
                       )}
-                      {(q.status === 'pending' || q.status === 'rejected') && (user?.role === 'admin' || user?.role === 'finance' || user?.role === 'sales') && (
+                      {(q.status === 'pending' || q.status === 'rejected') && hasPagePermission(user, '/quotations', ['admin', 'finance', 'sales']) && (
                         <Button variant="ghost" size="icon" onClick={() => handleEditClick(q)} title="Edit quotation">
                           <Edit className="w-4 h-4 text-blue-500" />
                         </Button>
                       )}
-                      {q.status === 'rejected' && (user?.role === 'admin' || user?.role === 'finance' || user?.role === 'sales') && (
+                      {q.status === 'rejected' && hasPagePermission(user, '/quotations', ['admin', 'finance', 'sales']) && (
                         <Button variant="ghost" size="icon" onClick={() => handleRevise(q.id)} title="Create new revision">
                           <RefreshCw className="w-4 h-4 text-purple-500" />
                         </Button>

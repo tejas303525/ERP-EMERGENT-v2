@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { toast } from 'sonner';
-import { formatDate, getStatusColor } from '../lib/utils';
+import { formatDate, getStatusColor, hasPagePermission } from '../lib/utils';
 import { Truck, Package, Calendar, Clock, Play, CheckCircle, Loader2, PieChart as PieChartIcon } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 
@@ -117,7 +117,7 @@ export default function DispatchDashboard() {
     }
   };
 
-  const canUpdate = ['admin', 'security'].includes(user?.role);
+  const canUpdate = hasPagePermission(user, '/dispatch-gate', ['admin', 'security']);
 
   const getNextStatus = (currentStatus) => {
     const flow = {

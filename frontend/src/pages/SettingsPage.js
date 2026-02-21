@@ -7,7 +7,7 @@ import { Textarea } from '../components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { 
   Settings, Building, FileText, CreditCard, Container, Users,
-  Plus, Trash2, Save, RefreshCw, Edit, Check, X, MapPin, Package, Truck, Receipt
+  Plus, Trash2, Save, RefreshCw, Edit, Check, X, MapPin, Package, Truck, Receipt, ClipboardCheck
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Checkbox } from '../components/ui/checkbox';
@@ -45,6 +45,8 @@ const SettingsPage = () => {
   const [products, setProducts] = useState([]);
   const [transportRoutes, setTransportRoutes] = useState([]);
   const [fixedCharges, setFixedCharges] = useState([]);
+  const [qcParameters, setQcParameters] = useState([]);
+  const [selectedProductType, setSelectedProductType] = useState(''); // For filtering QC parameters
   const [contactForDispatch, setContactForDispatch] = useState({
     name: "Dispatch Department",
     phone: "+971 4 2384533",
@@ -63,14 +65,16 @@ const SettingsPage = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [vendorsRes, settingsRes, configsRes, productsRes, transportRes, fixedChargesRes, dispatchContactRes] = await Promise.all([
+      const [vendorsRes, settingsRes, configsRes, productsRes, transportRes, fixedChargesRes, dispatchContactRes, packagingRes, qcParamsRes] = await Promise.all([
         api.get('/suppliers'),
         api.get('/settings/all').catch(() => ({ data: {} })),
         api.get('/product-packaging-configs').catch(() => ({ data: [] })),
         api.get('/products').catch(() => ({ data: [] })),
         transportRoutesAPI.getAll().catch(() => ({ data: [] })),
         fixedChargesAPI.getAll().catch(() => ({ data: [] })),
-        api.get('/settings/contact-for-dispatch').catch(() => ({ data: null }))
+        api.get('/settings/contact-for-dispatch').catch(() => ({ data: null })),
+        api.get('/inventory-items', { params: { item_type: 'PACK' } }).catch(() => ({ data: [] })),
+        api.get('/qc/parameters').catch(() => ({ data: [] }))
       ]);
       setVendors(vendorsRes.data || []);
       
@@ -79,12 +83,14 @@ const SettingsPage = () => {
       setDocumentTemplates(settings.document_templates || []);
       setContainerTypes(settings.container_types || []);
       setCompanies(settings.companies || []);
-      setPackagingTypes(settings.packaging_types || []);
+      // Load packaging from inventory_items (item_type=PACK) instead of settings
+      setPackagingTypes(packagingRes.data || []);
       setBankAccounts(settings.bank_accounts || []);
       setProductPackagingConfigs(configsRes.data || []);
       setProducts((productsRes.data || []).filter(p => p.category === 'finished_product'));
       setTransportRoutes(transportRes.data || []);
       setFixedCharges(fixedChargesRes.data || []);
+      setQcParameters(qcParamsRes.data || []);
       
       // Load contact for dispatch from dedicated endpoint or settings
       if (dispatchContactRes.data) {
@@ -120,17 +126,18 @@ const SettingsPage = () => {
         payment_terms: `/settings/payment-terms/${id}`,
         documents: `/settings/document-templates/${id}`,
         containers: `/settings/container-types/${id}`,
-        packaging: `/settings/packaging-types/${id}`,
+        packaging: `/inventory-items/${id}`,
         banks: `/settings/bank-accounts/${id}`,
         product_packaging: `/product-packaging-configs/${id}`,
         transport_routes: `/transport-routes/${id}`,
         fixed_charges: `/fixed-charges/${id}`,
+        qc_parameters: `/qc/parameters/${id}`,
       };
       await api.delete(endpoints[type]);
       toast.success('Deleted successfully');
       loadData();
     } catch (error) {
-      toast.error('Failed to delete');
+      toast.error(error.response?.data?.detail || 'Failed to delete');
     }
   };
 
@@ -145,6 +152,7 @@ const SettingsPage = () => {
     { id: 'banks', label: 'Bank Accounts', icon: CreditCard },
     { id: 'transport_routes', label: 'Transport Routes', icon: Truck },
     { id: 'fixed_charges', label: 'Fixed Charges', icon: Receipt },
+    { id: 'qc_parameters', label: 'QC Parameters', icon: ClipboardCheck },
     { id: 'contact_dispatch', label: 'Contact for Dispatch', icon: Users }
   ];
 
@@ -245,8 +253,8 @@ const SettingsPage = () => {
             {activeTab === 'packaging' && (
               <DataTable
                 data={packagingTypes}
-                columns={['name', 'type']}
-                labels={['Name', 'Type']}
+                columns={['sku', 'name', 'uom', 'capacity_liters']}
+                labels={['SKU', 'Name', 'UOM', 'Capacity (L)']}
                 onEdit={(item) => openEditModal('packaging', item)}
                 onDelete={(id) => handleDelete('packaging', id)}
               />
@@ -349,6 +357,43 @@ const SettingsPage = () => {
                 onEdit={(item) => openEditModal('fixed_charges', item)}
                 onDelete={(id) => handleDelete('fixed_charges', id)}
               />
+            )}
+            {activeTab === 'qc_parameters' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-4">
+                    <Label>Filter by Product Type:</Label>
+                    <select
+                      className="p-2 rounded border bg-background"
+                      value={selectedProductType}
+                      onChange={async (e) => {
+                        setSelectedProductType(e.target.value);
+                        try {
+                          const url = e.target.value 
+                            ? `/qc/parameters?product_type=${e.target.value}`
+                            : '/qc/parameters';
+                          const response = await api.get(url);
+                          setQcParameters(response.data || []);
+                        } catch (error) {
+                          toast.error('Failed to load QC parameters');
+                        }
+                      }}
+                    >
+                      <option value="">All Types</option>
+                      <option value="SOLVENT">Solvent</option>
+                      <option value="OIL">Oil</option>
+                      <option value="CHEMICAL">Chemical</option>
+                    </select>
+                  </div>
+                </div>
+                <DataTable
+                  data={qcParameters}
+                  columns={['parameter_name', 'product_type', 'test_type', 'required', 'unit', 'min_value', 'max_value', 'order']}
+                  labels={['Parameter Name', 'Product Type', 'Test Type', 'Required', 'Unit', 'Min Value', 'Max Value', 'Order']}
+                  onEdit={(item) => openEditModal('qc_parameters', item)}
+                  onDelete={(id) => handleDelete('qc_parameters', id)}
+                />
+              </div>
             )}
             {activeTab === 'contact_dispatch' && (
               <div className="space-y-4">
@@ -474,10 +519,12 @@ const DataTable = ({ data, columns, labels, onEdit, onDelete }) => {
                   <span className="font-mono text-emerald-400">
                     {item[col] != null ? `${item[col]} ${item.currency || ''}` : '-'}
                   </span>
-                ) : col === 'is_active' || col === 'is_dg' ? (
+                ) : col === 'is_active' || col === 'is_dg' || col === 'required' ? (
                   <Badge variant={item[col] ? 'default' : 'outline'}>
                     {item[col] ? 'Yes' : 'No'}
                   </Badge>
+                ) : col === 'test_type' || col === 'product_type' ? (
+                  <Badge className="bg-purple-500/20 text-purple-400">{item[col]}</Badge>
                 ) : col === 'container_type' ? (
                   <Badge variant={item[col] ? 'default' : 'outline'}>
                     {item[col] || 'All'}
@@ -554,9 +601,12 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
         ];
       case 'packaging':
         return [
-          { key: 'name', label: 'Name', required: true },
-          { key: 'type', label: 'Type', type: 'select', options: ['drum', 'ibc', 'jerrycan', 'tank', 'bulk', 'other'] },
-          { key: 'net_weights', label: 'Net Weights (KG)', type: 'netweights' },
+          { key: 'sku', label: 'SKU Code', required: true, placeholder: 'e.g., PACK-DRUM-210L' },
+          { key: 'name', label: 'Name', required: true, placeholder: 'e.g., Steel Drum 210L' },
+          { key: 'uom', label: 'Unit of Measure', type: 'select', options: ['EA', 'KG', 'L'], required: true },
+          { key: 'capacity_liters', label: 'Capacity (Liters)', type: 'number', placeholder: 'e.g., 210' },
+          { key: 'net_weight_kg_default', label: 'Net Weight (KG)', type: 'number', placeholder: 'e.g., 185' },
+          { key: 'category', label: 'Category', placeholder: 'e.g., Drum, IBC, Bottle' },
         ];
       case 'banks':
         return [
@@ -594,6 +644,18 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
           { key: 'is_dg', label: 'Is DG?', type: 'checkbox', required: false },
           { key: 'applicable_to', label: 'Applicable To', type: 'select', options: ['both', 'export', 'local'], required: false },
         ];
+      case 'qc_parameters':
+        return [
+          { key: 'parameter_name', label: 'Parameter Name', required: true },
+          { key: 'product_type', label: 'Product Type', type: 'select', options: ['SOLVENT', 'OIL', 'CHEMICAL'], required: true },
+          { key: 'test_type', label: 'Test Type', type: 'select', options: ['PASS_FAIL', 'MEASUREMENT', 'VISUAL'], required: true },
+          { key: 'required', label: 'Required', type: 'checkbox' },
+          { key: 'order', label: 'Display Order', type: 'number' },
+          { key: 'unit', label: 'Unit (for measurements)', placeholder: 'e.g., %, g/ml, mg KOH/g' },
+          { key: 'min_value', label: 'Min Value', type: 'number' },
+          { key: 'max_value', label: 'Max Value', type: 'number' },
+          { key: 'description', label: 'Description', type: 'textarea' },
+        ];
       case 'product_packaging':
         return [
           { key: 'product_id', label: 'Product', type: 'select', options: (products || []).map(p => ({ value: p.id, label: p.name })), required: true },
@@ -625,11 +687,12 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
       payment_terms: '/settings/payment-terms',
       documents: '/settings/document-templates',
       containers: '/settings/container-types',
-      packaging: '/settings/packaging-types',
+      packaging: '/inventory-items',
       banks: '/settings/bank-accounts',
       product_packaging: '/product-packaging-configs',
       transport_routes: '/transport-routes',
       fixed_charges: '/fixed-charges',
+      qc_parameters: '/qc/parameters',
     };
     return {
       post: base[type],
@@ -654,7 +717,7 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
       const dataToSave = { ...form };
       
       // Ensure boolean fields are properly converted
-      const booleanFields = ['is_active', 'is_dg'];
+      const booleanFields = ['is_active', 'is_dg', 'required'];
       booleanFields.forEach(field => {
         if (dataToSave.hasOwnProperty(field)) {
           // Convert string 'true'/'false' to boolean, undefined/null to false
@@ -668,8 +731,42 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
         }
       });
       
-      if (type === 'packaging' && netWeights.length > 0) {
-        dataToSave.net_weights = netWeights.filter(w => w !== '' && w !== null && !isNaN(w));
+      // Handle QC parameters - convert number fields and set defaults
+      if (type === 'qc_parameters') {
+        // Convert empty strings to null for optional number fields
+        const numberFields = ['order', 'min_value', 'max_value'];
+        numberFields.forEach(field => {
+          if (dataToSave[field] === '' || dataToSave[field] === undefined) {
+            dataToSave[field] = null;
+          } else if (typeof dataToSave[field] === 'string' && !isNaN(dataToSave[field])) {
+            dataToSave[field] = parseFloat(dataToSave[field]);
+          } else if (typeof dataToSave[field] === 'number') {
+            // Already a number, keep it
+          }
+        });
+        // Set default order if not provided (backend will handle if null)
+        if (dataToSave.order === null || dataToSave.order === undefined || dataToSave.order === '') {
+          dataToSave.order = 0; // Backend will set appropriate order
+        }
+      }
+      
+      if (type === 'packaging') {
+        // Ensure item_type is set to PACK for inventory_items
+        dataToSave.item_type = 'PACK';
+        dataToSave.is_active = true;
+        
+        // Handle net_weights if provided
+        if (netWeights.length > 0) {
+          dataToSave.net_weights = netWeights.filter(w => w !== '' && w !== null && !isNaN(w));
+        }
+        
+        // Convert number fields
+        if (dataToSave.capacity_liters) {
+          dataToSave.capacity_liters = parseFloat(dataToSave.capacity_liters) || 0;
+        }
+        if (dataToSave.net_weight_kg_default) {
+          dataToSave.net_weight_kg_default = parseFloat(dataToSave.net_weight_kg_default) || 0;
+        }
       }
       // For product_packaging, ensure product_name is set and clean number fields
       if (type === 'product_packaging') {
@@ -754,6 +851,9 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
       }
       if (updatedForm.is_dg !== undefined) {
         updatedForm.is_dg = updatedForm.is_dg === true || updatedForm.is_dg === 'true';
+      }
+      if (updatedForm.required !== undefined) {
+        updatedForm.required = updatedForm.required === true || updatedForm.required === 'true';
       }
       const weights = item.net_weights && Array.isArray(item.net_weights) 
         ? item.net_weights 
@@ -867,6 +967,14 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
                     Enable
                   </label>
                 </div>
+              ) : field.type === 'textarea' ? (
+                <Textarea
+                  value={form[field.key] != null ? form[field.key] : ''}
+                  onChange={(e) => setForm({ ...form, [field.key]: e.target.value })}
+                  className="mt-1"
+                  placeholder={field.placeholder}
+                  rows={3}
+                />
               ) : (
                 <Input
                   type={field.type || 'text'}
@@ -878,6 +986,7 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
                     setForm({ ...form, [field.key]: value });
                   }}
                   className="mt-1"
+                  placeholder={field.placeholder}
                 />
               )}
             </div>

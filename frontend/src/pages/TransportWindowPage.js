@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
+import DeliveryConfirmationDialog from '../components/DeliveryConfirmationDialog';
 
 const TransportWindowPage = () => {
   const navigate = useNavigate();
@@ -30,6 +31,8 @@ const TransportWindowPage = () => {
   const [showBookingModal, setShowBookingModal] = useState(false);
   const [bookingType, setBookingType] = useState(null);
   const [bookingItem, setBookingItem] = useState(null);
+  const [showDeliveryConfirmation, setShowDeliveryConfirmation] = useState(false);
+  const [deliveryConfirmationData, setDeliveryConfirmationData] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -129,7 +132,65 @@ const TransportWindowPage = () => {
       setInwardEXW(finalInwardEXW);
       
       // Import logistics from imports collection
-      const finalInwardImport = importsRes.data || [];
+      // Get imports that are CLEARED (ready for transport) or other active statuses
+      const allImports = importsRes.data || [];
+      
+      // Get transport_inward records that came from imports (source="IMPORT")
+      const importTransports = inward.filter(t => t.source === 'IMPORT');
+      
+      // Combine:
+      // 1. CLEARED imports (ready to move to transport)
+      // 2. Other active imports (not COMPLETED) that haven't been moved to transport yet
+      // 3. Transport records that came from imports (already moved to transport)
+      const importTransportsByPoId = new Map();
+      importTransports.forEach(t => {
+        if (t.po_id) {
+          importTransportsByPoId.set(t.po_id, t);
+        }
+      });
+      
+      // Get active imports (CLEARED or other active statuses, excluding those already in transport)
+      const activeImports = allImports.filter(imp => {
+        // Always include CLEARED imports (ready for transport booking)
+        if (imp.status === 'CLEARED') return true;
+        // Exclude COMPLETED imports that have been moved to transport
+        if (imp.status === 'COMPLETED' && importTransportsByPoId.has(imp.po_id)) return false;
+        // Include other active imports that haven't been moved to transport
+        if (imp.status !== 'COMPLETED' && !importTransportsByPoId.has(imp.po_id)) return true;
+        return false;
+      });
+      
+      // Merge active imports with transport records, using po_id as key to avoid duplicates
+      const importMap = new Map();
+      
+      // Add active imports (CLEARED or other active statuses)
+      activeImports.forEach(imp => {
+        if (imp.po_id) {
+          importMap.set(imp.po_id, {
+            ...imp,
+            isImportRecord: true
+          });
+        }
+      });
+      
+      // Add transport records (these override imports if they exist, preserving import_number)
+      importTransports.forEach(transport => {
+        if (transport.po_id) {
+          // Find the original import record to preserve import_number and other details
+          const originalImport = allImports.find(imp => imp.po_id === transport.po_id);
+          importMap.set(transport.po_id, {
+            ...transport,
+            ...originalImport, // Merge import details (import_number, document_checklist, etc.)
+            transport_number: transport.transport_number,
+            transport_booked: !!transport.transport_number,
+            isTransportRecord: true,
+            // Preserve import status if it's CLEARED (for display purposes)
+            status: originalImport?.status === 'CLEARED' ? 'CLEARED' : transport.status
+          });
+        }
+      });
+      
+      const finalInwardImport = Array.from(importMap.values());
       setInwardImport(finalInwardImport);
       
       const outward = outwardRes.data || [];
@@ -167,8 +228,8 @@ const TransportWindowPage = () => {
       // Only include local/domestic orders - exclude export incoterms (CIF, FOB, etc.)
       const unbookedJobs = jobsData.filter(job => {
         const incoterm = (job.incoterm || '').toUpperCase();
-        // Exclude CIF, FOB, CFR, and other export incoterms from local dispatch
-        const isExportIncoterm = ['CIF', 'FOB', 'CFR', 'FCA', 'CPT', 'CIP', 'DAP', 'DPU', 'DDP'].includes(incoterm);
+        // Exclude CIF, FOB, CFR, and other export incoterms from local dispatch (DDP is included in local)
+        const isExportIncoterm = ['CIF', 'FOB', 'CFR', 'FCA', 'CPT', 'CIP', 'DAP', 'DPU'].includes(incoterm);
         
         return job.status === 'ready_for_dispatch' &&
           !existingJobIds.has(job.id) &&
@@ -190,6 +251,9 @@ const TransportWindowPage = () => {
           total_quantity: job.quantity || job.total_weight_mt,
           unit: job.unit || 'MT',
           packaging: job.packaging,
+          packaging_type: job.packaging_type,
+          net_weight_kg: job.net_weight_kg,
+          items: job.items, // Include items array for multi-product jobs
           transport_type: 'LOCAL',
           status: 'NOT_BOOKED',
           transport_number: null,
@@ -211,7 +275,7 @@ const TransportWindowPage = () => {
       const unbookedContainerJobs = jobsData.filter(job => {
         const incoterm = (job.incoterm || '').toUpperCase();
         // Include CIF, FOB, CFR, and other export incoterms
-        const isExportIncoterm = ['CIF', 'FOB', 'CFR', 'FCA', 'CPT', 'CIP', 'DAP', 'DPU', 'DDP'].includes(incoterm);
+        const isExportIncoterm = ['CIF', 'FOB', 'CFR', 'FCA', 'CPT', 'CIP', 'DAP', 'DPU'].includes(incoterm);
         
         return job.status === 'ready_for_dispatch' &&
           !allContainerJobIds.has(job.id) &&
@@ -239,6 +303,26 @@ const TransportWindowPage = () => {
         }
       });
 
+      // Helper function to get delivery date from transport record
+      const getDeliveryDateFromTransport = (transport) => {
+        // Check if transport has delivery_date directly
+        if (transport.delivery_date) return new Date(transport.delivery_date);
+        if (transport.expected_delivery_date) return new Date(transport.expected_delivery_date);
+        if (transport.expected_delivery) return new Date(transport.expected_delivery);
+        
+        // If transport has job_order_id, try to find the job in jobsData
+        if (transport.job_order_id) {
+          const job = jobsData.find(j => j.id === transport.job_order_id);
+          if (job) {
+            if (job.delivery_date) return new Date(job.delivery_date);
+            if (job.expected_delivery_date) return new Date(job.expected_delivery_date);
+          }
+        }
+        
+        // Fallback to a far future date if no delivery date found
+        return new Date('9999-12-31');
+      };
+
       const finalExportContainer = [
         ...Array.from(bookedContainerByJob.values()),
         ...unbookedContainerJobs.map(job => ({
@@ -261,12 +345,18 @@ const TransportWindowPage = () => {
           total_weight_mt: job.total_weight_mt,
           incoterm: job.incoterm
         }))
-      ];
+      ].sort((a, b) => {
+        // Sort by delivery date (ascending - earliest first)
+        const dateA = getDeliveryDateFromTransport(a);
+        const dateB = getDeliveryDateFromTransport(b);
+        return dateA - dateB;
+      });
       
       // Debug: Log CRO details for export containers
       console.log('🚢 Export Container Data:', finalExportContainer.map(t => ({
         id: t.id,
         job_number: t.job_number,
+        delivery_date: t.delivery_date,
         si_cutoff: t.si_cutoff,
         pull_out_date: t.pull_out_date,
         gate_in_date: t.gate_in_date,
@@ -375,6 +465,44 @@ const TransportWindowPage = () => {
   const handleViewDetails = (transport) => {
     setSelectedTransport(transport);
     setShowDetailModal(true);
+  };
+
+  const handleConfirmDelivery = async (transport) => {
+    // Get job order and delivery order details
+    try {
+      const jobOrder = await api.get(`/job-orders/${transport.job_order_id}`);
+      let deliveryOrder = null;
+      
+      // Try to get delivery order
+      try {
+        const doRes = await api.get(`/delivery-orders`);
+        deliveryOrder = doRes.data.find(d => d.job_order_id === transport.job_order_id);
+      } catch (err) {
+        console.log('No delivery order found');
+      }
+
+      setDeliveryConfirmationData({
+        transport,
+        jobOrder: jobOrder.data,
+        deliveryOrder
+      });
+      setShowDeliveryConfirmation(true);
+    } catch (error) {
+      console.error('Failed to load order details:', error);
+      toast.error('Failed to load order details');
+    }
+  };
+
+  const handleDeliveryConfirmed = async (result) => {
+    // Refresh data after delivery confirmation
+    loadData();
+    
+    // If partial delivery, navigate to partial deliveries page
+    if (result.is_partial) {
+      setTimeout(() => {
+        navigate('/outbound-partial-deliveries');
+      }, 2000);
+    }
   };
 
   // Stats
@@ -497,88 +625,97 @@ const TransportWindowPage = () => {
           <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[calc(100vh-100px)]">
           {/* LEFT: INWARD TABLE SECTION */}
-          <div className="space-y-4">
+          <div className="flex flex-col space-y-4 min-h-0">
             <h2 className="text-xl font-semibold text-foreground">INWARD TABLE</h2>
-            <div className="space-y-6">
+            <div className="flex flex-col space-y-6 flex-1 min-h-0">
               {/* Table 1: Exworks (procurement) */}
-              <div>
-                <div className="mb-3 px-1">
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="mb-3 px-1 flex-shrink-0">
                   <h3 className="font-semibold text-base">Table 1: Exworks (procurement)/DDP</h3>
                 </div>
-                <InwardEXWTab 
-                  transports={[...inwardDDP, ...inwardEXW]} 
-                  onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'inward')}
-                  onRefresh={loadData}
-                  onViewDetails={handleViewDetails}
-                  onBookTransport={(item) => {
-                    // Determine booking type based on incoterm
-                    const bookingType = (item.incoterm === 'DDP' || item.source === 'PO_DDP') ? 'INWARD_DDP' : 'INWARD_EXW';
-                    setBookingType(bookingType);
-                    setBookingItem(item);
-                    setShowBookingModal(true);
-                  }}
-                />
+                <div className="flex-1 flex flex-col min-h-0">
+                  <InwardEXWTab 
+                    transports={[...inwardDDP, ...inwardEXW]} 
+                    onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'inward')}
+                    onRefresh={loadData}
+                    onViewDetails={handleViewDetails}
+                    onBookTransport={(item) => {
+                      // Determine booking type based on incoterm
+                      const bookingType = (item.incoterm === 'DDP' || item.source === 'PO_DDP') ? 'INWARD_DDP' : 'INWARD_EXW';
+                      setBookingType(bookingType);
+                      setBookingItem(item);
+                      setShowBookingModal(true);
+                    }}
+                  />
+                </div>
               </div>
 
               {/* Table 2: Logistics inward */}
-              <div>
-                <div className="mb-3 px-1">
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="mb-3 px-1 flex-shrink-0">
                   <h3 className="font-semibold text-base">Table 2: Logistics inward</h3>
                 </div>
-                <InwardImportTab 
-                  imports={inwardImport}
-                  onRefresh={loadData}
-                  onViewDetails={handleViewDetails}
-                  onBookTransport={(item) => {
-                    setBookingType('INWARD_IMPORT');
-                    setBookingItem(item);
-                    setShowBookingModal(true);
-                  }}
-                />
+                <div className="flex-1 flex flex-col min-h-0">
+                  <InwardImportTab 
+                    imports={inwardImport}
+                    onRefresh={loadData}
+                    onViewDetails={handleViewDetails}
+                    onBookTransport={(item) => {
+                      setBookingType('INWARD_IMPORT');
+                      setBookingItem(item);
+                      setShowBookingModal(true);
+                    }}
+                  />
+                </div>
               </div>
             </div>
           </div>
 
           {/* RIGHT: OUTWARD (Dispatch) SECTION */}
-          <div className="space-y-4">
+          <div className="flex flex-col space-y-4 min-h-0">
             <h2 className="text-xl font-semibold text-foreground">OUTWARD (Dispatch)</h2>
-            <div className="space-y-6">
+            <div className="flex flex-col space-y-6 flex-1 min-h-0">
               {/* Table 3: Container shipping */}
-              <div>
-                <div className="mb-3 px-1">
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="mb-3 px-1 flex-shrink-0">
                   <h3 className="font-semibold text-base">Table 3: Dispatch Export</h3>
                 </div>
-                <ExportContainerTab 
-                  transports={exportContainer}
-                  onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
-                  onRefresh={loadData}
-                  onViewDetails={handleViewDetails}
-                  onBookTransport={(item) => {
-                    setBookingType('EXPORT_CONTAINER');
-                    setBookingItem(item);
-                    setShowBookingModal(true);
-                  }}
-                />
+                <div className="flex-1 flex flex-col min-h-0">
+                  <ExportContainerTab 
+                    transports={exportContainer}
+                    onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
+                    onRefresh={loadData}
+                    onViewDetails={handleViewDetails}
+                    onBookTransport={(item) => {
+                      setBookingType('EXPORT_CONTAINER');
+                      setBookingItem(item);
+                      setShowBookingModal(true);
+                    }}
+                  />
+                </div>
               </div>
 
               {/* Table 4: Local orders */}
-              <div>
-                <div className="mb-3 px-1">
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="mb-3 px-1 flex-shrink-0">
                   <h3 className="font-semibold text-base">Table 4: Local orders</h3>
                 </div>
-                <LocalDispatchTab 
-                  transports={localDispatch}
-                  onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
-                  onRefresh={loadData}
-                  onViewDetails={handleViewDetails}
-                  onBookTransport={(item) => {
-                    setBookingType('LOCAL_DISPATCH');
-                    setBookingItem(item);
-                    setShowBookingModal(true);
-                  }}
-                />
+                <div className="flex-1 flex flex-col min-h-0">
+                  <LocalDispatchTab 
+                    transports={localDispatch}
+                    onStatusUpdate={(id, s) => handleStatusUpdate(id, s, 'outward')}
+                    onRefresh={loadData}
+                    onViewDetails={handleViewDetails}
+                    onBookTransport={(item) => {
+                      setBookingType('LOCAL_DISPATCH');
+                      setBookingItem(item);
+                      setShowBookingModal(true);
+                    }}
+                    onConfirmDelivery={handleConfirmDelivery}
+                  />
+                </div>
               </div>
             </div>
           </div>
@@ -696,6 +833,18 @@ const TransportWindowPage = () => {
           }}
         />
       )}
+
+      {/* Delivery Confirmation Dialog */}
+      {deliveryConfirmationData && (
+        <DeliveryConfirmationDialog
+          open={showDeliveryConfirmation}
+          onOpenChange={setShowDeliveryConfirmation}
+          transport={deliveryConfirmationData.transport}
+          deliveryOrder={deliveryConfirmationData.deliveryOrder}
+          jobOrder={deliveryConfirmationData.jobOrder}
+          onSuccess={handleDeliveryConfirmed}
+        />
+      )}
     </div>
   );
 };
@@ -785,6 +934,7 @@ const InwardDDPTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
               </tr>
             </thead>
             <tbody>
+             
               {transports.map((transport) => (
                 <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
                   <td className="p-3 text-emerald-400 font-mono">{transport.po_number || '-'}</td>
@@ -868,8 +1018,26 @@ const InwardDDPTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
 // ==================== INWARD EXW TAB ====================
 const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, onBookTransport }) => {
   
-  // Filter out COMPLETED status transports
-  const filteredTransports = transports.filter(t => t.status !== 'COMPLETED');
+  // Filter out COMPLETED status transports and sort by delivery date
+  const filteredTransports = useMemo(() => {
+    const filtered = transports.filter(t => t.status !== 'COMPLETED');
+    
+    // Sort by delivery date (earliest first)
+    return filtered.sort((a, b) => {
+      const dateA = a.delivery_date || a.expected_delivery;
+      const dateB = b.delivery_date || b.expected_delivery;
+      
+      // If both have dates, sort by date
+      if (dateA && dateB) {
+        return new Date(dateA) - new Date(dateB);
+      }
+      // If only one has a date, prioritize it
+      if (dateA && !dateB) return -1;
+      if (!dateA && dateB) return 1;
+      // If neither has a date, maintain original order
+      return 0;
+    });
+  }, [transports]);
   
   // Helper to determine if transport is DDP
   const isDDP = (transport) => {
@@ -919,9 +1087,24 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
     return 'KG';
   };
 
+  // Helper function to check if delivery date is overdue (more than 3 days without booking)
+  const isDeliveryDateOverdue = (transport) => {
+    if (transport.transport_number) return false; // Already booked
+    const deliveryDate = transport.delivery_date || transport.expected_delivery;
+    if (!deliveryDate) return false;
+    
+    const delivery = new Date(deliveryDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    delivery.setHours(0, 0, 0, 0);
+    
+    const daysDiff = Math.floor((today - delivery) / (1000 * 60 * 60 * 24));
+    return daysDiff > 3;
+  };
+
   return (
-    <div className="glass rounded-lg border border-border bg-white shadow-sm">
-      <div className="p-4 border-b border-border flex justify-between items-center">
+    <div className="glass rounded-lg border border-border bg-white shadow-sm flex flex-col h-full">
+      <div className="p-4 border-b border-border flex justify-between items-center flex-shrink-0">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <ArrowDownToLine className="w-5 h-5 text-blue-400" />
@@ -938,14 +1121,14 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
       </div>
 
       {filteredTransports.length === 0 ? (
-        <div className="p-8 text-center">
+        <div className="p-8 text-center flex-shrink-0">
           <Truck className="w-12 h-12 text-muted-foreground mx-auto mb-4 opacity-50" />
           <p className="text-muted-foreground">No EXW/DDP inward transports</p>
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
           <table className="w-full">
-            <thead className="bg-muted/40">
+            <thead className="bg-muted/40 sticky top-0">
               <tr>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">PO Number</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Supplier</th>
@@ -960,6 +1143,9 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
             <tbody>
               {filteredTransports.map((transport) => {
                 const isDDPTransport = isDDP(transport);
+                const isOverdue = isDeliveryDateOverdue(transport);
+                const deliveryDate = transport.delivery_date || transport.expected_delivery;
+                
                 return (
                   <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
                     <td className="p-3 font-mono">
@@ -1001,8 +1187,11 @@ const InwardEXWTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, on
                     </td>
                     <td className="p-3 font-mono">{transport.vehicle_number || '-'}</td>
                     <td className="p-3 text-sm">
-                      {transport.delivery_date ? new Date(transport.delivery_date).toLocaleDateString() : 
-                       transport.expected_delivery ? new Date(transport.expected_delivery).toLocaleDateString() : '-'}
+                      {deliveryDate ? (
+                        <span className={`font-mono ${isOverdue ? 'text-red-400 font-semibold' : ''}`}>
+                          {new Date(deliveryDate).toLocaleDateString()}
+                        </span>
+                      ) : '-'}
                     </td>
                     <td className="p-3">
                       <div className="flex flex-col gap-1">
@@ -1067,7 +1256,25 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
       default: return 'bg-gray-500/20 text-gray-400';
     }
   };
-  
+  // Show all imports passed to this component (already filtered in loadData)
+  // This includes CLEARED imports and transport records from imports
+  // Sort by delivery date (earliest first)
+  const filteredImports = useMemo(() => {
+    return [...imports].sort((a, b) => {
+      const dateA = a.delivery_date || a.expected_delivery || a.eta;
+      const dateB = b.delivery_date || b.expected_delivery || b.eta;
+      
+      // If both have dates, sort by date
+      if (dateA && dateB) {
+        return new Date(dateA) - new Date(dateB);
+      }
+      // If only one has a date, prioritize it
+      if (dateA && !dateB) return -1;
+      if (!dateA && dateB) return 1;
+      // If neither has a date, maintain original order
+      return 0;
+    });
+  }, [imports]);
   const getStatusDisplay = (importRecord) => {
     // If no transport_number, show NOT_BOOKED status
     if (!importRecord.transport_number && !importRecord.transport_booked) {
@@ -1076,9 +1283,25 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
     return importRecord.status || 'PENDING';
   };
 
+  // Helper function to check if delivery date is overdue (more than 3 days without booking)
+  const isDeliveryDateOverdue = (importRecord) => {
+    const hasTransport = importRecord.transport_number || importRecord.transport_booked;
+    if (hasTransport) return false; // Already booked
+    const deliveryDate = importRecord.delivery_date || importRecord.expected_delivery || importRecord.eta;
+    if (!deliveryDate) return false;
+    
+    const delivery = new Date(deliveryDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    delivery.setHours(0, 0, 0, 0);
+    
+    const daysDiff = Math.floor((today - delivery) / (1000 * 60 * 60 * 24));
+    return daysDiff > 3;
+  };
+
   return (
-    <div className="glass rounded-lg border border-border bg-white shadow-sm">
-      <div className="p-4 border-b border-border flex justify-between items-center">
+    <div className="glass rounded-lg border border-border bg-white shadow-sm flex flex-col h-full">
+      <div className="p-4 border-b border-border flex justify-between items-center flex-shrink-0">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Ship className="w-5 h-5 text-purple-400" />
@@ -1094,15 +1317,15 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
         </Button>
       </div>
 
-      {imports.length === 0 ? (
-        <div className="p-8 text-center">
+      {filteredImports.length === 0 ? (
+        <div className="p-8 text-center flex-shrink-0">
           <Ship className="w-12 h-12 text-muted-foreground mx-auto mb-4 opacity-50" />
           <p className="text-muted-foreground">No import shipments</p>
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
           <table className="w-full">
-            <thead className="bg-muted/40">
+            <thead className="bg-muted/40 sticky top-0">
               <tr>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Import #</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">PO Number</th>
@@ -1117,11 +1340,13 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
               </tr>
             </thead>
             <tbody>
-              {imports.map((imp) => {
+              {filteredImports.map((imp) => {
                 const docs = imp.document_checklist || {};
                 const docsComplete = Object.values(docs).filter(Boolean).length;
                 const docsTotal = Object.keys(docs).length || 5;
                 const hasTransport = imp.transport_number || imp.transport_booked;
+                const isOverdue = isDeliveryDateOverdue(imp);
+                const deliveryDate = imp.delivery_date || imp.expected_delivery || imp.eta;
                 
                 return (
                   <tr key={imp.id} className="border-b border-border/50 hover:bg-muted/10">
@@ -1166,9 +1391,11 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
                       )}
                     </td>
                     <td className="p-3 text-sm">
-                      {imp.delivery_date ? new Date(imp.delivery_date).toLocaleDateString() : 
-                       imp.expected_delivery ? new Date(imp.expected_delivery).toLocaleDateString() : 
-                       imp.eta ? new Date(imp.eta).toLocaleDateString() : '-'}
+                      {deliveryDate ? (
+                        <span className={`font-mono ${isOverdue ? 'text-red-400 font-semibold' : ''}`}>
+                          {new Date(deliveryDate).toLocaleDateString()}
+                        </span>
+                      ) : '-'}
                     </td>
                     <td className="p-3">
                       <Badge className="bg-purple-500/20 text-purple-400">
@@ -1942,7 +2169,7 @@ const JobsReadyForDispatchTab = ({ jobs, onRefresh, onBookTransport }) => {
 };
 
 // ==================== LOCAL DISPATCH TAB ====================
-const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, onBookTransport }) => {
+const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails, onBookTransport, onConfirmDelivery }) => {
   
   const getStatusColor = (status) => {
     switch (status) {
@@ -1963,9 +2190,40 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
     return transport.status || 'PENDING';
   };
 
+  // Helper function to check if delivery date is overdue (more than 3 days without booking)
+  const isDeliveryDateOverdue = (transport) => {
+    if (transport.transport_number) return false; // Already booked
+    const deliveryDate = transport.delivery_date || transport.expected_delivery_date;
+    if (!deliveryDate) return false;
+    
+    const delivery = new Date(deliveryDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    delivery.setHours(0, 0, 0, 0);
+    
+    const daysDiff = Math.floor((today - delivery) / (1000 * 60 * 60 * 24));
+    return daysDiff > 3;
+  };
+
+  // Helper function to get delivery date from transport for sorting
+  const getDeliveryDateForSorting = (transport) => {
+    if (transport.delivery_date) return new Date(transport.delivery_date);
+    if (transport.expected_delivery_date) return new Date(transport.expected_delivery_date);
+    if (transport.expected_delivery) return new Date(transport.expected_delivery);
+    // Fallback to a far future date if no delivery date found
+    return new Date('9999-12-31');
+  };
+
+  // Sort transports by delivery date (ascending - earliest first)
+  const sortedTransports = [...transports].sort((a, b) => {
+    const dateA = getDeliveryDateForSorting(a);
+    const dateB = getDeliveryDateForSorting(b);
+    return dateA - dateB;
+  });
+
   return (
-    <div className="glass rounded-lg border border-border">
-      <div className="p-4 border-b border-border flex justify-between items-center">
+    <div className="glass rounded-lg border border-border flex flex-col h-full">
+      <div className="p-4 border-b border-border flex justify-between items-center flex-shrink-0">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Home className="w-5 h-5 text-amber-400" />
@@ -1981,15 +2239,15 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
         </Button>
       </div>
 
-      {transports.length === 0 ? (
-        <div className="p-8 text-center">
+      {sortedTransports.length === 0 ? (
+        <div className="p-8 text-center flex-shrink-0">
           <Truck className="w-12 h-12 text-muted-foreground mx-auto mb-4 opacity-50" />
           <p className="text-muted-foreground">No local dispatches</p>
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
           <table className="w-full">
-            <thead className="bg-muted/40">
+            <thead className="bg-muted/40 sticky top-0">
               <tr>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Job Orders</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Customer</th>
@@ -2003,8 +2261,50 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
               </tr>
             </thead>
             <tbody>
-              {transports.map((transport) => {
-                const qtyMT = parseFloat(transport.quantity) || parseFloat(transport.total_weight_mt) || 0;
+              {sortedTransports.map((transport) => {
+                // Calculate MT PRODUCT (product-specific MT) instead of total_weight_mt
+                // This matches the MT PRODUCT column in Job Orders page
+                let qtyMT = 0;
+                
+                // If transport has items array (multi-product job), calculate MT for each item
+                if (transport.items && transport.items.length > 0) {
+                  const itemMTs = transport.items.map(item => {
+                    // For packaged items: (net_weight_kg * quantity) / 1000
+                    // For bulk: quantity is already in MT
+                    if (item.packaging && item.packaging !== 'Bulk' && item.net_weight_kg) {
+                      return ((item.net_weight_kg * (item.quantity || 0)) / 1000);
+                    } else {
+                      // Bulk or quantity is already in MT
+                      return (item.quantity || 0);
+                    }
+                  });
+                  // Sum all item MTs
+                  qtyMT = itemMTs.reduce((sum, mt) => sum + mt, 0);
+                } else {
+                  // Calculate from transport-level data
+                  const packaging = transport.packaging || transport.packaging_type;
+                  const netWeightKg = transport.net_weight_kg;
+                  const quantity = parseFloat(transport.quantity) || 0;
+                  
+                  if (packaging && packaging !== 'Bulk' && netWeightKg && quantity > 0) {
+                    // Packaged product: calculate MT PRODUCT from net_weight_kg * quantity / 1000
+                    qtyMT = (netWeightKg * quantity) / 1000;
+                  } else if (packaging && packaging !== 'Bulk' && transport.total_weight_mt) {
+                    // Packaged product but no net_weight_kg: use total_weight_mt as fallback
+                    // (This assumes total_weight_mt is the product MT for single-product jobs)
+                    qtyMT = parseFloat(transport.total_weight_mt) || 0;
+                  } else if (!packaging || packaging === 'Bulk') {
+                    // Bulk product: quantity is already in MT, or use total_weight_mt
+                    qtyMT = quantity > 0 ? quantity : (parseFloat(transport.total_weight_mt) || 0);
+                  } else {
+                    // Last fallback: use total_weight_mt or quantity
+                    qtyMT = parseFloat(transport.total_weight_mt) || quantity;
+                  }
+                }
+                
+                const isOverdue = isDeliveryDateOverdue(transport);
+                const deliveryDate = transport.delivery_date || transport.expected_delivery_date;
+                
                 return (
                 <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
                   <td className="p-3 text-amber-400 font-mono">
@@ -2026,7 +2326,11 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
                   </td>
                   <td className="p-3 font-mono">{transport.vehicle_number || '-'}</td>
                   <td className="p-3 text-sm">
-                    {transport.delivery_date ? new Date(transport.delivery_date).toLocaleDateString() : '-'}
+                    {deliveryDate ? (
+                      <span className={`font-mono ${isOverdue ? 'text-red-400 font-semibold' : ''}`}>
+                        {new Date(deliveryDate).toLocaleDateString()}
+                      </span>
+                    ) : '-'}
                   </td>
                   <td className="p-3">
                     <div className="flex flex-col gap-1">
@@ -2064,6 +2368,16 @@ const LocalDispatchTab = ({ transports, onStatusUpdate, onRefresh, onViewDetails
                           Dispatch
                         </Button>
                       )}
+                      {transport.status === 'DISPATCHED' && transport.job_order_id && (
+                        <Button 
+                          size="sm" 
+                          variant="success"
+                          onClick={() => onConfirmDelivery(transport)}
+                        >
+                          <Check className="w-4 h-4 mr-1" />
+                          Confirm Delivery
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -2099,9 +2413,26 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
     return transport.status || 'PENDING';
   };
 
+  // Helper function to check if delivery date is overdue (more than 3 days without booking)
+  const isDeliveryDateOverdue = (transport) => {
+    if (transport.transport_number) return false; // Already booked
+    const deliveryDate = transport.delivery_date || transport.expected_delivery_date;
+    if (!deliveryDate) return false;
+    
+    const delivery = new Date(deliveryDate);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    delivery.setHours(0, 0, 0, 0);
+    
+    const daysDiff = Math.floor((today - delivery) / (1000 * 60 * 60 * 24));
+    return daysDiff > 3;
+  };
+
+  const filteredTransports = transports.filter(transport => transport.status !== 'BOOKED');
+
   return (
-    <div className="glass rounded-lg border border-border bg-background shadow-sm">
-      <div className="p-4 border-b border-border flex justify-between items-center">
+    <div className="glass rounded-lg border border-border bg-background shadow-sm flex flex-col h-full">
+      <div className="p-4 border-b border-border flex justify-between items-center flex-shrink-0">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <Globe className="w-5 h-5 text-green-400" />
@@ -2117,18 +2448,19 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
         </Button>
       </div>
 
-      {transports.length === 0 ? (
-        <div className="p-8 text-center">
+      {filteredTransports.length === 0 ? (
+        <div className="p-8 text-center flex-shrink-0">
           <Container className="w-12 h-12 text-muted-foreground mx-auto mb-4 opacity-50" />
           <p className="text-muted-foreground">No export containers</p>
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
           <table className="w-full">
-            <thead className="bg-muted/40">
+            <thead className="bg-muted/40 sticky top-0">
               <tr>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Job Order</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Product</th>
+                <th className="p-3 text-left text-sm font-medium text-muted-foreground">Delivery Date</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Containers</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Shipping Line</th>
                 <th className="p-3 text-left text-sm font-medium text-muted-foreground">Vessel</th>
@@ -2145,8 +2477,10 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
               </tr>
             </thead>
             <tbody>
-              {transports.map((transport) => {
+              {filteredTransports.map((transport) => {
                 const qtyMT = parseFloat(transport.quantity) || parseFloat(transport.total_weight_mt) || 0;
+                const isOverdue = isDeliveryDateOverdue(transport);
+                const deliveryDate = transport.delivery_date || transport.expected_delivery_date;
                 
                 // Remove duplicate job numbers
                 const jobNumbers = transport.job_number 
@@ -2172,6 +2506,13 @@ const ExportContainerTab = ({ transports, onStatusUpdate, onRefresh, onViewDetai
                   <td className="p-3 font-mono text-green-400">{jobOrderDisplay}</td>
                   <td className="p-3 text-sm max-w-[200px] truncate" title={uniqueProductNames.join(', ')}>
                     {productDisplay}
+                  </td>
+                  <td className="p-3 text-sm">
+                    {deliveryDate ? (
+                      <span className={`font-mono ${isOverdue ? 'text-red-400 font-semibold' : ''}`}>
+                        {new Date(deliveryDate).toLocaleDateString()}
+                      </span>
+                    ) : '-'}
                   </td>
                   <td className="p-3">
                     {transport.container_count ? (

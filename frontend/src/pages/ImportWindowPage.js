@@ -194,15 +194,35 @@ const ImportWindowPage = () => {
                 </tr>
               ) : (
                 getTabImports().map((imp) => {
-                  // Get first product or summary
-                  const firstItem = imp.lines?.[0] || imp.po_items?.[0];
-                  const productName = firstItem?.item_name || firstItem?.product_name || firstItem?.name || '-';
+                  // Get all products from lines or po_items
+                  const allItems = imp.lines || imp.po_items || [];
+                  const firstItem = allItems[0];
                   const totalQty = imp.total_quantity || (firstItem?.qty || firstItem?.quantity || 0);
                   const uom = imp.total_uom || imp.total_unit || firstItem?.uom || firstItem?.unit || 'units';
+                  
+                  // Display all products: show first 2, then count if more
+                  const getProductDisplay = () => {
+                    if (allItems.length === 0) return '-';
+                    if (allItems.length === 1) {
+                      return allItems[0]?.item_name || allItems[0]?.product_name || allItems[0]?.name || '-';
+                    }
+                    // Show first 2 products, then count
+                    const firstTwo = allItems.slice(0, 2).map(item => 
+                      item?.item_name || item?.product_name || item?.name || 'Unknown'
+                    ).join(', ');
+                    if (allItems.length === 2) {
+                      return firstTwo;
+                    }
+                    return `${firstTwo} (+${allItems.length - 2} more)`;
+                  };
+                  
+                  const productDisplay = getProductDisplay();
 
                   return (
                     <tr key={imp.id} className="border-b border-border/50 hover:bg-muted/10">
-                      <td className="p-3 font-medium">{productName}</td>
+                      <td className="p-3 font-medium" title={allItems.map(item => item?.item_name || item?.product_name || item?.name || 'Unknown').join(', ')}>
+                        {productDisplay}
+                      </td>
                       <td className="p-3 font-mono">{totalQty} {uom}</td>
                       <td className="p-3 text-blue-400">{imp.po_number || '-'}</td>
                       <td className="p-3">{imp.supplier_name || '-'}</td>
@@ -371,22 +391,24 @@ const ImportDetailsModal = ({ importRecord, requiredDocs, onClose, onMoveToTrans
           </div>
 
           {/* Items */}
-          {importRecord.items && importRecord.items.length > 0 && (
+          {(importRecord.items && importRecord.items.length > 0) || (importRecord.lines && importRecord.lines.length > 0) || (importRecord.po_items && importRecord.po_items.length > 0) ? (
             <div>
               <h3 className="font-semibold mb-2 flex items-center gap-2">
                 <Package className="w-4 h-4" />
-                Items
+                Items ({((importRecord.items || importRecord.lines || importRecord.po_items || []).length)})
               </h3>
               <div className="bg-muted/20 rounded-lg p-3">
-                {importRecord.items.map((item, idx) => (
-                  <div key={idx} className="flex justify-between py-1">
-                    <span>{item.name || item.product_name}</span>
-                    <span className="text-muted-foreground">{item.quantity} {item.unit || 'units'}</span>
+                {(importRecord.items || importRecord.lines || importRecord.po_items || []).map((item, idx) => (
+                  <div key={idx} className="flex justify-between py-1 border-b border-border/30 last:border-0">
+                    <span className="font-medium">{item.item_name || item.product_name || item.name || 'Unknown'}</span>
+                    <span className="text-muted-foreground">
+                      {item.qty || item.quantity || 0} {item.uom || item.unit || 'units'}
+                    </span>
                   </div>
                 ))}
               </div>
             </div>
-          )}
+          ) : null}
 
           {/* Required Documents */}
           <div>

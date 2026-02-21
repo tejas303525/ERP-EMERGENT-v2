@@ -3,7 +3,7 @@ import { purchaseOrderAPI, emailAPI, quotationAPI, pdfAPI } from '../lib/api';
 import api from '../lib/api';
 import { Button } from '../components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
-import { DollarSign, Check, X, Send, Mail, AlertCircle, CheckCircle, Clock, Eye, FileText, Download, Calculator, Truck } from 'lucide-react';
+import { DollarSign, Check, X, Send, Mail, AlertCircle, CheckCircle, Clock, Eye, FileText, Download, Calculator, Truck, Receipt } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
 import CostingModal from '../components/CostingModal';
@@ -13,6 +13,7 @@ const FinanceApprovalPage = () => {
   const [approvedPOs, setApprovedPOs] = useState([]);
   const [pendingQuotations, setPendingQuotations] = useState([]);
   const [emailOutbox, setEmailOutbox] = useState({ smtp_configured: false, emails: [] });
+  const [grnSummary, setGrnSummary] = useState([]);
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('quotations');
   const [viewPO, setViewPO] = useState(null);
@@ -28,19 +29,24 @@ const FinanceApprovalPage = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [pendingPORes, approvedPORes, quotationsRes, emailRes] = await Promise.all([
+      const [pendingPORes, approvedPORes, quotationsRes, emailRes, grnSummaryRes] = await Promise.all([
         purchaseOrderAPI.getPendingApproval(),
         purchaseOrderAPI.getAll('APPROVED'),
         quotationAPI.getPendingFinanceApproval().catch((err) => {
           console.error('Failed to load quotations:', err);
           return { data: [] };
         }),
-        emailAPI.getOutbox()
+        emailAPI.getOutbox(),
+        api.get('/grn/summary?review_status=PENDING_PAYABLES').catch((err) => {
+          console.error('Failed to load GRN summary:', err);
+          return { data: [] };
+        })
       ]);
       setPendingPOs(pendingPORes.data);
       setApprovedPOs(approvedPORes.data);
       setPendingQuotations(quotationsRes.data || []);
       setEmailOutbox(emailRes.data);
+      setGrnSummary(grnSummaryRes.data || []);
     } catch (error) {
       console.error('Failed to load data:', error);
       toast.error('Failed to load data');
@@ -145,6 +151,11 @@ const FinanceApprovalPage = () => {
     return colors[status] || colors.DRAFT;
   };
 
+  // Helper function to get discrepancies for a PO
+  const getPODiscrepancies = (poNumber) => {
+    return grnSummary.filter(g => g.po_number === poNumber);
+  };
+
   return (
     <div className="p-6 max-w-[1600px] mx-auto" data-testid="finance-approval-page">
       {/* Header */}
@@ -175,6 +186,7 @@ const FinanceApprovalPage = () => {
           { id: 'quotations', label: 'Quotations (PFI)', count: pendingQuotations.length, icon: FileText },
           { id: 'pending', label: 'Purchase Orders', count: pendingPOs.length, icon: DollarSign },
           { id: 'approved', label: 'Approved POs (Ready to Send)', count: approvedPOs.length, icon: Send },
+          { id: 'grn-summary', label: 'GRN Summary', count: grnSummary.filter(g => g.variance_flag !== 'NONE' || g.remaining_qty > 0).length, icon: Receipt },
           { id: 'outbox', label: 'Email Outbox', count: emailOutbox.emails?.length || 0, icon: Mail },
         ].map((tab) => (
           <Button
@@ -237,6 +249,7 @@ const FinanceApprovalPage = () => {
                   <POCard
                     key={po.id}
                     po={po}
+                    discrepancies={getPODiscrepancies(po.po_number)}
                     onApprove={() => handleApprove(po.id)}
                     onReject={(reason) => handleReject(po.id, reason)}
                     showApprovalActions
@@ -259,6 +272,7 @@ const FinanceApprovalPage = () => {
                   <POCard
                     key={po.id}
                     po={po}
+                    discrepancies={getPODiscrepancies(po.po_number)}
                     onView={() => handleViewPO(po)}
                     onSend={() => handleSendPO(po.id)}
                     showViewAction
@@ -315,6 +329,103 @@ const FinanceApprovalPage = () => {
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* GRN Summary Tab */}
+          {activeTab === 'grn-summary' && (
+            <div className="space-y-4">
+              {/* Banner Alerts */}
+              {grnSummary.filter(g => g.variance_flag === 'EXCESS_RECEIPT').length > 0 && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <AlertCircle className="w-5 h-5 text-red-500" />
+                    <p className="font-semibold text-red-800">Excess Receipts Detected</p>
+                  </div>
+                  <p className="text-sm text-red-700">
+                    {grnSummary.filter(g => g.variance_flag === 'EXCESS_RECEIPT').length} item(s) received in excess of ordered quantity. 
+                    Review before approving invoices.
+                  </p>
+                </div>
+              )}
+              
+              {grnSummary.filter(g => g.remaining_qty > 0).length > 0 && (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <AlertCircle className="w-5 h-5 text-yellow-500" />
+                    <p className="font-semibold text-yellow-800">Partial Deliveries</p>
+                  </div>
+                  <p className="text-sm text-yellow-700">
+                    {grnSummary.filter(g => g.remaining_qty > 0).length} item(s) have remaining quantities not yet received. 
+                    Do not create invoices for full PO amount.
+                  </p>
+                </div>
+              )}
+
+              {grnSummary.length === 0 ? (
+                <div className="glass p-8 rounded-lg border border-border text-center">
+                  <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-4 opacity-50" />
+                  <p className="text-muted-foreground">No GRNs with partial deliveries or excess receipts</p>
+                </div>
+              ) : (
+                <div className="glass rounded-lg border border-border overflow-hidden">
+                  <table className="w-full">
+                    <thead className="bg-muted/50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">GRN Number</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">PO Number</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">Item</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold">Ordered Qty</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold">Received (This Delivery)</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold">Total Received</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold">Remaining Qty</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">Variance</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {grnSummary.map((grn, idx) => (
+                        <tr 
+                          key={idx} 
+                          className={`border-t border-border hover:bg-muted/30 ${
+                            grn.variance_flag === 'EXCESS_RECEIPT' ? 'bg-red-50/50' : 
+                            grn.remaining_qty > 0 ? 'bg-yellow-50/50' : ''
+                          }`}
+                        >
+                          <td className="px-4 py-3 text-sm font-medium">{grn.grn_number}</td>
+                          <td className="px-4 py-3 text-sm">{grn.po_number || '-'}</td>
+                          <td className="px-4 py-3 text-sm">
+                            <div>
+                              <div className="font-medium">{grn.item_name}</div>
+                              <div className="text-xs text-muted-foreground">{grn.sku}</div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-sm text-right font-mono">{grn.ordered_qty} {grn.unit}</td>
+                          <td className="px-4 py-3 text-sm text-right font-mono">{grn.received_qty} {grn.unit}</td>
+                          <td className="px-4 py-3 text-sm text-right font-mono">{grn.total_received} {grn.unit}</td>
+                          <td className="px-4 py-3 text-sm text-right font-mono">{grn.remaining_qty} {grn.unit}</td>
+                          <td className="px-4 py-3 text-sm">
+                            {grn.variance_flag === 'EXCESS_RECEIPT' && (
+                              <Badge variant="destructive">Excess</Badge>
+                            )}
+                            {grn.variance_flag === 'SHORT' && (
+                              <Badge variant="outline">Short</Badge>
+                            )}
+                            {grn.variance_flag === 'NONE' && (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-sm">
+                            <Badge className={getStatusColor(grn.review_status)}>
+                              {grn.review_status}
+                            </Badge>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>
@@ -761,77 +872,145 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
         </div>
       </div>
 
-      {/* Items */}
+      {/* Items with Per-Product Costing */}
       {quotation.items && quotation.items.length > 0 && (
-        <div className="mt-4 border-t border-border pt-3">
-          <div className="grid grid-cols-5 gap-2 text-xs text-muted-foreground mb-2">
-            <span className="col-span-2">Product</span>
-            <span>Qty</span>
-            <span>Packaging</span>
-            <span className="text-right">Total</span>
-          </div>
-          {quotation.items.map((item, idx) => (
-            <div key={idx} className="grid grid-cols-5 gap-2 text-sm py-1">
-              <span className="col-span-2 truncate">{item.product_name}</span>
-              <span>{item.quantity}</span>
-              <span className="truncate text-xs">{item.packaging}</span>
-              <span className="text-right">{quotation.currency} {item.total?.toFixed(2)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Net Profit/Loss Display */}
-      {quotation.cost_confirmed && (
         <div className="mt-4 border-t border-border pt-3">
           <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
             <Calculator className="w-4 h-4" />
-            Profit & Loss
+            Products & Costing Breakdown
           </h4>
           
           {loadingCosting ? (
             <div className="text-center py-4 text-muted-foreground">Loading costing...</div>
           ) : costing ? (
-            <div className="bg-muted/20 border border-border rounded-lg p-4">
+            <div className="space-y-4">
+              {quotation.items.map((item, idx) => {
+                // Calculate proportional cost allocation for each product
+                // Use weight_mt if available, otherwise use quantity as proportion
+                const itemWeight = item.weight_mt || (item.quantity || 0);
+                const totalWeight = quotation.items.reduce((sum, i) => sum + (i.weight_mt || i.quantity || 0), 0);
+                const weightProportion = totalWeight > 0 ? itemWeight / totalWeight : (1 / quotation.items.length);
+                
+                // Allocate costs proportionally based on weight/quantity
+                const itemCost = totalCost * weightProportion;
+                const itemSellingPrice = item.total || 0;
+                const itemProfit = itemSellingPrice - itemCost;
+                const itemProfitPercentage = itemSellingPrice > 0 ? (itemProfit / itemSellingPrice) * 100 : 0;
+                
+                // Get cost breakdown rows for this item (proportional allocation)
+                const itemCostRows = costRows.map(row => ({
+                  ...row,
+                  total: (row.total || 0) * weightProportion,
+                  rate: row.rate,
+                  units: row.units
+                }));
+                
+                return (
+                  <div key={idx} className="bg-muted/20 border border-border rounded-lg p-4">
+                    {/* Product Header */}
+                    <div className="flex items-center justify-between mb-3 pb-2 border-b border-border">
+                      <div>
+                        <p className="font-semibold text-sm">{item.product_name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          Qty: {item.quantity} | Packaging: {item.packaging}
+                          {item.weight_mt && ` | Weight: ${item.weight_mt} MT`}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs text-muted-foreground">Selling Price</p>
+                        <p className="text-sm font-semibold text-green-400">
+                          {quotation.currency} {itemSellingPrice.toFixed(2)}
+                        </p>
+                      </div>
+                    </div>
+                    
+                    {/* Cost Breakdown Table */}
+                    {itemCostRows.length > 0 && (
+                      <div className="mb-3">
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead className="bg-muted/30">
+                              <tr>
+                                <th className="p-2 text-left">Description</th>
+                                <th className="p-2 text-right">Rate</th>
+                                <th className="p-2 text-right">Units</th>
+                                <th className="p-2 text-right">Total</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {itemCostRows.map((row, rowIdx) => (
+                                <tr key={rowIdx} className="border-b border-border/30">
+                                  <td className="p-2">{row.description}</td>
+                                  <td className="p-2 text-right font-mono">{row.rate?.toFixed(2) || '-'}</td>
+                                  <td className="p-2 text-right font-mono">{row.units || '-'}</td>
+                                  <td className="p-2 text-right font-mono font-medium">
+                                    {quotation.currency} {row.total?.toFixed(2) || '0.00'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                            <tfoot className="bg-muted/20">
+                              <tr>
+                                <td colSpan={3} className="p-2 text-right font-semibold">Total Cost:</td>
+                                <td className="p-2 text-right font-mono font-bold">
+                                  {quotation.currency} {itemCost.toFixed(2)}
+                                </td>
+                              </tr>
+                            </tfoot>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Profit/Loss Summary */}
+                    <div className="flex items-center justify-between pt-2 border-t border-border">
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Net {itemProfit >= 0 ? 'Profit' : 'Loss'}</p>
+                        <p className={`text-lg font-bold ${itemProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {itemProfit >= 0 ? '+' : ''}{quotation.currency} {itemProfit.toFixed(2)}
+                        </p>
+                        <p className={`text-xs mt-1 ${itemProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {itemProfitPercentage >= 0 ? '+' : ''}{itemProfitPercentage.toFixed(2)}% margin
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs text-muted-foreground">Cost Allocation</p>
+                        <p className="text-xs font-medium">
+                          {(weightProportion * 100).toFixed(1)}% of total
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              
+              {/* Overall Summary */}
+              <div className="bg-muted/30 border border-border rounded-lg p-4 mt-4">
                 <div className="flex items-center justify-between">
                   <div>
-                  {(() => {
-                        // DEBUG: Log the costing data to see what we're getting
-    console.log('=== PROFIT DEBUG for', quotation.pfi_number, '===');
-    console.log('costing object:', costing);
-    console.log('custom_breakdown:', costing?.custom_breakdown);
-    console.log('custom_breakdown.net_profit_loss:', costing?.custom_breakdown?.net_profit_loss);
-    console.log('costing.margin_amount:', costing?.margin_amount);
-    console.log('quotation.margin_amount:', quotation?.margin_amount);
-    console.log('totalCost:', totalCost);
-    console.log('quotation.total:', quotation.total);
-    console.log('===========================');
-    // Use Net Profit/-Loss directly from costing modal calculation
-    // Priority 1: Use net_profit_loss from custom_breakdown (from costing modal)
-    // Priority 2: Use margin_amount from costing record (saved value)
-    // Priority 3: Fallback to calculated value
-    const profit = costing?.custom_breakdown?.net_profit_loss 
-      ?? costing?.margin_amount 
-      ?? ((quotation.total || 0) - totalCost);
-    
-    const profitPercentage = costing?.margin_percentage 
-      ?? (quotation.total > 0 ? (profit / quotation.total) * 100 : 0);
-    
-    return (
-      <>
-        <p className="text-xs text-muted-foreground mb-1">Net {profit >= 0 ? 'Profit' : 'Loss'}</p>
-        <p className={`text-2xl font-bold ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-          {profit >= 0 ? '+' : ''}{quotation.currency} {profit.toFixed(2)}
-        </p>
-        <p className={`text-sm mt-1 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-          {profitPercentage >= 0 ? '+' : ''}{profitPercentage.toFixed(2)}% margin
-        </p>
-      </>
-    );
-  })()}
+                    {(() => {
+                      const profit = costing?.custom_breakdown?.net_profit_loss 
+                        ?? costing?.margin_amount 
+                        ?? ((quotation.total || 0) - totalCost);
+                      
+                      const profitPercentage = costing?.margin_percentage 
+                        ?? (quotation.total > 0 ? (profit / quotation.total) * 100 : 0);
+                      
+                      return (
+                        <>
+                          <p className="text-xs text-muted-foreground mb-1">Total Net {profit >= 0 ? 'Profit' : 'Loss'}</p>
+                          <p className={`text-2xl font-bold ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {profit >= 0 ? '+' : ''}{quotation.currency} {profit.toFixed(2)}
+                          </p>
+                          <p className={`text-sm mt-1 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {profitPercentage >= 0 ? '+' : ''}{profitPercentage.toFixed(2)}% margin
+                          </p>
+                        </>
+                      );
+                    })()}
                   </div>
                   <div className="text-right">
-                    <p className="text-xs text-muted-foreground mb-1">Selling Price</p>
+                    <p className="text-xs text-muted-foreground mb-1">Total Selling Price</p>
                     <p className="text-lg font-semibold text-green-400">
                       {quotation.currency} {quotation.total?.toFixed(2) || '0.00'}
                     </p>
@@ -842,11 +1021,29 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
                   </div>
                 </div>
               </div>
+            </div>
           ) : (
-            <div className="text-center py-4 text-amber-400 text-sm border border-amber-500/30 bg-amber-500/10 rounded p-4">
-              <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />
-              <p className="font-medium">No costing data found</p>
-              <p className="text-xs text-muted-foreground mt-1">Click "Check Cost" button above to create costing calculation</p>
+            <div className="space-y-2">
+              {/* Show items without costing */}
+              <div className="grid grid-cols-5 gap-2 text-xs text-muted-foreground mb-2">
+                <span className="col-span-2">Product</span>
+                <span>Qty</span>
+                <span>Packaging</span>
+                <span className="text-right">Total</span>
+              </div>
+              {quotation.items.map((item, idx) => (
+                <div key={idx} className="grid grid-cols-5 gap-2 text-sm py-1">
+                  <span className="col-span-2 truncate">{item.product_name}</span>
+                  <span>{item.quantity}</span>
+                  <span className="truncate text-xs">{item.packaging}</span>
+                  <span className="text-right">{quotation.currency} {item.total?.toFixed(2)}</span>
+                </div>
+              ))}
+              <div className="text-center py-4 text-amber-400 text-sm border border-amber-500/30 bg-amber-500/10 rounded p-4 mt-4">
+                <AlertCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                <p className="font-medium">No costing data found</p>
+                <p className="text-xs text-muted-foreground mt-1">Click "Check Cost" button above to create costing calculation</p>
+              </div>
             </div>
           )}
         </div>
@@ -991,7 +1188,7 @@ const QuotationViewModal = ({ quotation, onClose }) => {
 };
 
 // PO Card Component
-const POCard = ({ po, onApprove, onReject, onView, onSend, showApprovalActions, showViewAction, showSendAction, smtpConfigured }) => {
+const POCard = ({ po, onApprove, onReject, onView, onSend, showApprovalActions, showViewAction, showSendAction, smtpConfigured, discrepancies = [] }) => {
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
 
@@ -1000,11 +1197,21 @@ const POCard = ({ po, onApprove, onReject, onView, onSend, showApprovalActions, 
     setShowRejectModal(false);
   };
 
+  // Check for discrepancies
+  const hasExcessReceipt = discrepancies.some(d => d.variance_flag === 'EXCESS_RECEIPT');
+  const hasPartialDelivery = discrepancies.some(d => d.remaining_qty > 0);
+  const hasShortDelivery = discrepancies.some(d => d.variance_flag === 'SHORT');
+
   return (
-    <div className="glass p-4 rounded-lg border border-border" data-testid={`po-${po.id}`}>
+    <div className={`glass p-4 rounded-lg border ${
+      hasExcessReceipt ? 'border-red-500/50 bg-red-50/30' :
+      hasPartialDelivery ? 'border-yellow-500/50 bg-yellow-50/30' :
+      hasShortDelivery ? 'border-orange-500/50 bg-orange-50/30' :
+      'border-border'
+    }`} data-testid={`po-${po.id}`}>
       <div className="flex items-start justify-between">
-        <div>
-          <div className="flex items-center gap-3 mb-2">
+        <div className="flex-1">
+          <div className="flex items-center gap-3 mb-2 flex-wrap">
             <span className="font-bold text-lg">{po.po_number}</span>
             <span className={`px-2 py-0.5 rounded text-xs font-medium ${
               po.status === 'DRAFT' ? 'bg-gray-500/20 text-gray-400' :
@@ -1013,11 +1220,63 @@ const POCard = ({ po, onApprove, onReject, onView, onSend, showApprovalActions, 
             }`}>
               {po.status}
             </span>
+            {/* Discrepancy Badges */}
+            {hasExcessReceipt && (
+              <Badge variant="destructive" className="bg-red-500/20 text-red-600 border-red-500/50">
+                <AlertCircle className="w-3 h-3 mr-1" />
+                Excess Receipt
+              </Badge>
+            )}
+            {hasPartialDelivery && (
+              <Badge className="bg-yellow-500/20 text-yellow-700 border-yellow-500/50">
+                <AlertCircle className="w-3 h-3 mr-1" />
+                Partial Delivery
+              </Badge>
+            )}
+            {hasShortDelivery && (
+              <Badge className="bg-orange-500/20 text-orange-700 border-orange-500/50">
+                <AlertCircle className="w-3 h-3 mr-1" />
+                Short Delivery
+              </Badge>
+            )}
           </div>
           <p className="text-muted-foreground text-sm">Supplier: {po.supplier_name}</p>
           <p className="text-green-400 font-medium text-lg mt-1">
             {po.currency} {po.total_amount?.toFixed(2)}
           </p>
+          
+          {/* Discrepancy Details */}
+          {discrepancies.length > 0 && (
+            <div className="mt-3 p-3 rounded-lg bg-muted/30 border border-border/50">
+              <p className="text-xs font-semibold text-muted-foreground mb-2">⚠️ Quantity Discrepancies Detected:</p>
+              {discrepancies.map((disc, idx) => (
+                <div key={idx} className="text-xs mb-1">
+                  <span className="font-medium">{disc.item_name}</span>
+                  {disc.variance_flag === 'EXCESS_RECEIPT' && (
+                    <span className="text-red-600 ml-2">
+                      • Received: {disc.total_received} {disc.unit} (Ordered: {disc.ordered_qty} {disc.unit}) - 
+                      <strong> Excess: {(disc.total_received - disc.ordered_qty).toFixed(2)} {disc.unit}</strong>
+                    </span>
+                  )}
+                  {disc.variance_flag === 'SHORT' && disc.remaining_qty > 0 && (
+                    <span className="text-orange-600 ml-2">
+                      • Received: {disc.total_received} {disc.unit} (Ordered: {disc.ordered_qty} {disc.unit}) - 
+                      <strong> Short: {disc.remaining_qty} {disc.unit}</strong>
+                    </span>
+                  )}
+                  {disc.variance_flag === 'NONE' && disc.remaining_qty > 0 && (
+                    <span className="text-yellow-600 ml-2">
+                      • Received: {disc.total_received} {disc.unit} (Ordered: {disc.ordered_qty} {disc.unit}) - 
+                      <strong> Pending: {disc.remaining_qty} {disc.unit}</strong>
+                    </span>
+                  )}
+                </div>
+              ))}
+              <p className="text-xs text-muted-foreground mt-2 italic">
+                ⚠️ Please review discrepancies before approving invoices. Procurement has been notified to claim.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="flex gap-2">

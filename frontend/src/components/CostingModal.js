@@ -169,6 +169,9 @@ export default function CostingModal({ quotation, open, onClose, onConfirmed }) 
         raw_material_source: costs.raw_material_source ?? costing.raw_material_source ?? 'SYSTEM',
         packaging_type: costs.packaging_type ?? costing.packaging_type,
         incoterm_type: costs.incoterm_type ?? costing.incoterm_type,
+        // Ensure reference_type and reference_id are always included (required fields)
+        reference_type: costing.reference_type || 'QUOTATION',
+        reference_id: costing.reference_id || quotation.id,
       };
 
       await api.put(`/costing/${costing.id}`, updateData);
@@ -203,6 +206,9 @@ export default function CostingModal({ quotation, open, onClose, onConfirmed }) 
         raw_material_source: costs.raw_material_source ?? costing.raw_material_source ?? 'SYSTEM',
         packaging_type: costs.packaging_type ?? costing.packaging_type,
         incoterm_type: costs.incoterm_type ?? costing.incoterm_type,
+        // Ensure reference_type and reference_id are always included (required fields)
+        reference_type: costing.reference_type || 'QUOTATION',
+        reference_id: costing.reference_id || quotation.id,
       };
       
       await api.put(`/costing/${costing.id}`, updateData);

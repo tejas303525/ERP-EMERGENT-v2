@@ -10,13 +10,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { Textarea } from '../components/ui/textarea';
 import { toast } from 'sonner';
-import { formatDate } from '../lib/utils';
+import { formatDate, hasPagePermission } from '../lib/utils';
 import { Plus, Receipt, Trash2, Eye, Printer, Download } from 'lucide-react';
 
 export default function GRNPage() {
   const { user } = useAuth();
   const [grns, setGrns] = useState([]);
   const [products, setProducts] = useState([]);
+  const [packagingMaterials, setPackagingMaterials] = useState([]);
+  const [purchaseOrders, setPurchaseOrders] = useState([]);
+  const [selectedPO, setSelectedPO] = useState(null);
+  const [poLines, setPOLines] = useState([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -27,6 +31,7 @@ export default function GRNPage() {
     delivery_note: '',
     notes: '',
     items: [],
+    po_id: '',
   });
 
   const [newItem, setNewItem] = useState({
@@ -34,7 +39,15 @@ export default function GRNPage() {
     product_name: '',
     sku: '',
     quantity: 0,
+    received_qty: 0,  // NEW: User input for this delivery only
+    ordered_qty: 0,
+    received_qty_till_date: 0,  // NEW: Cumulative received from PO line
     unit: 'KG',
+    procurement_type: 'Bulk',
+    packaging_item_id: '',
+    packaging_qty: 0,
+    net_weight_kg: 0,
+    po_line_id: '',
   });
 
   useEffect(() => {
@@ -43,13 +56,15 @@ export default function GRNPage() {
 
   const loadData = async () => {
     try {
-      const [grnsRes, productsRes, rawItemsRes, packItemsRes] = await Promise.all([
+      const [grnsRes, productsRes, rawItemsRes, packItemsRes, posRes] = await Promise.all([
         grnAPI.getAll(),
         productAPI.getAll(),
         api.get('/inventory-items?item_type=RAW'),
         api.get('/inventory-items?item_type=PACK'),
+        api.get('/purchase-orders?status=SENT,PARTIAL').catch(() => ({ data: { data: [] } })),
       ]);
       setGrns(grnsRes.data);
+      setPurchaseOrders(posRes.data?.data || []);
       
       // Combine products with inventory items for GRN selection
       const allProducts = [
@@ -70,6 +85,9 @@ export default function GRNPage() {
         }))
       ];
       setProducts(allProducts);
+      
+      // Store packaging materials separately for dropdown
+      setPackagingMaterials(packItemsRes.data || []);
     } catch (error) {
       toast.error('Failed to load data');
     } finally {
@@ -77,29 +95,85 @@ export default function GRNPage() {
     }
   };
 
+  const handlePOSelect = async (poId) => {
+    setForm({ ...form, po_id: poId });
+    
+    if (poId) {
+      try {
+        const [poRes, linesRes] = await Promise.all([
+          api.get(`/purchase-orders/${poId}`),
+          api.get(`/purchase-order-lines?po_id=${poId}`)
+        ]);
+        
+        const po = poRes.data;
+        const lines = linesRes.data?.data || [];
+        
+        setSelectedPO(po);
+        setPOLines(lines);
+        
+        // Auto-populate supplier
+        if (po.supplier_name) {
+          setForm(prev => ({ ...prev, supplier: po.supplier_name }));
+        }
+      } catch (error) {
+        toast.error('Failed to load PO details');
+      }
+    } else {
+      setSelectedPO(null);
+      setPOLines([]);
+    }
+  };
+
   const handleProductSelect = (productId) => {
     const product = products.find(p => p.id === productId);
     if (product) {
+      // Check if this product is in the PO lines
+      const matchingPOLine = poLines.find(line => line.item_id === productId);
+      
       setNewItem({
         ...newItem,
         product_id: productId,
         product_name: product.name,
         sku: product.sku,
         unit: product.unit,
+        ordered_qty: matchingPOLine ? matchingPOLine.qty : 0,
+        received_qty_till_date: matchingPOLine ? (matchingPOLine.received_qty || 0) : 0,
+        po_line_id: matchingPOLine ? matchingPOLine.id : '',
+        received_qty: 0,  // Always blank on product select
+        quantity: 0,  // Reset quantity
       });
     }
   };
 
   const addItem = () => {
-    if (!newItem.product_id || newItem.quantity <= 0) {
-      toast.error('Please select product and enter quantity');
+    const receivedQty = newItem.received_qty || newItem.quantity || 0;
+    if (!newItem.product_id || receivedQty <= 0) {
+      toast.error('Please select product and enter received quantity');
       return;
     }
     setForm({
       ...form,
-      items: [...form.items, { ...newItem }],
+      items: [...form.items, { 
+        ...newItem,
+        received_qty: receivedQty,  // Use received_qty, fallback to quantity
+        quantity: receivedQty,  // Keep quantity for backward compatibility
+      }],
     });
-    setNewItem({ product_id: '', product_name: '', sku: '', quantity: 0, unit: 'KG' });
+    setNewItem({ 
+      product_id: '', 
+      product_name: '', 
+      sku: '', 
+      quantity: 0,
+      received_qty: 0,  // Always blank on reset
+      ordered_qty: 0,
+      received_qty_till_date: 0,
+      unit: 'KG',
+      procurement_type: 'Bulk',
+      packaging_item_id: '',
+      packaging_qty: 0,
+      net_weight_kg: 0,
+      po_line_id: '',
+    });
   };
 
   const removeItem = (index) => {
@@ -115,17 +189,32 @@ export default function GRNPage() {
       return;
     }
     try {
-      await grnAPI.create(form);
-      toast.success('GRN created successfully. Inventory updated.');
+      // Prepare items with received_qty
+      const itemsToSend = form.items.map(item => ({
+        ...item,
+        received_qty: item.received_qty || item.quantity,  // Use received_qty, fallback to quantity
+      }));
+      
+      const response = await grnAPI.create({ ...form, items: itemsToSend });
+      
+      // Check if there were partial deliveries
+      if (response.data?.has_partial_delivery) {
+        toast.warning(`GRN created with ${response.data.partial_claims_count} partial delivery item(s). Shortages tracked for procurement.`);
+      } else {
+        toast.success('GRN created successfully. Stock will be updated after QC approval.');
+      }
+      
       setCreateOpen(false);
-      setForm({ supplier: '', delivery_note: '', notes: '', items: [] });
+      setForm({ supplier: '', delivery_note: '', notes: '', items: [], po_id: '' });
+      setSelectedPO(null);
+      setPOLines([]);
       loadData();
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Failed to create GRN');
     }
   };
 
-  const canCreate = ['admin', 'security', 'inventory'].includes(user?.role);
+  const canCreate = hasPagePermission(user, '/grn', ['admin', 'security', 'inventory']);
 
   return (
     <div className="page-container" data-testid="grn-page">
@@ -146,7 +235,33 @@ export default function GRNPage() {
                 <DialogHeader>
                   <DialogTitle>Create GRN</DialogTitle>
                 </DialogHeader>
-                <div className="space-y-6 py-4">
+                <div className="space-y-6 py-4" onFocus={() => {
+                  // Reset received_qty when modal opens
+                  setNewItem(prev => ({ ...prev, received_qty: 0, quantity: 0 }));
+                }}>
+                  {/* PO Selection */}
+                  <div className="form-field">
+                    <Label>Purchase Order (Optional)</Label>
+                    <Select value={form.po_id} onValueChange={handlePOSelect}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select PO for partial delivery tracking" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="">-- No PO (Manual GRN) --</SelectItem>
+                        {purchaseOrders.map(po => (
+                          <SelectItem key={po.id} value={po.id}>
+                            {po.po_number} - {po.supplier_name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {form.po_id && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        ✓ Partial deliveries will be automatically tracked
+                      </p>
+                    )}
+                  </div>
+
                   <div className="form-grid">
                     <div className="form-field">
                       <Label>Supplier</Label>
@@ -170,8 +285,11 @@ export default function GRNPage() {
                   {/* Items Section */}
                   <div className="border-t border-border pt-4">
                     <h3 className="font-semibold mb-4">Items Received</h3>
-                    <div className="grid grid-cols-4 gap-2 mb-3">
+                    
+                    {/* Product Selection Row */}
+                    <div className="grid grid-cols-3 gap-3 mb-3">
                       <div className="col-span-2">
+                        <Label className="text-xs">Product</Label>
                         <Select value={newItem.product_id} onValueChange={handleProductSelect}>
                           <SelectTrigger data-testid="product-select">
                             <SelectValue placeholder="Select product" />
@@ -183,37 +301,178 @@ export default function GRNPage() {
                           </SelectContent>
                         </Select>
                       </div>
-                      <Input
-                        type="number"
-                        placeholder="Quantity"
-                        value={newItem.quantity || ''}
-                        onChange={(e) => setNewItem({...newItem, quantity: parseFloat(e.target.value)})}
-                        data-testid="quantity-input"
-                      />
-                      <Button type="button" variant="secondary" onClick={addItem} data-testid="add-item-btn">
-                        <Plus className="w-4 h-4" />
-                      </Button>
+                      <div>
+                        <Label className="text-xs">Procurement Type</Label>
+                        <Select 
+                          value={newItem.procurement_type} 
+                          onValueChange={(val) => setNewItem({...newItem, procurement_type: val})}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="Bulk">Bulk</SelectItem>
+                            <SelectItem value="Drummed">Drummed/Packaged</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
 
+                    {/* PO Info Strip (read-only) - shown when PO is selected */}
+                    {form.po_id && newItem.product_id && newItem.ordered_qty > 0 && (
+                      <div className="bg-blue-50 border border-blue-200 rounded p-3 mb-3">
+                        <div className="grid grid-cols-3 gap-3 text-sm">
+                          <div>
+                            <span className="text-xs text-muted-foreground">PO Qty:</span>
+                            <p className="font-semibold">{newItem.ordered_qty} {newItem.unit}</p>
+                          </div>
+                          <div>
+                            <span className="text-xs text-muted-foreground">Received Till Date:</span>
+                            <p className="font-semibold">{newItem.received_qty_till_date || 0} {newItem.unit}</p>
+                          </div>
+                          <div>
+                            <span className="text-xs text-muted-foreground">Remaining PO Qty:</span>
+                            <p className="font-semibold">{newItem.ordered_qty - (newItem.received_qty_till_date || 0)} {newItem.unit}</p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Quantity and Unit Row */}
+                    <div className="grid grid-cols-3 gap-3 mb-3">
+                      <div>
+                        <Label className="text-xs">Received Qty (This Delivery) *</Label>
+                        <Input
+                          type="number"
+                          placeholder="Enter quantity for this delivery"
+                          value={newItem.received_qty || ''}
+                          onChange={(e) => setNewItem({...newItem, received_qty: parseFloat(e.target.value) || 0, quantity: parseFloat(e.target.value) || 0})}
+                          data-testid="quantity-input"
+                        />
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Enter the quantity physically received in this delivery.
+                        </p>
+                      </div>
+                      <div>
+                        <Label className="text-xs">Unit</Label>
+                        <Select 
+                          value={newItem.unit} 
+                          onValueChange={(val) => setNewItem({...newItem, unit: val})}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="KG">KG</SelectItem>
+                            <SelectItem value="MT">MT</SelectItem>
+                            <SelectItem value="EA">EA</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                    
+                    {/* Partial Delivery Warning */}
+                    {form.po_id && newItem.ordered_qty > 0 && newItem.received_qty > 0 && (newItem.received_qty_till_date + newItem.received_qty) < newItem.ordered_qty && (
+                      <div className="bg-yellow-50 border border-yellow-200 rounded p-2 mb-3">
+                        <p className="text-xs text-yellow-800">
+                          ⚠️ Partial delivery: {newItem.received_qty}/{newItem.ordered_qty} {newItem.unit} in this delivery
+                          - Remaining: {newItem.ordered_qty - (newItem.received_qty_till_date + newItem.received_qty)} {newItem.unit} will be tracked for procurement
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Packaging Fields (shown only when Drummed) */}
+                    {newItem.procurement_type === 'Drummed' && (
+                      <div className="grid grid-cols-3 gap-3 mb-3 p-3 bg-muted/50 rounded-md">
+                        <div>
+                          <Label className="text-xs">Packaging Type</Label>
+                          <Select 
+                            value={newItem.packaging_item_id} 
+                            onValueChange={(val) => setNewItem({...newItem, packaging_item_id: val})}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select packaging" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {packagingMaterials.map(p => (
+                                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div>
+                          <Label className="text-xs">Package Qty</Label>
+                          <Input
+                            type="number"
+                            placeholder="# of drums/IBCs"
+                            value={newItem.packaging_qty || ''}
+                            onChange={(e) => setNewItem({...newItem, packaging_qty: parseFloat(e.target.value)})}
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs">Net Weight/Package (kg)</Label>
+                          <Input
+                            type="number"
+                            placeholder="kg per drum"
+                            value={newItem.net_weight_kg || ''}
+                            onChange={(e) => setNewItem({...newItem, net_weight_kg: parseFloat(e.target.value)})}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <Button type="button" variant="secondary" onClick={addItem} data-testid="add-item-btn" className="w-full">
+                      <Plus className="w-4 h-4 mr-2" /> Add Item
+                    </Button>
+
                     {form.items.length > 0 && (
-                      <div className="data-grid">
+                      <div className="data-grid mt-4">
                         <table className="erp-table w-full">
                           <thead>
                             <tr>
                               <th>Product</th>
                               <th>SKU</th>
-                              <th>Quantity</th>
+                              {form.po_id && <th>Ordered</th>}
+                              <th>Received (This Delivery)</th>
                               <th>Unit</th>
+                              <th>Type</th>
+                              <th>Packaging</th>
                               <th></th>
                             </tr>
                           </thead>
                           <tbody>
                             {form.items.map((item, idx) => (
-                              <tr key={idx}>
+                              <tr key={idx} className={item.ordered_qty > 0 && (item.received_qty || item.quantity) < item.ordered_qty ? 'bg-yellow-50' : ''}>
                                 <td>{item.product_name}</td>
                                 <td>{item.sku}</td>
-                                <td className="font-mono">{item.quantity}</td>
+                                {form.po_id && (
+                                  <td className="font-mono">
+                                    {item.ordered_qty || '-'}
+                                  </td>
+                                )}
+                                <td className="font-mono">
+                                  {item.received_qty || item.quantity}
+                                  {item.ordered_qty > 0 && (item.received_qty || item.quantity) < item.ordered_qty && (
+                                    <span className="text-xs text-yellow-600 ml-1">
+                                      (Partial)
+                                    </span>
+                                  )}
+                                </td>
                                 <td>{item.unit}</td>
+                                <td>
+                                  <Badge variant={item.procurement_type === 'Drummed' ? 'default' : 'secondary'}>
+                                    {item.procurement_type}
+                                  </Badge>
+                                </td>
+                                <td>
+                                  {item.procurement_type === 'Drummed' && item.packaging_qty > 0 ? (
+                                    <span className="text-xs">
+                                      {item.packaging_qty} units × {item.net_weight_kg}kg
+                                    </span>
+                                  ) : (
+                                    <span className="text-muted-foreground text-xs">-</span>
+                                  )}
+                                </td>
                                 <td>
                                   <Button variant="ghost" size="icon" onClick={() => removeItem(idx)}>
                                     <Trash2 className="w-4 h-4 text-destructive" />
