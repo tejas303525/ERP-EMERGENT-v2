@@ -142,6 +142,33 @@ const convertCountryToArabic = (country) => {
   return countryMap[country.toUpperCase()] || country;
 };
 
+// Helper function to determine the correct unit to display for job orders
+const getJobQuantityUnit = (job) => {
+  // If unit is explicitly set, use it
+  if (job.unit) {
+    return job.unit;
+  }
+  
+  // Check if packaging is bulk-like (TANKER, Bulk, etc.)
+  const packaging = (job.packaging || '').toLowerCase();
+  const isBulkLike = packaging === 'bulk' || 
+                      packaging.includes('tanker') || 
+                      packaging.includes('bulk');
+  
+  // If it's bulk-like and we have total_weight_mt, the quantity is in MT
+  if (isBulkLike && job.total_weight_mt) {
+    return 'MT';
+  }
+  
+  // If packaging exists and it's not bulk-like, use packaging
+  if (job.packaging && !isBulkLike) {
+    return job.packaging;
+  }
+  
+  // Default to MT
+  return 'MT';
+};
+
 export default function JobOrdersPage() {
   const { user } = useAuth();
   const [jobs, setJobs] = useState([]);
@@ -777,7 +804,8 @@ export default function JobOrdersPage() {
       const jobsNeedingCheck = jobs.filter(j => 
         j.procurement_required || 
         (j.material_shortages && j.material_shortages.length > 0) ||
-        j.status === 'procurement'
+        j.status === 'procurement' ||
+        j.status === 'ready_for_dispatch'  // Include ready_for_dispatch to re-check stock validation
       );
       
       if (jobsNeedingCheck.length === 0) {
@@ -1665,15 +1693,23 @@ export default function JobOrdersPage() {
                     <td>
                       <div>{job.product_name}</div>
                       <span className="text-xs text-muted-foreground">{job.product_sku}</span>
+                      {job.product_current_stock !== undefined && (
+                        <div className="text-xs mt-1">
+                          <span className="text-muted-foreground">Stock: </span>
+                          <span className={job.product_current_stock > 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
+                            {job.product_current_stock.toFixed(3)} MT
+                          </span>
+                        </div>
+                      )}
                     </td>
                     <td className="font-mono">
-                      {job.quantity} {job.unit || job.packaging || 'MT'}
+                      {job.quantity} {getJobQuantityUnit(job)}
                     </td>
                     <td className="font-mono text-blue-600 dark:text-blue-400">
-                      {job.dispatched_qty || 0} {job.unit || job.packaging || 'MT'}
+                      {job.dispatched_qty || 0} {getJobQuantityUnit(job)}
                     </td>
                     <td className={`font-mono ${pendingQty > 0 ? 'text-yellow-600 dark:text-yellow-400 font-semibold' : 'text-green-600 dark:text-green-400'}`}>
-                      {pendingQty} {job.unit || job.packaging || 'MT'}
+                      {pendingQty} {getJobQuantityUnit(job)}
                       {pendingQty > 0 && (
                         <Badge variant="outline" className="ml-2 text-xs">
                           Pending
@@ -1790,6 +1826,23 @@ export default function JobOrdersPage() {
                         >
                           <Download className="w-4 h-4" />
                         </Button>
+                        {/* Sync Packaging button - show for jobs with packaging */}
+                        {job.packaging && job.packaging !== 'Bulk' && (
+                          <Button 
+                            variant="ghost" 
+                            size="icon"
+                            title="Sync Packaging"
+                            onClick={async () => {
+                              try {
+                                await syncPackaging(job.id);
+                              } catch (error) {
+                                console.error('Failed to sync packaging:', error);
+                              }
+                            }}
+                          >
+                            <Package className="w-4 h-4 text-blue-500" />
+                          </Button>
+                        )}
                         {/* Removed: Approve button (tick button) - status transitions are now automatic */}
                         {canManageJobs && job.status === 'approved' && (
                           <Button variant="ghost" size="icon" onClick={() => handleStatusUpdate(job.id, 'in_production')}>

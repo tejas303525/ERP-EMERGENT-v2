@@ -203,6 +203,7 @@ export default function DeliveryOrdersPage() {
                 <th>DO Number</th>
                 <th>Job Number</th>
                 <th>Product</th>
+                <th>Packaging</th>
                 <th>Quantity</th>
                 <th>Vehicle Type</th>
                 <th>Vehicle</th>
@@ -234,11 +235,6 @@ export default function DeliveryOrdersPage() {
                           {lineItems.slice(0, 2).map((item, idx) => (
                             <div key={idx} className="text-sm">
                               {item.product_name || 'N/A'}
-                              {item.packaging && (
-                                <span className="text-xs text-muted-foreground ml-1">
-                                  ({item.packaging})
-                                </span>
-                              )}
                             </div>
                           ))}
                           {lineItems.length > 2 && (
@@ -249,6 +245,24 @@ export default function DeliveryOrdersPage() {
                         </div>
                       ) : (
                         dorder.product_name || '-'
+                      )}
+                    </td>
+                    <td>
+                      {isBulk && lineItems.length > 0 ? (
+                        <div className="space-y-1">
+                          {lineItems.slice(0, 2).map((item, idx) => (
+                            <div key={idx} className="text-sm text-muted-foreground">
+                              {item.packaging || '-'}
+                            </div>
+                          ))}
+                          {lineItems.length > 2 && (
+                            <div className="text-xs text-muted-foreground">
+                              ...
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground">{dorder.packaging || '-'}</span>
                       )}
                     </td>
                     <td className="font-mono">
@@ -380,6 +394,10 @@ export default function DeliveryOrdersPage() {
                     <div>
                       <span className="text-muted-foreground">Product:</span>
                       <p className="font-medium">{selectedDO.product_name || '-'}</p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Packaging:</span>
+                      <p className="font-medium">{selectedDO.packaging || '-'}</p>
                     </div>
                     <div>
                       <span className="text-muted-foreground">Quantity:</span>

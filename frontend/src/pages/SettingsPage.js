@@ -54,6 +54,7 @@ const SettingsPage = () => {
     address: "Plot # A 23 B, Al Jazeera Industrial Area, Ras Al Khaimah, UAE"
   });
   const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editItem, setEditItem] = useState(null);
   const [modalType, setModalType] = useState('');
@@ -251,13 +252,51 @@ const SettingsPage = () => {
               />
             )}
             {activeTab === 'packaging' && (
-              <DataTable
-                data={packagingTypes}
-                columns={['sku', 'name', 'uom', 'capacity_liters']}
-                labels={['SKU', 'Name', 'UOM', 'Capacity (L)']}
-                onEdit={(item) => openEditModal('packaging', item)}
-                onDelete={(id) => handleDelete('packaging', id)}
-              />
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      Packaging types from inventory_items (item_type=PACK). 
+                      Use sync to ensure packaging collection matches.
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button 
+                      variant="outline" 
+                      onClick={async () => {
+                        if (!window.confirm('This will sync packaging collection with inventory_items. Continue?')) {
+                          return;
+                        }
+                        
+                        setSyncing(true);
+                        try {
+                          const response = await api.post('/packaging/sync-with-inventory');
+                          toast.success(
+                            `Sync completed! Created ${response.data.created_in_inventory} in inventory, ` +
+                            `${response.data.created_in_packaging} in packaging, updated ${response.data.updated}`
+                          );
+                          loadData(); // Reload to show changes
+                        } catch (error) {
+                          toast.error(error.response?.data?.detail || 'Failed to sync packaging');
+                        } finally {
+                          setSyncing(false);
+                        }
+                      }}
+                      disabled={syncing}
+                    >
+                      <RefreshCw className={`w-4 h-4 mr-2 ${syncing ? 'animate-spin' : ''}`} />
+                      {syncing ? 'Syncing...' : 'Sync with Packaging Collection'}
+                    </Button>
+                  </div>
+                </div>
+                <DataTable
+                  data={packagingTypes}
+                  columns={['sku', 'name', 'uom', 'capacity_liters']}
+                  labels={['SKU', 'Name', 'UOM', 'Capacity (L)']}
+                  onEdit={(item) => openEditModal('packaging', item)}
+                  onDelete={(id) => handleDelete('packaging', id)}
+                />
+              </div>
             )}
             {activeTab === 'product_packaging' && (
               <div className="space-y-4">
@@ -605,7 +644,7 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
           { key: 'name', label: 'Name', required: true, placeholder: 'e.g., Steel Drum 210L' },
           { key: 'uom', label: 'Unit of Measure', type: 'select', options: ['EA', 'KG', 'L'], required: true },
           { key: 'capacity_liters', label: 'Capacity (Liters)', type: 'number', placeholder: 'e.g., 210' },
-          { key: 'net_weight_kg_default', label: 'Net Weight (KG)', type: 'number', placeholder: 'e.g., 185' },
+          { key: 'net_weight_kg', label: 'Net Weight (KG)', type: 'number', placeholder: 'e.g., 185' },
           { key: 'category', label: 'Category', placeholder: 'e.g., Drum, IBC, Bottle' },
         ];
       case 'banks':
@@ -760,12 +799,22 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
           dataToSave.net_weights = netWeights.filter(w => w !== '' && w !== null && !isNaN(w));
         }
         
-        // Convert number fields
-        if (dataToSave.capacity_liters) {
-          dataToSave.capacity_liters = parseFloat(dataToSave.capacity_liters) || 0;
+        // Convert number fields - allow null/undefined for optional fields
+        if (dataToSave.capacity_liters !== null && dataToSave.capacity_liters !== undefined && dataToSave.capacity_liters !== '') {
+          dataToSave.capacity_liters = parseFloat(dataToSave.capacity_liters);
+          if (isNaN(dataToSave.capacity_liters)) {
+            dataToSave.capacity_liters = null;
+          }
+        } else {
+          dataToSave.capacity_liters = null;
         }
-        if (dataToSave.net_weight_kg_default) {
-          dataToSave.net_weight_kg_default = parseFloat(dataToSave.net_weight_kg_default) || 0;
+        if (dataToSave.net_weight_kg !== null && dataToSave.net_weight_kg !== undefined && dataToSave.net_weight_kg !== '') {
+          dataToSave.net_weight_kg = parseFloat(dataToSave.net_weight_kg);
+          if (isNaN(dataToSave.net_weight_kg)) {
+            dataToSave.net_weight_kg = null;
+          }
+        } else {
+          dataToSave.net_weight_kg = null;
         }
       }
       // For product_packaging, ensure product_name is set and clean number fields

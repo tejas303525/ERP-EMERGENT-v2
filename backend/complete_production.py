@@ -68,7 +68,7 @@ for job in in_production:
     
     # Create GRN for finished goods
     grn_data = {
-        "supplier": "INTERNAL PRODUCTION",
+        "supplier": "Goods Produced note (GPN)",
         "items": [{
             "product_id": job['product_id'],
             "product_name": job['product_name'],

@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { 
   Package, Plus, Minus, RefreshCw, Search, Edit, History,
-  Box, Boxes, ArrowUpCircle, ArrowDownCircle, FileText, Trash2
+  Box, Boxes, ArrowUpCircle, ArrowDownCircle, FileText, Trash2, Printer
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
@@ -309,6 +309,8 @@ const ProductPackagingReportTab = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [reportData, setReportData] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [selectedItem, setSelectedItem] = useState(null);
   
   useEffect(() => {
     loadReportData();
@@ -325,6 +327,222 @@ const ProductPackagingReportTab = () => {
     } finally {
       setLoading(false);
     }
+  };
+  
+  const handleEdit = (item) => {
+    setSelectedItem(item);
+    setShowEditModal(true);
+  };
+  
+  const handleDelete = async (item) => {
+    if (!window.confirm(`Clear stock for "${item.product_name}" (${item.packing})?\n\nThis will set the stock to 0.`)) {
+      return;
+    }
+    
+    try {
+      // Get current stock value (numeric, not display string)
+      // The backend stores stock in KG, so we need to convert if unit is MT
+      let currentStockKg = item.current_stock || 0;
+      if (item.unit === 'MT') {
+        // Convert MT to KG
+        currentStockKg = currentStockKg * 1000;
+      }
+      
+      // Adjust stock to negative of current stock to clear it
+      const adjustment = -currentStockKg;
+      
+      await api.put(`/stock/${item.product_id}/adjust`, null, {
+        params: { 
+          adjustment, 
+          reason: 'Stock cleared from Product-Packaging Report',
+          packaging_name: item.packing  // Pass packaging name to update specific packaging record
+        }
+      });
+      toast.success('Stock cleared successfully');
+      loadReportData();
+    } catch (error) {
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to clear stock';
+      
+      // Provide more helpful error messages
+      if (errorMessage.includes('does not exist in the packaging database')) {
+        toast.error(
+          `Packaging "${item.packing}" is not in the database. Please run the cleanup script or contact admin.`,
+          { duration: 5000 }
+        );
+      } else if (errorMessage.includes('Packaging record not found')) {
+        toast.error(
+          `Packaging record not found for "${item.packing}". This may be an old database entry.`,
+          { duration: 5000 }
+        );
+      } else {
+        toast.error(errorMessage);
+      }
+      console.error('Stock clear error:', error);
+    }
+  };
+  
+  const handlePrint = () => {
+    // Create a print-friendly window
+    const printWindow = window.open('', '_blank');
+    const printContent = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Product-Packaging Stock Report</title>
+          <style>
+            @media print {
+              @page {
+                margin: 1cm;
+                size: A4 landscape;
+              }
+            }
+            body {
+              font-family: Arial, sans-serif;
+              margin: 20px;
+              color: #000;
+            }
+            .header {
+              text-align: center;
+              margin-bottom: 30px;
+              border-bottom: 2px solid #000;
+              padding-bottom: 15px;
+            }
+            .header h1 {
+              margin: 0;
+              font-size: 24px;
+              font-weight: bold;
+            }
+            .header p {
+              margin: 5px 0;
+              font-size: 14px;
+              color: #666;
+            }
+            .report-info {
+              display: flex;
+              justify-content: space-between;
+              margin-bottom: 20px;
+              font-size: 12px;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-top: 20px;
+              font-size: 11px;
+            }
+            th {
+              background-color: #f0f0f0;
+              border: 1px solid #000;
+              padding: 8px 5px;
+              text-align: left;
+              font-weight: bold;
+            }
+            td {
+              border: 1px solid #ddd;
+              padding: 6px 5px;
+            }
+            tr:nth-child(even) {
+              background-color: #f9f9f9;
+            }
+            .text-right {
+              text-align: right;
+            }
+            .text-center {
+              text-align: center;
+            }
+            .footer {
+              margin-top: 30px;
+              padding-top: 15px;
+              border-top: 1px solid #ddd;
+              font-size: 11px;
+              color: #666;
+              display: flex;
+              justify-content: space-between;
+            }
+            .status-badge {
+              padding: 2px 8px;
+              border-radius: 3px;
+              font-size: 10px;
+              font-weight: bold;
+            }
+            .status-in-stock {
+              background-color: #d4edda;
+              color: #155724;
+            }
+            .status-low-stock {
+              background-color: #fff3cd;
+              color: #856404;
+            }
+            .status-out-of-stock {
+              background-color: #f8d7da;
+              color: #721c24;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>Product-Packaging Stock Report</h1>
+            <p>Stock report showing products by packaging type with standard quantities</p>
+          </div>
+          <div class="report-info">
+            <span><strong>Generated:</strong> ${new Date().toLocaleString('en-GB')}</span>
+            <span><strong>Total Products:</strong> ${filteredProducts.length}</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>S.I. No.</th>
+                <th>PRODUCT</th>
+                <th>PACKING</th>
+                <th class="text-right">QTY-STANDARD</th>
+                <th class="text-right">CURRENT STOCK</th>
+                <th class="text-right">DRUMS</th>
+                <th class="text-center">STATUS</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filteredProducts.map((item, index) => {
+                const statusClass = 
+                  item.status === 'In Stock' ? 'status-in-stock' :
+                  item.status === 'Low Stock' ? 'status-low-stock' :
+                  'status-out-of-stock';
+                return `
+                  <tr>
+                    <td class="text-center">${index + 1}</td>
+                    <td>
+                      <div><strong>${item.product_name || '-'}</strong></div>
+                      <div style="font-size: 9px; color: #666;">${item.sku || '-'}</div>
+                    </td>
+                    <td>${item.packing || '-'}</td>
+                    <td class="text-right">${item.qty_standard_display || '-'}</td>
+                    <td class="text-right"><strong>${item.current_stock_display || '-'}</strong></td>
+                    <td class="text-right">${item.drums_count || 0}</td>
+                    <td class="text-center">
+                      <span class="status-badge ${statusClass}">${item.status || '-'}</span>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+          <div class="footer">
+            <span>ERP System - Stock Management Module</span>
+            <span>Page 1 of 1</span>
+          </div>
+        </body>
+      </html>
+    `;
+    
+    printWindow.document.write(printContent);
+    printWindow.document.close();
+    
+    // Wait for content to load, then print
+    printWindow.onload = () => {
+      setTimeout(() => {
+        printWindow.print();
+        // Optionally close the window after printing
+        // printWindow.close();
+      }, 250);
+    };
   };
   
   // Filter by search term
@@ -358,6 +576,10 @@ const ProductPackagingReportTab = () => {
               <RefreshCw className="w-4 h-4 mr-2" />
               Refresh
             </Button>
+            <Button variant="outline" onClick={handlePrint} size="sm">
+              <Printer className="w-4 h-4 mr-2" />
+              Print
+            </Button>
           </div>
         </div>
       </div>
@@ -383,6 +605,7 @@ const ProductPackagingReportTab = () => {
                 <th className="p-3 text-right text-xs font-medium text-muted-foreground">CURRENT STOCK</th>
                 <th className="p-3 text-right text-xs font-medium text-muted-foreground">DRUMS</th>
                 <th className="p-3 text-center text-xs font-medium text-muted-foreground">STATUS</th>
+                <th className="p-3 text-center text-xs font-medium text-muted-foreground">ACTIONS</th>
               </tr>
             </thead>
             <tbody>
@@ -419,6 +642,27 @@ const ProductPackagingReportTab = () => {
                         {item.status}
                       </Badge>
                     </td>
+                    <td className="p-3">
+                      <div className="flex gap-2 justify-center">
+                        <Button 
+                          size="sm" 
+                          variant="outline" 
+                          onClick={() => handleEdit(item)}
+                          title="Edit stock"
+                        >
+                          <Edit className="w-4 h-4" />
+                        </Button>
+                        <Button 
+                          size="sm" 
+                          variant="outline" 
+                          className="border-red-500/50 text-red-400 hover:bg-red-500/10"
+                          onClick={() => handleDelete(item)}
+                          title="Clear stock"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </td>
                   </tr>
                 );
               })}
@@ -437,6 +681,22 @@ const ProductPackagingReportTab = () => {
           </span>
         </div>
       </div>
+      
+      {/* Edit Stock Modal */}
+      {showEditModal && selectedItem && (
+        <EditStockModal
+          item={selectedItem}
+          onClose={() => {
+            setShowEditModal(false);
+            setSelectedItem(null);
+          }}
+          onAdjusted={() => {
+            setShowEditModal(false);
+            setSelectedItem(null);
+            loadReportData();
+          }}
+        />
+      )}
     </div>
   );
 };
@@ -721,6 +981,236 @@ const AdjustStockModal = ({ item, onClose, onAdjusted }) => {
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={handleSave} disabled={saving || newStock < 0}>
+            {saving ? 'Saving...' : 'Save Adjustment'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// ==================== EDIT STOCK MODAL (for Product-Packaging Report) ====================
+const EditStockModal = ({ item, onClose, onAdjusted }) => {
+  const [adjustmentMode, setAdjustmentMode] = useState('mt'); // 'mt' or 'drums'
+  const [adjustment, setAdjustment] = useState(0);
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  // Get current stock in KG (backend stores stock in KG)
+  const getCurrentStockKg = () => {
+    const currentStock = item.current_stock || 0;
+    if (item.unit === 'MT') {
+      return currentStock * 1000; // Convert MT to KG
+    }
+    return currentStock; // Already in KG
+  };
+
+  // Get net weight per drum from qty_standard
+  const netWeightPerDrum = item.qty_standard || 185; // Default to 185 KG if not available
+  const currentStockKg = getCurrentStockKg();
+  const currentDrums = item.drums_count || 0;
+
+  // Calculate values based on adjustment mode
+  let adjustmentKg = 0;
+  let newStockKg = currentStockKg;
+  let newDrums = currentDrums;
+
+  if (adjustmentMode === 'drums') {
+    // If adjusting by drums, calculate MT change
+    const drumsChange = adjustment;
+    adjustmentKg = drumsChange * netWeightPerDrum;
+    newStockKg = currentStockKg + adjustmentKg;
+    newDrums = currentDrums + drumsChange;
+  } else {
+    // If adjusting by MT, calculate drums change
+    const mtChange = adjustment;
+    adjustmentKg = mtChange * 1000; // Convert MT to KG
+    newStockKg = currentStockKg + adjustmentKg;
+    newDrums = Math.floor(newStockKg / netWeightPerDrum);
+  }
+
+  const handleSave = async () => {
+    if (adjustment === 0) {
+      toast.error('Please enter an adjustment amount');
+      return;
+    }
+    if (newStockKg < 0 || newDrums < 0) {
+      toast.error('Stock cannot be negative');
+      return;
+    }
+    
+    setSaving(true);
+    try {
+      await api.put(`/stock/${item.product_id}/adjust`, null, {
+        params: { 
+          adjustment: adjustmentKg, // Always send adjustment in KG
+          reason: reason || 'Stock adjusted from Product-Packaging Report',
+          packaging_name: item.packing, // Pass packaging name to update specific packaging record
+          adjust_by_drums: adjustmentMode === 'drums' ? adjustment : undefined // Tell backend if adjusting by drums
+        }
+      });
+      toast.success('Stock adjusted successfully');
+      onAdjusted();
+    } catch (error) {
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to adjust stock';
+      toast.error(errorMessage);
+      console.error('Stock adjustment error:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={true} onOpenChange={onClose}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Edit className="w-5 h-5 text-blue-500" />
+            Edit Stock
+          </DialogTitle>
+          <DialogDescription>
+            Adjust stock quantity for {item.product_name} ({item.packing})
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-4">
+          {/* Item Info */}
+          <div className="p-3 rounded bg-muted/20">
+            <p className="font-semibold">{item.product_name}</p>
+            <p className="text-sm text-muted-foreground">SKU: {item.sku}</p>
+            <p className="text-sm text-muted-foreground">Packaging: {item.packing}</p>
+            <p className="text-sm text-muted-foreground">Net Weight: {netWeightPerDrum} KG per drum</p>
+            <div className="mt-2 space-y-1">
+              <p className="text-sm">
+                Current Stock: <span className="font-bold text-emerald-400">{item.current_stock_display}</span>
+              </p>
+              <p className="text-sm">
+                Current Drums: <span className="font-bold text-cyan-400">{currentDrums}</span>
+              </p>
+            </div>
+          </div>
+
+          {/* Adjustment Mode Toggle */}
+          <div>
+            <Label>Adjust By</Label>
+            <div className="flex gap-2 mt-2">
+              <Button
+                type="button"
+                variant={adjustmentMode === 'mt' ? 'default' : 'outline'}
+                onClick={() => {
+                  setAdjustmentMode('mt');
+                  setAdjustment(0);
+                }}
+                className="flex-1"
+              >
+                Metric Tons (MT)
+              </Button>
+              <Button
+                type="button"
+                variant={adjustmentMode === 'drums' ? 'default' : 'outline'}
+                onClick={() => {
+                  setAdjustmentMode('drums');
+                  setAdjustment(0);
+                }}
+                className="flex-1"
+              >
+                Drums
+              </Button>
+            </div>
+          </div>
+
+          {/* Quick Adjust Buttons */}
+          <div className="flex gap-2 justify-center">
+            {adjustmentMode === 'mt' ? (
+              <>
+                <Button size="sm" variant="outline" onClick={() => setAdjustment(prev => prev - 1)}>
+                  <Minus className="w-4 h-4 mr-1" /> 1 MT
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdjustment(prev => prev - 0.5)}>
+                  <Minus className="w-4 h-4 mr-1" /> 0.5 MT
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdjustment(prev => prev + 0.5)}>
+                  <Plus className="w-4 h-4 mr-1" /> 0.5 MT
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdjustment(prev => prev + 1)}>
+                  <Plus className="w-4 h-4 mr-1" /> 1 MT
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button size="sm" variant="outline" onClick={() => setAdjustment(prev => prev - 10)}>
+                  <Minus className="w-4 h-4 mr-1" /> 10
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdjustment(prev => prev - 5)}>
+                  <Minus className="w-4 h-4 mr-1" /> 5
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdjustment(prev => prev + 5)}>
+                  <Plus className="w-4 h-4 mr-1" /> 5
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAdjustment(prev => prev + 10)}>
+                  <Plus className="w-4 h-4 mr-1" /> 10
+                </Button>
+              </>
+            )}
+          </div>
+
+          {/* Adjustment Input */}
+          <div>
+            <Label>
+              Adjustment Amount ({adjustmentMode === 'mt' ? 'MT' : 'Drums'})
+            </Label>
+            <Input
+              type="number"
+              step={adjustmentMode === 'mt' ? 0.01 : 1}
+              value={adjustment}
+              onChange={(e) => setAdjustment(parseFloat(e.target.value) || 0)}
+              className="text-center text-lg"
+              placeholder={`Enter adjustment in ${adjustmentMode === 'mt' ? 'MT' : 'drums'}`}
+            />
+            <p className="text-sm text-muted-foreground mt-1 text-center">
+              Positive to add, negative to remove
+            </p>
+          </div>
+
+          {/* Preview of Changes */}
+          <div className="p-3 rounded border border-dashed space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">New Stock:</span>
+              <span className={`text-xl font-bold ${newStockKg >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {(newStockKg / 1000).toFixed(2)} MT ({newStockKg.toFixed(0)} KG)
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">New Drums:</span>
+              <span className={`text-xl font-bold ${newDrums >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                {newDrums}
+              </span>
+            </div>
+            {adjustmentMode === 'drums' && adjustment !== 0 && (
+              <div className="text-xs text-muted-foreground text-center pt-2 border-t">
+                {adjustment > 0 ? '+' : ''}{adjustment} drums = {adjustmentKg > 0 ? '+' : ''}{(adjustmentKg / 1000).toFixed(2)} MT
+              </div>
+            )}
+            {adjustmentMode === 'mt' && adjustment !== 0 && (
+              <div className="text-xs text-muted-foreground text-center pt-2 border-t">
+                {adjustment > 0 ? '+' : ''}{adjustment} MT = {adjustmentKg > 0 ? '+' : ''}{Math.round(adjustmentKg / netWeightPerDrum)} drums
+              </div>
+            )}
+          </div>
+
+          <div>
+            <Label>Reason</Label>
+            <Input
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Reason for adjustment..."
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSave} disabled={saving || newStockKg < 0 || newDrums < 0}>
             {saving ? 'Saving...' : 'Save Adjustment'}
           </Button>
         </div>

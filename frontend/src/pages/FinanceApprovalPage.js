@@ -3,7 +3,7 @@ import { purchaseOrderAPI, emailAPI, quotationAPI, pdfAPI } from '../lib/api';
 import api from '../lib/api';
 import { Button } from '../components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
-import { DollarSign, Check, X, Send, Mail, AlertCircle, CheckCircle, Clock, Eye, FileText, Download, Calculator, Truck, Receipt } from 'lucide-react';
+import { DollarSign, Check, X, Send, Mail, AlertCircle, CheckCircle, Clock, Eye, FileText, Download, Calculator, Truck, Receipt, Printer } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
 import CostingModal from '../components/CostingModal';
@@ -791,6 +791,381 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
   ? costing.total_cost
   : customTotalFromRows || 0;
 
+  // Print handler for individual quotation
+  const handlePrint = () => {
+    const printWindow = window.open('', '_blank');
+    
+    // Calculate profit/margin
+    const profit = costing?.custom_breakdown?.net_profit_loss 
+      ?? costing?.margin_amount 
+      ?? ((quotation.total || 0) - totalCost);
+    
+    const profitPercentage = costing?.margin_percentage 
+      ?? (quotation.total > 0 ? (profit / quotation.total) * 100 : 0);
+
+    const printContent = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>${quotation.pfi_number} - Quotation Details</title>
+          <style>
+            @media print {
+              @page {
+                margin: 1cm;
+                size: A4;
+              }
+            }
+            body {
+              font-family: Arial, sans-serif;
+              margin: 20px;
+              color: #000;
+            }
+            .header {
+              text-align: center;
+              margin-bottom: 30px;
+              border-bottom: 2px solid #000;
+              padding-bottom: 15px;
+            }
+            .header h1 {
+              margin: 0;
+              font-size: 24px;
+              font-weight: bold;
+            }
+            .header p {
+              margin: 5px 0;
+              font-size: 14px;
+              color: #666;
+            }
+            .info-section {
+              margin-bottom: 25px;
+            }
+            .info-grid {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 15px;
+              margin-bottom: 20px;
+            }
+            .info-item {
+              padding: 10px;
+              background-color: #f9f9f9;
+              border: 1px solid #ddd;
+              border-radius: 4px;
+            }
+            .info-item label {
+              font-size: 11px;
+              color: #666;
+              display: block;
+              margin-bottom: 5px;
+            }
+            .info-item value {
+              font-size: 14px;
+              font-weight: bold;
+              color: #000;
+            }
+            .status-badge {
+              padding: 4px 10px;
+              border-radius: 4px;
+              font-size: 11px;
+              font-weight: bold;
+              display: inline-block;
+              margin: 2px;
+            }
+            .status-pending {
+              background-color: #fff3cd;
+              color: #856404;
+            }
+            .status-approved {
+              background-color: #d4edda;
+              color: #155724;
+            }
+            .status-proforma {
+              background-color: #d1ecf1;
+              color: #0c5460;
+            }
+            .status-cost-confirmed {
+              background-color: #d4edda;
+              color: #155724;
+            }
+            .status-cost-pending {
+              background-color: #fff3cd;
+              color: #856404;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-top: 15px;
+              font-size: 11px;
+            }
+            th, td {
+              border: 1px solid #ddd;
+              padding: 8px;
+              text-align: left;
+            }
+            th {
+              background-color: #f0f0f0;
+              font-weight: bold;
+            }
+            .text-right {
+              text-align: right;
+            }
+            .text-center {
+              text-align: center;
+            }
+            .summary-box {
+              background-color: #f9f9f9;
+              border: 2px solid #000;
+              padding: 15px;
+              margin-top: 20px;
+              border-radius: 4px;
+            }
+            .summary-row {
+              display: flex;
+              justify-content: space-between;
+              padding: 8px 0;
+              border-bottom: 1px solid #ddd;
+            }
+            .summary-row:last-child {
+              border-bottom: none;
+            }
+            .summary-label {
+              font-weight: bold;
+            }
+            .summary-value {
+              font-weight: bold;
+              font-size: 16px;
+            }
+            .text-green {
+              color: #155724;
+            }
+            .text-red {
+              color: #721c24;
+            }
+            .product-section {
+              margin-top: 25px;
+              page-break-inside: avoid;
+            }
+            .product-card {
+              border: 1px solid #ddd;
+              padding: 15px;
+              margin-bottom: 15px;
+              background-color: #fafafa;
+            }
+            .product-header {
+              display: flex;
+              justify-content: space-between;
+              padding-bottom: 10px;
+              border-bottom: 1px solid #ddd;
+              margin-bottom: 10px;
+            }
+            .footer {
+              margin-top: 30px;
+              padding-top: 15px;
+              border-top: 1px solid #ddd;
+              font-size: 11px;
+              color: #666;
+              text-align: center;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>${quotation.pfi_number}</h1>
+            <p>Quotation / Proforma Invoice Details</p>
+          </div>
+
+          <div class="info-section">
+            <div class="info-grid">
+              <div class="info-item">
+                <label>PFI Number</label>
+                <value>${quotation.pfi_number || '-'}</value>
+              </div>
+              <div class="info-item">
+                <label>Status</label>
+                <value>
+                  <span class="status-badge ${quotation.status === 'pending' ? 'status-pending' : 'status-approved'}">${quotation.status?.toUpperCase() || '-'}</span>
+                  ${quotation.finance_approved ? '<span class="status-badge status-proforma">PROFORMA INVOICE</span>' : ''}
+                  ${quotation.cost_confirmed ? '<span class="status-badge status-cost-confirmed">Cost Confirmed</span>' : '<span class="status-badge status-cost-pending">Cost Pending</span>'}
+                </value>
+              </div>
+              <div class="info-item">
+                <label>Customer</label>
+                <value>${quotation.customer_name || '-'}</value>
+              </div>
+              <div class="info-item">
+                <label>Order Type</label>
+                <value>${quotation.order_type?.toUpperCase() || '-'}${quotation.local_type ? ` (${quotation.local_type === 'direct_to_customer' ? 'Direct to Customer' : quotation.local_type === 'bulk_to_plant' ? 'Bulk to Plant' : quotation.local_type === 'packaged_to_plant' ? 'Drum to Plant' : quotation.local_type})` : ''}</value>
+              </div>
+              <div class="info-item">
+                <label>Payment Terms</label>
+                <value>${quotation.payment_terms || '-'}</value>
+              </div>
+              <div class="info-item">
+                <label>Currency</label>
+                <value>${quotation.currency || 'USD'}</value>
+              </div>
+              ${quotation.order_type === 'export' ? `
+                <div class="info-item">
+                  <label>Incoterm</label>
+                  <value>${quotation.incoterm || '-'}</value>
+                </div>
+                <div class="info-item">
+                  <label>Port of Loading</label>
+                  <value>${quotation.port_of_loading || '-'}</value>
+                </div>
+              ` : ''}
+              <div class="info-item">
+                <label>Created At</label>
+                <value>${new Date(quotation.created_at).toLocaleString('en-GB')}</value>
+              </div>
+              ${quotation.finance_approved_at ? `
+                <div class="info-item">
+                  <label>Finance Approved At</label>
+                  <value>${new Date(quotation.finance_approved_at).toLocaleString('en-GB')}</value>
+                </div>
+              ` : ''}
+            </div>
+          </div>
+
+          ${quotation.items && quotation.items.length > 0 ? `
+            <div class="product-section">
+              <h2 style="border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 20px;">Products & Costing Breakdown</h2>
+              
+              ${quotation.items.map((item, idx) => {
+                const itemWeight = item.weight_mt || (item.quantity || 0);
+                const totalWeight = quotation.items.reduce((sum, i) => sum + (i.weight_mt || i.quantity || 0), 0);
+                const weightProportion = totalWeight > 0 ? itemWeight / totalWeight : (1 / quotation.items.length);
+                const itemCost = totalCost * weightProportion;
+                const itemSellingPrice = item.total || 0;
+                const itemProfit = itemSellingPrice - itemCost;
+                const itemProfitPercentage = itemSellingPrice > 0 ? (itemProfit / itemSellingPrice) * 100 : 0;
+                const itemCostRows = costRows.map(row => ({
+                  ...row,
+                  total: (row.total || 0) * weightProportion,
+                  rate: row.rate,
+                  units: row.units
+                }));
+
+                return `
+                  <div class="product-card">
+                    <div class="product-header">
+                      <div>
+                        <strong style="font-size: 14px;">${item.product_name || '-'}</strong>
+                        <div style="font-size: 11px; color: #666; margin-top: 5px;">
+                          Qty: ${item.quantity || 0} | Packaging: ${item.packaging || '-'}${item.weight_mt ? ` | Weight: ${item.weight_mt} MT` : ''}
+                        </div>
+                      </div>
+                      <div class="text-right">
+                        <div style="font-size: 11px; color: #666;">Selling Price</div>
+                        <div style="font-size: 16px; font-weight: bold; color: #155724;">
+                          ${quotation.currency} ${itemSellingPrice.toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    ${itemCostRows.length > 0 ? `
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Description</th>
+                            <th class="text-right">Rate</th>
+                            <th class="text-right">Units</th>
+                            <th class="text-right">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          ${itemCostRows.map((row) => `
+                            <tr>
+                              <td>${row.description || '-'}</td>
+                              <td class="text-right">${row.rate?.toFixed(2) || '-'}</td>
+                              <td class="text-right">${row.units || '-'}</td>
+                              <td class="text-right">${quotation.currency} ${row.total?.toFixed(2) || '0.00'}</td>
+                            </tr>
+                          `).join('')}
+                        </tbody>
+                        <tfoot>
+                          <tr>
+                            <td colspan="3" class="text-right"><strong>Total Cost:</strong></td>
+                            <td class="text-right"><strong>${quotation.currency} ${itemCost.toFixed(2)}</strong></td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    ` : ''}
+                    
+                    <div style="display: flex; justify-content: space-between; margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+                      <div>
+                        <div style="font-size: 11px; color: #666;">Net ${itemProfit >= 0 ? 'Profit' : 'Loss'}</div>
+                        <div style="font-size: 18px; font-weight: bold; color: ${itemProfit >= 0 ? '#155724' : '#721c24'};">
+                          ${itemProfit >= 0 ? '+' : ''}${quotation.currency} ${itemProfit.toFixed(2)}
+                        </div>
+                        <div style="font-size: 11px; color: ${itemProfit >= 0 ? '#155724' : '#721c24'};">
+                          ${itemProfitPercentage >= 0 ? '+' : ''}${itemProfitPercentage.toFixed(2)}% margin
+                        </div>
+                      </div>
+                      <div class="text-right">
+                        <div style="font-size: 11px; color: #666;">Cost Allocation</div>
+                        <div style="font-size: 12px; font-weight: bold;">
+                          ${(weightProportion * 100).toFixed(1)}% of total
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+              
+              <div class="summary-box">
+                <div class="summary-row">
+                  <span class="summary-label">Total Selling Price:</span>
+                  <span class="summary-value text-green">${quotation.currency} ${quotation.total?.toFixed(2) || '0.00'}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Total Cost:</span>
+                  <span class="summary-value">${quotation.currency} ${totalCost.toFixed(2)}</span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Total Net ${profit >= 0 ? 'Profit' : 'Loss'}:</span>
+                  <span class="summary-value ${profit >= 0 ? 'text-green' : 'text-red'}">
+                    ${profit >= 0 ? '+' : ''}${quotation.currency} ${profit.toFixed(2)}
+                  </span>
+                </div>
+                <div class="summary-row">
+                  <span class="summary-label">Margin Percentage:</span>
+                  <span class="summary-value ${profit >= 0 ? 'text-green' : 'text-red'}">
+                    ${profitPercentage >= 0 ? '+' : ''}${profitPercentage.toFixed(2)}%
+                  </span>
+                </div>
+                ${quotation.margin !== undefined && quotation.margin !== null ? `
+                  <div class="summary-row">
+                    <span class="summary-label">Margin Amount:</span>
+                    <span class="summary-value ${quotation.margin >= 0 ? 'text-green' : 'text-red'}">
+                      ${quotation.margin >= 0 ? '+' : ''}${quotation.currency} ${quotation.margin.toFixed(2)} (${quotation.margin_percentage?.toFixed(2) || 0}%)
+                    </span>
+                  </div>
+                ` : ''}
+              </div>
+            </div>
+          ` : `
+            <div style="text-align: center; padding: 40px; border: 1px solid #ddd; margin-top: 20px;">
+              <p style="color: #666;">No items found</p>
+            </div>
+          `}
+
+          <div class="footer">
+            <p>ERP System - Finance Approval Module</p>
+            <p>Generated: ${new Date().toLocaleString('en-GB')}</p>
+          </div>
+        </body>
+      </html>
+    `;
+    
+    printWindow.document.write(printContent);
+    printWindow.document.close();
+    printWindow.onload = () => {
+      setTimeout(() => {
+        printWindow.print();
+      }, 250);
+    };
+  };
+
   return (
     <div className="glass p-4 rounded-lg border border-border" data-testid={`quotation-${quotation.id}`}>
       <div className="flex items-start justify-between">
@@ -855,6 +1230,10 @@ const QuotationCard = ({ quotation, onApprove, onView, onDownloadPDF, onCheckCos
           <Button size="sm" variant="outline" onClick={onDownloadPDF} data-testid={`download-quotation-${quotation.id}`}>
             <Download className="w-4 h-4 mr-1" />
             PDF
+          </Button>
+          <Button size="sm" variant="outline" onClick={handlePrint} data-testid={`print-quotation-${quotation.id}`}>
+            <Printer className="w-4 h-4 mr-1" />
+            Print
           </Button>
           {!quotation.finance_approved && (
             <Button 
@@ -1241,6 +1620,15 @@ const POCard = ({ po, onApprove, onReject, onView, onSend, showApprovalActions, 
             )}
           </div>
           <p className="text-muted-foreground text-sm">Supplier: {po.supplier_name}</p>
+          {po.created_at && (
+            <p className="text-muted-foreground text-xs mt-0.5">
+              Date of Issuance: {new Date(po.created_at).toLocaleDateString('en-US', { 
+                year: 'numeric', 
+                month: 'short', 
+                day: 'numeric' 
+              })}
+            </p>
+          )}
           <p className="text-green-400 font-medium text-lg mt-1">
             {po.currency} {po.total_amount?.toFixed(2)}
           </p>
@@ -1362,6 +1750,26 @@ const POCard = ({ po, onApprove, onReject, onView, onSend, showApprovalActions, 
 
 // PO View Modal Component
 const POViewModal = ({ po, onClose }) => {
+  const handleViewPDF = () => {
+    const token = localStorage.getItem('erp_token');
+    let url = pdfAPI.getPOUrl(po.id, false);
+    if (token) {
+      const separator = url.includes('?') ? '&' : '?';
+      url += `${separator}token=${encodeURIComponent(token)}`;
+    }
+    window.open(url, '_blank');
+  };
+
+  const handlePrintPDF = () => {
+    const token = localStorage.getItem('erp_token');
+    let url = pdfAPI.getPOUrl(po.id, true);
+    if (token) {
+      const separator = url.includes('?') ? '&' : '?';
+      url += `${separator}token=${encodeURIComponent(token)}`;
+    }
+    window.open(url, '_blank');
+  };
+
   return (
     <Dialog open={true} onOpenChange={onClose}>
       <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
@@ -1371,6 +1779,28 @@ const POViewModal = ({ po, onClose }) => {
             Purchase Order Details - {po.po_number}
           </DialogTitle>
         </DialogHeader>
+
+        {/* PDF Action Buttons */}
+        <div className="flex gap-2 mb-4">
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={handleViewPDF}
+            className="flex items-center gap-2"
+          >
+            <FileText className="w-4 h-4" />
+            View PDF
+          </Button>
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={handlePrintPDF}
+            className="flex items-center gap-2"
+          >
+            <Printer className="w-4 h-4" />
+            Print PDF
+          </Button>
+        </div>
 
         <div className="space-y-6">
           {/* Basic Information */}

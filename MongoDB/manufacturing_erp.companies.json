@@ -1,0 +1,27 @@
+[{
+  "_id": {
+    "$oid": "6954c9ff385f52c469222e89"
+  },
+  "id": "721f58c1-6b21-4daa-992b-8bd4816ed71b",
+  "name": "ASIA RAK FACTORY",
+  "address": "RAK",
+  "type": "billing"
+},
+{
+  "_id": {
+    "$oid": "6954d9b1998e5ba62377740c"
+  },
+  "id": "ac19e309-aba4-41e7-9a9e-3111118e18f6",
+  "name": "Success spare parts",
+  "address": "Dubai",
+  "type": "both"
+},
+{
+  "_id": {
+    "$oid": "6956544f86462a3a797783fe"
+  },
+  "id": "dd0b9396-dbcf-4518-b7c5-dde3baa5c6d3",
+  "name": "Asia Hamriya",
+  "address": "Sharjah",
+  "type": "shipping"
+}]

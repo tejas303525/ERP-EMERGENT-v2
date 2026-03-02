@@ -255,6 +255,7 @@ export default function QuotationsPage() {
       ]);
       setQuotations(quotationsRes.data);
       setCustomers(customersRes.data);
+      // Show all products with finished_product category
       setProducts(productsRes.data.filter(p => p.category === 'finished_product'));
       
       // Load packaging from inventory_items (item_type=PACK) - single source of truth
@@ -527,7 +528,14 @@ export default function QuotationsPage() {
       toast.error('Please select a product and enter quantity');
       return;
     }
-    if (newItem.packaging !== 'Bulk' && !newItem.net_weight_kg && newItem.uom !== 'per_unit') {
+    
+    // Allow TANKER and bulk-like packaging to have empty net weight when UOM is per_mt (like Bulk)
+    const packagingLower = (newItem.packaging || '').toLowerCase();
+    const isBulkLikePackaging = newItem.packaging === 'Bulk' || 
+                               packagingLower.includes('tanker') ||
+                               packagingLower.includes('bulk');
+    
+    if (!isBulkLikePackaging && !newItem.net_weight_kg && newItem.uom !== 'per_unit') {
       toast.error('Please enter net weight (kg) for packaged items');
       return;
     }

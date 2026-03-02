@@ -210,16 +210,35 @@ const SecurityQCPage = () => {
         return Array.from(poMap.values());
       };
       
-      // Helper function to check if a transport has a GRN created
+      // Helper function to check if a transport has a GRN created AND all items are fully received
       // GRN can be linked via:
       // 1. Direct PO link (po_id) -> transport.po_id
       // 2. QC inspection (qc_inspection_id) -> QC inspection (ref_id) -> transport.id or po_id
       const hasGRNCreated = (transport, inspections, grns) => {
+        // Check if transport has all items fully received (backend provides this flag)
+        if (transport.all_items_fully_received === true) {
+          return true;
+        }
+        
+        // If backend doesn't provide the flag, check manually
         // First, check if there's a GRN directly linked to the PO
         if (transport.po_id) {
           const directGRN = grns.find(g => g.po_id === transport.po_id);
           if (directGRN) {
-            return true;
+            // Check if all PO lines are fully received
+            if (transport.po_items && transport.po_items.length > 0) {
+              const allReceived = transport.po_items.every(line => {
+                const ordered = line.qty || 0;
+                const received = line.received_qty || 0;
+                return received >= ordered;
+              });
+              if (allReceived) {
+                return true;
+              }
+            } else {
+              // If no PO items info, assume fully received if GRN exists
+              return true;
+            }
           }
         }
         
@@ -227,7 +246,20 @@ const SecurityQCPage = () => {
         if (transport.po_number) {
           const grnByPONumber = grns.find(g => g.po_number === transport.po_number);
           if (grnByPONumber) {
-            return true;
+            // Check if all PO lines are fully received
+            if (transport.po_items && transport.po_items.length > 0) {
+              const allReceived = transport.po_items.every(line => {
+                const ordered = line.qty || 0;
+                const received = line.received_qty || 0;
+                return received >= ordered;
+              });
+              if (allReceived) {
+                return true;
+              }
+            } else {
+              // If no PO items info, assume fully received if GRN exists
+              return true;
+            }
           }
         }
         
@@ -257,7 +289,20 @@ const SecurityQCPage = () => {
           // Check if there's a GRN with this QC inspection id
           const grn = grns.find(g => g.qc_inspection_id === qcInspection.id);
           if (grn) {
-            return true;
+            // Check if all PO lines are fully received
+            if (transport.po_items && transport.po_items.length > 0) {
+              const allReceived = transport.po_items.every(line => {
+                const ordered = line.qty || 0;
+                const received = line.received_qty || 0;
+                return received >= ordered;
+              });
+              if (allReceived) {
+                return true;
+              }
+            } else {
+              // If no PO items info, assume fully received if GRN exists
+              return true;
+            }
           }
         }
         
@@ -1270,8 +1315,22 @@ const InwardTransportTab = ({ transports, qcInspections, onOpenChecklist, onView
                       </td>
                       
                       {/* Product Column */}
-                      <td className="p-2 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}>
-                        {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}
+                      <td className="p-2 text-sm max-w-[200px]">
+                        <div className="flex flex-col gap-1">
+                          <div className="truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}>
+                            {transport.products_summary || transport.product_names?.join(', ') || transport.po_items?.map(i => i.display_name || i.item_name).join(', ') || '-'}
+                          </div>
+                          {transport.remaining_items && transport.remaining_items.length > 0 && (
+                            <div className="flex flex-col gap-0.5">
+                              {transport.remaining_items.map((item, idx) => (
+                                <Badge key={idx} variant="outline" className="bg-amber-500/10 text-amber-400 text-xs border-amber-500/30 w-fit">
+                                  <AlertTriangle className="w-3 h-3 mr-1" />
+                                  Remaining: {item.remaining_qty} {item.unit}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </td>
                       
                       {/* Delivery Note Column */}
@@ -3269,22 +3328,51 @@ const DOIssuanceModal = ({ transport, onClose, onComplete }) => {
       return;
     }
 
+    // Validate required fields before API call
+    if (!transport?.id) {
+      toast.error('Transport ID is missing');
+      return;
+    }
+
+    if (!doData?.delivery_order?.id) {
+      toast.error('Delivery order ID is missing');
+      return;
+    }
+
+    if (!transport?.job_order_id) {
+      toast.error('Job order ID is missing');
+      return;
+    }
+
+    // Calculate unit inside the function to ensure it's always defined
+    let unit = inputUnit;
+    if (!unit) {
+      // Fallback: determine unit from job order or transport
+      if (jobOrder?.unit && jobOrder.unit !== 'MT') {
+        unit = jobOrder.unit; // EA
+      } else if (transport?.unit && transport.unit !== 'MT') {
+        unit = transport.unit; // EA
+      } else {
+        unit = 'MT'; // Default to MT
+      }
+    }
+
     try {
       const response = await api.post('/delivery/confirm', {
         transport_id: transport.id,
-        delivery_order_id: doData.id,
+        delivery_order_id: doData.delivery_order.id,
         job_order_id: transport.job_order_id,
         delivered_qty: parseFloat(formData.delivered_qty),
-        unit: inputUnit, // EA for drums, MT for bulk
+        unit: unit, // Use calculated unit
         delivery_date: new Date().toISOString().split('T')[0],
-        customer_name: formData.customer_name,
-        receiver_name: formData.receiver_name,
-        delivery_notes: formData.delivery_notes
+        customer_name: formData.customer_name || null,
+        receiver_name: formData.receiver_name || null,
+        delivery_notes: formData.delivery_notes || null
       });
 
       if (response.data.is_partial) {
         toast.warning(
-          `Partial delivery recorded. ${response.data.undelivered_qty} ${inputUnit} undelivered.`,
+          `Partial delivery recorded. ${response.data.undelivered_qty} ${unit} undelivered.`,
           { duration: 5000 }
         );
       } else {
@@ -3704,6 +3792,25 @@ const BulkDOIssuanceModal = ({ transports, onClose, onComplete }) => {
       return; // Skip if no delivered quantity entered
     }
 
+    // Validate required fields before API call
+    if (!transport?.id) {
+      console.error('Transport ID is missing');
+      toast.error('Transport ID is missing');
+      return;
+    }
+
+    if (!doData?.delivery_order?.id) {
+      console.error('Delivery order ID is missing');
+      toast.error('Delivery order ID is missing');
+      return;
+    }
+
+    if (!jobOrder?.id) {
+      console.error('Job order ID is missing');
+      toast.error('Job order ID is missing');
+      return;
+    }
+
     const deliveredQty = parseFloat(productDeliveryData.delivered_qty);
     // For drums: send EA, for bulk: send MT
     let expectedQty, unit;
@@ -3740,9 +3847,9 @@ const BulkDOIssuanceModal = ({ transports, onClose, onComplete }) => {
         delivered_qty: deliveredQty,
         unit: unit, // EA for drums, MT for bulk
         delivery_date: new Date().toISOString().split('T')[0],
-        customer_name: commonDeliveryData.customer_name,
-        receiver_name: commonDeliveryData.receiver_name,
-        delivery_notes: productDeliveryData.delivery_notes || commonDeliveryData.delivery_notes
+        customer_name: commonDeliveryData.customer_name || null,
+        receiver_name: commonDeliveryData.receiver_name || null,
+        delivery_notes: productDeliveryData.delivery_notes || commonDeliveryData.delivery_notes || null
       });
 
       if (response.data.is_partial) {

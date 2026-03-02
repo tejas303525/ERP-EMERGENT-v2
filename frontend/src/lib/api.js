@@ -285,6 +285,14 @@ export const blendReportAPI = {
 // PDF Downloads
 export const pdfAPI = {
   getQuotationUrl: (quotationId, print = false) => `${API_BASE}/pdf/quotation/${quotationId}${print ? '?print=true' : ''}`,
+  getInvoiceUrl: (invoiceId, print = false) => `${API_BASE}/pdf/invoice/${invoiceId}${print ? '?print=true' : ''}`,
+  getPOUrl: (poId, print = false) => {
+    const baseUrl = `${API_BASE}/pdf/purchase-order/${poId}`;
+    const params = new URLSearchParams();
+    if (print) params.append('print', 'true');
+    const queryString = params.toString();
+    return queryString ? `${baseUrl}?${queryString}` : baseUrl;
+  },
   getCROUrl: (bookingId) => `${API_BASE}/pdf/cro/${bookingId}`,
   getBlendReportUrl: (reportId) => `${API_BASE}/pdf/blend-report/${reportId}`,
   getDeliveryNoteUrl: (deliveryOrderId) => {

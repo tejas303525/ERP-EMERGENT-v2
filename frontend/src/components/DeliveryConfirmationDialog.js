@@ -54,18 +54,34 @@ export default function DeliveryConfirmationDialog({
       return;
     }
 
+    // Validate required fields before API call
+    if (!transport?.id) {
+      toast.error('Transport ID is missing');
+      return;
+    }
+
+    if (!deliveryOrder?.id) {
+      toast.error('Delivery order ID is missing');
+      return;
+    }
+
+    if (!jobOrder?.id) {
+      toast.error('Job order ID is missing');
+      return;
+    }
+
     setSubmitting(true);
     try {
       const response = await api.post('/delivery/confirm', {
         transport_id: transport.id,
-        delivery_order_id: deliveryOrder?.id,
+        delivery_order_id: deliveryOrder.id,
         job_order_id: jobOrder.id,
         delivered_qty: parseFloat(deliveredQty),
         unit: unit,
         delivery_date: new Date().toISOString().split('T')[0],
-        customer_name: customerName,
-        receiver_name: receiverName,
-        delivery_notes: deliveryNotes
+        customer_name: customerName || null,
+        receiver_name: receiverName || null,
+        delivery_notes: deliveryNotes || null
       });
 
       if (response.data.is_partial) {

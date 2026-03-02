@@ -1,0 +1,110 @@
+[{
+  "_id": {
+    "$oid": "6964ce1fe24883b0af3d575a"
+  },
+  "id": "07785739-2ba2-40dc-97ed-fb6c03613bba",
+  "bl_number": "BL-000001",
+  "do_number": "DO-000040",
+  "job_order_id": "b12fa85d-68de-49d4-91ae-a4f8002b5450",
+  "job_number": "JOB-000102",
+  "customer_name": "SARL GNMC",
+  "product_name": "ETAC",
+  "quantity": 108,
+  "port_of_loading": "JEBEL ALI",
+  "port_of_discharge": "ALGIERS",
+  "final_port_delivery": "",
+  "incoterm": "FOB",
+  "shipping_line": "",
+  "container_number": "",
+  "status": "DRAFT",
+  "created_by": "16562147-d2e8-4d6e-870d-d6dc013ccd0e",
+  "created_at": "2026-01-12T10:34:07.711372+00:00"
+},
+{
+  "_id": {
+    "$oid": "696dbebf2b7c91baf6ce4dd3"
+  },
+  "id": "806fef63-5e2a-4a42-89c0-439aa6e3ea2d",
+  "bl_number": "BL-000002",
+  "do_number": "DO-000041",
+  "job_order_id": "5580c8b0-728a-4e08-84c9-842899aafe80",
+  "job_number": "JOB-000159",
+  "customer_name": "RIJOY",
+  "product_name": "IPA TECH",
+  "quantity": 50,
+  "port_of_loading": "jebel ali",
+  "port_of_discharge": "mombasa",
+  "final_port_delivery": "",
+  "incoterm": "FOB",
+  "shipping_line": "",
+  "container_number": "",
+  "status": "DRAFT",
+  "created_by": "16562147-d2e8-4d6e-870d-d6dc013ccd0e",
+  "created_at": "2026-01-19T05:18:55.873170+00:00"
+},
+{
+  "_id": {
+    "$oid": "696e0573ca4238bb0b999acf"
+  },
+  "id": "31ec03d6-587e-46d1-a175-474697ad08cc",
+  "bl_number": "BL-000003",
+  "do_number": "DO-000042",
+  "job_order_id": "861aaf02-e173-43a5-b35d-44bb74bb62e5",
+  "job_number": "JOB-000160",
+  "customer_name": "RIJOY",
+  "product_name": "IPA TECH",
+  "quantity": 50,
+  "port_of_loading": "jebel ali",
+  "port_of_discharge": "mombasa",
+  "final_port_delivery": "",
+  "incoterm": "FOB",
+  "shipping_line": "",
+  "container_number": "",
+  "status": "DRAFT",
+  "created_by": "16562147-d2e8-4d6e-870d-d6dc013ccd0e",
+  "created_at": "2026-01-19T10:20:35.857709+00:00"
+},
+{
+  "_id": {
+    "$oid": "69706e4ca1efe0a07637d0ff"
+  },
+  "id": "c89d6b36-ad8c-4cea-9621-934b20249cec",
+  "bl_number": "BL-000004",
+  "do_number": "DO-000045",
+  "job_order_id": "ab58dc04-2d65-47e6-a48f-5d869d701bd0",
+  "job_number": "JOB-000155",
+  "customer_name": "RIJOY",
+  "product_name": "ETAC",
+  "quantity": 90,
+  "port_of_loading": "xxx",
+  "port_of_discharge": "yy",
+  "final_port_delivery": "",
+  "incoterm": "FOB",
+  "shipping_line": "",
+  "container_number": "",
+  "status": "DRAFT",
+  "created_by": "16562147-d2e8-4d6e-870d-d6dc013ccd0e",
+  "created_at": "2026-01-21T06:12:28.793779+00:00"
+},
+{
+  "_id": {
+    "$oid": "697cae3cf31c02ffe1117e02"
+  },
+  "id": "d2ad13b0-9ef1-4aa4-8372-3ad3f34ef0c6",
+  "bl_number": "BL-000005",
+  "do_number": "DO-000047",
+  "job_order_id": "bc906b2e-7b6a-49ee-a30b-abf3cc7fa466",
+  "job_number": "JOB-000203",
+  "customer_name": "C2CI",
+  "product_name": "IPA PURE",
+  "quantity": 50,
+  "port_of_loading": "Jebel ali",
+  "port_of_discharge": "Abidjan",
+  "final_port_delivery": "",
+  "incoterm": "CFR",
+  "shipping_line": "",
+  "container_number": "",
+  "status": "DRAFT",
+  "created_by": "16562147-d2e8-4d6e-870d-d6dc013ccd0e",
+  "created_at": "2026-01-30T13:12:28.606103+00:00"
+}]

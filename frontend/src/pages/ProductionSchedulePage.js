@@ -26,6 +26,7 @@ import {
   Layers
 } from 'lucide-react';
 import { Input } from '../components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import api from '../lib/api';
 
 export default function ProductionSchedulePage() {
@@ -64,6 +65,23 @@ export default function ProductionSchedulePage() {
   const [calendarStartDate, setCalendarStartDate] = useState(new Date().toISOString().split('T')[0]);
   const [calendarDays, setCalendarDays] = useState(14);
 
+  // GPN Production states
+  const [gpnModalOpen, setGpnModalOpen] = useState(false);
+  const [bomPreviewOpen, setBomPreviewOpen] = useState(false);
+  const [gpnForm, setGpnForm] = useState({
+    batch_number: '',
+    product_id: '',
+    product_name: '',
+    packaging: '',
+    net_weight_kg: '',
+    num_drums: '',
+    total_mt: 0
+  });
+  const [products, setProducts] = useState([]);
+  const [packagingOptions, setPackagingOptions] = useState([]);
+  const [bomCalculations, setBomCalculations] = useState([]);
+  const [loadingGpn, setLoadingGpn] = useState(false);
+
   useEffect(() => {
     loadData();
     // Load all 4 categories on page load
@@ -71,7 +89,30 @@ export default function ProductionSchedulePage() {
     loadCategoryJobs('lubricants');
     loadCategoryJobs('plasticisers');
     loadCategoryJobs('jelly');
+    loadProductsAndPackaging();
   }, []);
+
+  const loadProductsAndPackaging = async () => {
+    try {
+      const [productsRes, packagingRes] = await Promise.all([
+        api.get('/products'),
+        api.get('/inventory-items/packaging/for-quotation')  // Use the same endpoint as QuotationsPage
+      ]);
+      setProducts((productsRes.data || []).filter(p => p.type === 'MANUFACTURED' || p.type === 'TRADED'));
+      
+      // Store full packaging objects (same as QuotationsPage)
+      const packagingFromInventory = packagingRes.data || [];
+      setPackagingOptions(packagingFromInventory);
+      
+      // Debug log to check if packaging is loaded
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Packaging loaded:', packagingFromInventory.length, 'items');
+      }
+    } catch (error) {
+      console.error('Error loading products/packaging:', error);
+      toast.error('Failed to load products/packaging: ' + (error.response?.data?.detail || error.message));
+    }
+  };
 
   useEffect(() => {
     if (activeTab === 'calendar') {
@@ -172,24 +213,48 @@ export default function ProductionSchedulePage() {
   const handleCreateLog = async (job) => {
     setSelectedJob(job);
     
-    // Use quantity_pending from job if available (from backend API)
-    // Otherwise, calculate by fetching existing production logs
-    let pendingQty = job.quantity_pending;
+    // Check if this is a GPN job (Goods Produced Note - internal production)
+    const isGpnJob = job.job_number && job.job_number.toUpperCase().startsWith('GPN-');
     
-    if (pendingQty === undefined || pendingQty === null) {
-      // If not provided, calculate by fetching existing production logs
+    // Always fetch existing production logs to calculate accurate pending quantity
+    let existingTotalProduced = 0;
+    if (!isGpnJob) {
+      // For regular job orders, count all existing logs
       try {
         const logsRes = await productionLogAPI.getAll(job.job_id, job.product_id);
         const logs = logsRes.data || [];
-        const totalProduced = logs.reduce((sum, log) => sum + (log.quantity_produced || 0), 0);
-        const requiredQty = job.quantity || 0;
-        pendingQty = Math.max(0, requiredQty - totalProduced);
+        existingTotalProduced = logs.reduce((sum, log) => sum + (log.quantity_produced || 0), 0);
       } catch (error) {
         console.warn('Failed to fetch existing production logs:', error);
-        // Fallback to job quantity if calculation fails
-        pendingQty = job.quantity || 0;
+        existingTotalProduced = 0;
+      }
+    } else {
+      // For GPN jobs, ignore the initial log created during GPN creation
+      // The initial log is just a placeholder - actual drum filling happens later
+      // So we start with pending = required quantity
+      try {
+        const logsRes = await productionLogAPI.getAll(job.job_id, job.product_id);
+        const logs = logsRes.data || [];
+        const requiredQty = job.quantity || 0;
+        
+        // Filter out the initial GPN log (it has quantity_produced = required_qty and was created during GPN creation)
+        // If there's only one log with quantity_produced equal to required_qty, it's the initial placeholder - ignore it
+        if (logs.length === 1 && logs[0].quantity_produced === requiredQty) {
+          // This is the initial placeholder log - ignore it
+          existingTotalProduced = 0;
+        } else {
+          // Multiple logs or different quantity - count them all (actual production logs)
+          existingTotalProduced = logs.reduce((sum, log) => sum + (log.quantity_produced || 0), 0);
+        }
+      } catch (error) {
+        console.warn('Failed to fetch existing production logs:', error);
+        existingTotalProduced = 0;
       }
     }
+    
+    const requiredQty = job.quantity || 0;
+    // Pending quantity = required - existing logs (starts at required if no logs exist or for GPN initial log)
+    const initialPendingQty = Math.max(0, requiredQty - existingTotalProduced);
     
     setLogForm({
       job_order_id: job.job_id,
@@ -197,10 +262,11 @@ export default function ProductionSchedulePage() {
       product_id: job.product_id,
       product_name: job.product_name,
       production_date: new Date().toISOString().split('T')[0],
-      required_qty: job.quantity, // Keep total for display
+      required_qty: requiredQty,
       quantity_produced: 0,
       batch_number: '',
-      pending_qty: pendingQty, // Store pending quantity (remaining to be produced)
+      pending_qty: initialPendingQty, // Will be updated dynamically as user types
+      existing_total_produced: existingTotalProduced, // Store to recalculate pending
       production_type: 'drummed' // Default to drummed
     });
     setLogModalOpen(true);
@@ -212,11 +278,16 @@ export default function ProductionSchedulePage() {
       return;
     }
 
-    // Validate that quantity_produced doesn't exceed pending quantity
-    const pendingQty = logForm.pending_qty || 0;
-    if (logForm.quantity_produced > pendingQty) {
-      toast.error(`Quantity produced (${logForm.quantity_produced}) cannot exceed pending quantity (${pendingQty})`);
-      return;
+    // Validate total doesn't exceed required (but allow if user is correcting data)
+    const requiredQty = logForm.required_qty || 0;
+    const existingTotal = logForm.existing_total_produced || 0;
+    const newTotal = existingTotal + logForm.quantity_produced;
+    
+    if (newTotal > requiredQty) {
+      const confirm = window.confirm(
+        `Total produced will be ${newTotal}, which exceeds required ${requiredQty}. Continue anyway?`
+      );
+      if (!confirm) return;
     }
 
     try {
@@ -247,6 +318,157 @@ export default function ProductionSchedulePage() {
   };
 
   const canManage = hasPagePermission(user, '/production-schedule', ['admin', 'production']);
+
+  // GPN Production handlers
+  const handleProductChange = async (productId) => {
+    const product = products.find(p => p.id === productId);
+    if (!product) return;
+    
+    setGpnForm(prev => ({
+      ...prev,
+      product_id: productId,
+      product_name: product.name,
+      packaging: '',
+      net_weight_kg: ''
+    }));
+  };
+
+  const handlePackagingChange = async (packagingName) => {
+    if (!gpnForm.product_id || !packagingName) return;
+    
+    setGpnForm(prev => ({ ...prev, packaging: packagingName }));
+    
+    // Try to get net weight from product-packaging configuration
+    try {
+      const response = await api.get(`/products/${gpnForm.product_id}/packaging/${packagingName}`);
+      if (response.data && response.data.net_weight_kg) {
+        setGpnForm(prev => ({ ...prev, net_weight_kg: response.data.net_weight_kg }));
+      }
+    } catch (error) {
+      // If not found, user will enter manually
+      console.log('Net weight not found in config, user will enter manually');
+    }
+  };
+
+  // Auto-calculate total MT when drums or net weight changes
+  useEffect(() => {
+    if (gpnForm.num_drums && gpnForm.net_weight_kg) {
+      const numDrums = parseFloat(gpnForm.num_drums) || 0;
+      const netWeight = parseFloat(gpnForm.net_weight_kg) || 0;
+      const totalKg = numDrums * netWeight;
+      const totalMt = totalKg / 1000;
+      setGpnForm(prev => ({ ...prev, total_mt: totalMt }));
+    }
+  }, [gpnForm.num_drums, gpnForm.net_weight_kg]);
+
+  const handlePreviewBOM = async () => {
+    if (!gpnForm.batch_number || !gpnForm.product_id || !gpnForm.packaging || 
+        !gpnForm.net_weight_kg || !gpnForm.num_drums) {
+      toast.error('Please fill all required fields');
+      return;
+    }
+    
+    // Check if product is a raw material or trading product - these don't need BOM
+    const product = products.find(p => p.id === gpnForm.product_id);
+    if (product && (product.category === 'raw_material' || product.type === 'TRADED')) {
+      // For raw materials and trading products, skip BOM preview and directly submit
+      await handleSubmitGPN();
+      return;
+    }
+    
+    const totalKg = (parseFloat(gpnForm.num_drums) || 0) * (parseFloat(gpnForm.net_weight_kg) || 0);
+    
+    try {
+      // Get BOM for the product - endpoint returns BOMs with items included
+      const bomRes = await api.get(`/product-boms/${gpnForm.product_id}`);
+      const boms = bomRes.data || [];
+      const activeBom = boms.find(b => b.is_active);
+      
+      if (!activeBom) {
+        toast.error('No active BOM found for this product');
+        return;
+      }
+      
+      const bomItems = activeBom.items || [];
+      
+      if (bomItems.length === 0) {
+        toast.error('No BOM items found for this product');
+        return;
+      }
+      
+      // Calculate required quantities
+      const calculations = [];
+      for (const bomItem of bomItems) {
+        const materialId = bomItem.material_item_id;
+        const qtyPerKg = bomItem.qty_kg_per_kg_finished || 0;
+        const requiredQty = totalKg * qtyPerKg;
+        
+        // Get material details and current stock
+        const [materialRes, balanceRes] = await Promise.all([
+          api.get(`/inventory-items/${materialId}`).catch(() => ({ data: null })),
+          api.get(`/inventory-items/${materialId}/availability`).catch(() => ({ data: null }))
+        ]);
+        
+        const material = materialRes.data;
+        const availability = balanceRes.data || {};
+        
+        calculations.push({
+          material_id: materialId,
+          material_name: material?.name || bomItem.material_name || 'Unknown',
+          material_sku: material?.sku || bomItem.material_sku || '-',
+          required_qty: requiredQty,
+          available_qty: availability.available || 0,
+          unit: 'KG',
+          qty_per_kg_finished: qtyPerKg
+        });
+      }
+      
+      setBomCalculations(calculations);
+      setBomPreviewOpen(true);
+    } catch (error) {
+      toast.error('Failed to calculate BOM: ' + (error.response?.data?.detail || error.message));
+    }
+  };
+
+  const handleSubmitGPN = async () => {
+    if (!gpnForm.batch_number || !gpnForm.product_id || !gpnForm.packaging || 
+        !gpnForm.net_weight_kg || !gpnForm.num_drums) {
+      toast.error('Please fill all required fields');
+      return;
+    }
+    
+    setLoadingGpn(true);
+    try {
+      const response = await api.post('/production/gpn-create', {
+        batch_number: gpnForm.batch_number,
+        product_id: gpnForm.product_id,
+        packaging: gpnForm.packaging,
+        net_weight_kg: parseFloat(gpnForm.net_weight_kg),
+        num_drums: parseFloat(gpnForm.num_drums)
+      });
+      
+      if (response.data.success) {
+        toast.success('GPN production created successfully');
+        setGpnModalOpen(false);
+        setBomPreviewOpen(false);
+        setGpnForm({
+          batch_number: '',
+          product_id: '',
+          product_name: '',
+          packaging: '',
+          net_weight_kg: '',
+          num_drums: '',
+          total_mt: 0
+        });
+        // Reload filling jobs
+        loadCategoryJobs('filling_jobs');
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to create GPN production');
+    } finally {
+      setLoadingGpn(false);
+    }
+  };
 
   // Category Jobs Table Component (Compact version for small windows)
   const CategoryJobsTable = ({ jobs, category, compact = false }) => {
@@ -624,9 +846,21 @@ export default function ProductionSchedulePage() {
           <h1 className="module-title">Production Dashboard (Schedule and Planning)</h1>
           <p className="text-muted-foreground text-sm">Schedule based on material availability</p>
         </div>
-        <Button variant="outline" onClick={loadData}>
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button 
+            onClick={() => {
+              loadProductsAndPackaging(); // Reload packaging when opening modal
+              setGpnModalOpen(true);
+            }}
+            className="bg-blue-500 hover:bg-blue-600"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            Create Production
+          </Button>
+          <Button variant="outline" onClick={loadData}>
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Summary Stats */}
@@ -835,10 +1069,19 @@ export default function ProductionSchedulePage() {
                 </div>
                 <div>
                   <Label>Pending Qty (KG)</Label>
-                  <Input value={logForm.pending_qty || 0} disabled className="text-amber-400 font-medium" />
+                  <Input 
+                    value={logForm.pending_qty || 0} 
+                    disabled 
+                    className={logForm.pending_qty <= 0 ? 'text-red-400 font-medium' : 'text-amber-400 font-medium'} 
+                  />
                   <p className="text-xs text-muted-foreground mt-1">
                     ≈ {((logForm.pending_qty || 0) / 1000).toFixed(3)} MT
                   </p>
+                  {logForm.pending_qty <= 0 && (
+                    <p className="text-xs text-red-400 mt-1">
+                      Production already complete. All required quantity has been produced.
+                    </p>
+                  )}
                 </div>
                 <div>
                   <Label>Quantity Produced (KG) * (Max: {logForm.pending_qty || 0})</Label>
@@ -855,6 +1098,7 @@ export default function ProductionSchedulePage() {
                       setLogForm({...logForm, quantity_produced: finalValue});
                     }}
                     placeholder="Enter quantity in KG"
+                    disabled={logForm.pending_qty <= 0}
                     className={logForm.quantity_produced > (logForm.pending_qty || 0) ? 'border-red-500' : ''}
                   />
                   <p className="text-xs text-muted-foreground mt-1">
@@ -863,6 +1107,11 @@ export default function ProductionSchedulePage() {
                   {logForm.quantity_produced > (logForm.pending_qty || 0) && (
                     <p className="text-xs text-red-400 mt-1">
                       Cannot exceed pending quantity ({logForm.pending_qty || 0} KG)
+                    </p>
+                  )}
+                  {logForm.pending_qty <= 0 && (
+                    <p className="text-xs text-red-400 mt-1">
+                      Cannot create production log. No pending quantity remaining.
                     </p>
                   )}
                 </div>
@@ -874,32 +1123,57 @@ export default function ProductionSchedulePage() {
                   <Label>Total Required Qty</Label>
                   <Input value={logForm.required_qty} disabled />
                 </div>
-                <div>
-                  <Label>Pending Qty (Remaining to Produce)</Label>
-                  <Input value={logForm.pending_qty || 0} disabled className="text-amber-400 font-medium" />
-                </div>
-                <div>
-                  <Label>Quantity Produced * (Max: {logForm.pending_qty || 0})</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max={logForm.pending_qty || 0}
-                    step="0.01"
-                    value={logForm.quantity_produced}
-                    onChange={(e) => {
-                      const value = parseFloat(e.target.value) || 0;
-                      const maxValue = logForm.pending_qty || 0;
-                      const finalValue = value > maxValue ? maxValue : value;
-                      setLogForm({...logForm, quantity_produced: finalValue});
-                    }}
-                    className={logForm.quantity_produced > (logForm.pending_qty || 0) ? 'border-red-500' : ''}
-                  />
-                  {logForm.quantity_produced > (logForm.pending_qty || 0) && (
-                    <p className="text-xs text-red-400 mt-1">
-                      Cannot exceed pending quantity ({logForm.pending_qty || 0})
-                    </p>
-                  )}
-                </div>
+            <div>
+              <Label>Pending Qty (Remaining to Produce)</Label>
+              <Input 
+                value={logForm.pending_qty || 0} 
+                disabled 
+                className={logForm.pending_qty <= 0 ? 'text-red-400 font-medium' : 'text-amber-400 font-medium'} 
+              />
+              {logForm.pending_qty <= 0 && (
+                <p className="text-xs text-red-400 mt-1">
+                  Production already complete. All required quantity has been produced.
+                </p>
+              )}
+            </div>
+            <div>
+              <Label>Quantity Produced * (Max: {logForm.required_qty || 0})</Label>
+              <Input
+                type="number"
+                min="0"
+                max={logForm.required_qty || 0}
+                step="0.01"
+                value={logForm.quantity_produced}
+                onChange={(e) => {
+                  const value = parseFloat(e.target.value) || 0;
+                  const requiredQty = logForm.required_qty || 0;
+                  const existingTotal = logForm.existing_total_produced || 0;
+                  
+                  // Clamp to required quantity
+                  const finalValue = Math.max(0, Math.min(value, requiredQty));
+                  
+                  // Recalculate pending: required - existing - current entry
+                  const newPendingQty = Math.max(0, requiredQty - existingTotal - finalValue);
+                  
+                  setLogForm({
+                    ...logForm, 
+                    quantity_produced: finalValue,
+                    pending_qty: newPendingQty  // Update pending dynamically
+                  });
+                }}
+                className={logForm.quantity_produced > (logForm.pending_qty || 0) ? 'border-amber-500' : ''}
+              />
+              {logForm.quantity_produced > (logForm.pending_qty || 0) && logForm.pending_qty > 0 && (
+                <p className="text-xs text-amber-400 mt-1">
+                  Warning: This exceeds remaining pending quantity ({logForm.pending_qty || 0})
+                </p>
+              )}
+              {logForm.pending_qty <= 0 && logForm.quantity_produced === 0 && (
+                <p className="text-xs text-amber-400 mt-1">
+                  All required quantity has been produced. You can still enter quantity if needed.
+                </p>
+              )}
+            </div>
               </>
             )}
 
@@ -913,7 +1187,7 @@ export default function ProductionSchedulePage() {
             </div>
             
             {logForm.required_qty > 0 && (
-              <div className="bg-muted/30 p-3 rounded">
+              <div className={`p-3 rounded ${logForm.pending_qty <= 0 ? 'bg-red-500/10 border border-red-500/30' : 'bg-muted/30'}`}>
                 <div className="text-sm">
                   <div className="flex justify-between mb-1">
                     <span>Total Required:</span>
@@ -929,11 +1203,18 @@ export default function ProductionSchedulePage() {
                   </div>
                   <div className="flex justify-between">
                     <span>Remaining After This Entry:</span>
-                    <span className="font-medium text-amber-400">
-                      {Math.max(0, (logForm.pending_qty || 0) - logForm.quantity_produced)}
+                    <span className={`font-medium ${logForm.pending_qty <= 0 ? 'text-red-400' : 'text-amber-400'}`}>
+                      {logForm.pending_qty || 0}
                       {logForm.production_type === 'bulk' && ' (KG)'}
                     </span>
                   </div>
+                  {logForm.pending_qty <= 0 && (
+                    <div className="mt-2 pt-2 border-t border-red-500/30">
+                      <p className="text-xs text-red-400">
+                        ⚠️ Production is already complete. All required quantity has been produced.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -942,8 +1223,213 @@ export default function ProductionSchedulePage() {
             <Button variant="outline" onClick={() => setLogModalOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSubmitLog}>
+            <Button 
+              onClick={handleSubmitLog}
+              disabled={!logForm.batch_number || logForm.quantity_produced <= 0}
+            >
               Create Log
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* GPN Create Production Modal */}
+      <Dialog open={gpnModalOpen} onOpenChange={setGpnModalOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Create Production (GPN - Goods Produced Note)</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div>
+              <Label>Batch Number *</Label>
+              <Input
+                value={gpnForm.batch_number}
+                onChange={(e) => setGpnForm(prev => ({ ...prev, batch_number: e.target.value }))}
+                placeholder="Enter batch number"
+              />
+            </div>
+            
+            <div>
+              <Label>Product *</Label>
+              <Select value={gpnForm.product_id} onValueChange={handleProductChange}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select product" />
+                </SelectTrigger>
+                <SelectContent>
+                  {products.map(product => (
+                    <SelectItem key={product.id} value={product.id}>
+                      {product.name} ({product.sku})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            
+            <div>
+              <Label>Packaging *</Label>
+              <Select value={gpnForm.packaging} onValueChange={handlePackagingChange}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select packaging" />
+                </SelectTrigger>
+                <SelectContent>
+                  {packagingOptions.map(pkg => (
+                    <SelectItem key={pkg.id} value={pkg.name}>
+                      {pkg.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            
+            <div>
+              <Label>Net Weight per Drum (kg) *</Label>
+              <Input
+                type="number"
+                step="0.01"
+                value={gpnForm.net_weight_kg}
+                onChange={(e) => {
+                  setGpnForm(prev => ({ ...prev, net_weight_kg: e.target.value }));
+                }}
+                placeholder="Auto-filled from config or enter manually"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Auto-filled from product-packaging configuration if available
+              </p>
+            </div>
+            
+            <div>
+              <Label>Number of Drums *</Label>
+              <Input
+                type="number"
+                step="1"
+                min="1"
+                value={gpnForm.num_drums}
+                onChange={(e) => setGpnForm(prev => ({ ...prev, num_drums: e.target.value }))}
+                placeholder="Enter number of drums"
+              />
+            </div>
+            
+            <div>
+              <Label>Total MT (Auto-calculated)</Label>
+              <Input
+                value={gpnForm.total_mt.toFixed(3)}
+                disabled
+                className="bg-muted"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Calculated: {gpnForm.num_drums || 0} drums × {gpnForm.net_weight_kg || 0} kg = {gpnForm.total_mt.toFixed(3)} MT
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setGpnModalOpen(false)}>
+              Cancel
+            </Button>
+            {gpnForm.product_id && (() => {
+              const selectedProduct = products.find(p => p.id === gpnForm.product_id);
+              const isRawMaterial = selectedProduct?.category === 'raw_material';
+              const isTradingProduct = selectedProduct?.type === 'TRADED';
+              return isRawMaterial || isTradingProduct;
+            })() ? (
+              <Button 
+                onClick={handleSubmitGPN}
+                className="bg-blue-500 hover:bg-blue-600"
+                disabled={!gpnForm.batch_number || !gpnForm.product_id || !gpnForm.packaging || 
+                         !gpnForm.net_weight_kg || !gpnForm.num_drums || loadingGpn}
+              >
+                {loadingGpn ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  'Submit Production'
+                )}
+              </Button>
+            ) : (
+              <Button 
+                onClick={handlePreviewBOM}
+                className="bg-blue-500 hover:bg-blue-600"
+              >
+                Preview BOM
+              </Button>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* BOM Preview Modal */}
+      <Dialog open={bomPreviewOpen} onOpenChange={setBomPreviewOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>BOM Calculation Preview</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="bg-muted/30 p-4 rounded">
+              <p className="text-sm font-medium mb-2">Production Summary:</p>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div>Product: <span className="font-medium">{gpnForm.product_name}</span></div>
+                <div>Packaging: <span className="font-medium">{gpnForm.packaging}</span></div>
+                <div>Number of Drums: <span className="font-medium">{gpnForm.num_drums}</span></div>
+                <div>Total MT: <span className="font-medium">{gpnForm.total_mt.toFixed(3)}</span></div>
+              </div>
+            </div>
+            
+            <div>
+              <Label className="text-sm font-medium mb-2 block">Raw Materials Required:</Label>
+              <div className="border rounded">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted">
+                    <tr>
+                      <th className="p-2 text-left">Material</th>
+                      <th className="p-2 text-right">Required (KG)</th>
+                      <th className="p-2 text-right">Available (KG)</th>
+                      <th className="p-2 text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bomCalculations.map((calc, idx) => {
+                      const hasEnough = calc.available_qty >= calc.required_qty;
+                      return (
+                        <tr key={idx} className={hasEnough ? '' : 'bg-red-500/10'}>
+                          <td className="p-2">
+                            <div className="font-medium">{calc.material_name}</div>
+                            <div className="text-xs text-muted-foreground">{calc.material_sku}</div>
+                          </td>
+                          <td className="p-2 text-right font-mono">{calc.required_qty.toFixed(2)}</td>
+                          <td className="p-2 text-right font-mono">{calc.available_qty.toFixed(2)}</td>
+                          <td className="p-2 text-right">
+                            {hasEnough ? (
+                              <Badge className="bg-green-500">Sufficient</Badge>
+                            ) : (
+                              <Badge className="bg-red-500">Shortage: {(calc.required_qty - calc.available_qty).toFixed(2)} KG</Badge>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setBomPreviewOpen(false)}>
+              Back
+            </Button>
+            <Button 
+              onClick={handleSubmitGPN}
+              disabled={loadingGpn}
+              className="bg-blue-500 hover:bg-blue-600"
+            >
+              {loadingGpn ? (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                'Submit Production'
+              )}
             </Button>
           </div>
         </DialogContent>
