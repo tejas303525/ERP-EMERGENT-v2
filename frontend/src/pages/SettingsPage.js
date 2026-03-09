@@ -47,11 +47,17 @@ const SettingsPage = () => {
   const [fixedCharges, setFixedCharges] = useState([]);
   const [qcParameters, setQcParameters] = useState([]);
   const [selectedProductType, setSelectedProductType] = useState(''); // For filtering QC parameters
-  const [contactForDispatch, setContactForDispatch] = useState({
-    name: "Dispatch Department",
-    phone: "+971 4 2384533",
-    email: "dispatch@asia-petrochem.com",
-    address: "Plot # A 23 B, Al Jazeera Industrial Area, Ras Al Khaimah, UAE"
+  const [contactForDispatchLocal, setContactForDispatchLocal] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    address: ''
+  });
+  const [contactForDispatchExport, setContactForDispatchExport] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    address: ''
   });
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -95,9 +101,23 @@ const SettingsPage = () => {
       
       // Load contact for dispatch from dedicated endpoint or settings
       if (dispatchContactRes.data) {
-        setContactForDispatch(dispatchContactRes.data);
+        if (dispatchContactRes.data.local) {
+          setContactForDispatchLocal(dispatchContactRes.data.local);
+        }
+        if (dispatchContactRes.data.export) {
+          setContactForDispatchExport(dispatchContactRes.data.export);
+        }
       } else if (settings.contact_for_dispatch) {
-        setContactForDispatch(settings.contact_for_dispatch);
+        // Fallback for old format
+        if (settings.contact_for_dispatch.local) {
+          setContactForDispatchLocal(settings.contact_for_dispatch.local);
+        }
+        if (settings.contact_for_dispatch.export) {
+          setContactForDispatchExport(settings.contact_for_dispatch.export);
+        } else if (typeof settings.contact_for_dispatch === 'object' && !Array.isArray(settings.contact_for_dispatch)) {
+          // Legacy format - single contact, assume it's export
+          setContactForDispatchExport(settings.contact_for_dispatch);
+        }
       }
     } catch (error) {
       console.error('Failed to load settings:', error);
@@ -209,8 +229,8 @@ const SettingsPage = () => {
             {activeTab === 'vendors' && (
               <DataTable
                 data={vendors}
-                columns={['name', 'email', 'phone', 'address']}
-                labels={['Name', 'Email', 'Phone', 'Address']}
+                columns={['name', 'email', 'phone', 'address', 'emirate', 'country', 'trn']}
+                labels={['Name', 'Email', 'Phone', 'Address', 'Emirate', 'Country', 'TRN']}
                 onEdit={(item) => openEditModal('vendors', item)}
                 onDelete={(id) => handleDelete('vendors', id)}
               />
@@ -435,64 +455,134 @@ const SettingsPage = () => {
               </div>
             )}
             {activeTab === 'contact_dispatch' && (
-              <div className="space-y-4">
-                <p className="text-sm text-muted-foreground mb-4">
-                  Contact information displayed on export quotations for dispatch inquiries
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="space-y-6">
+                {/* Local Contact Section */}
+                <div className="space-y-4 border-b pb-6">
                   <div>
-                    <Label>Name/Department *</Label>
-                    <Input
-                      value={contactForDispatch.name || ''}
-                      onChange={(e) => setContactForDispatch({...contactForDispatch, name: e.target.value})}
-                      className="mt-1"
-                      placeholder="e.g., Dispatch Department"
-                    />
+                    <h3 className="text-lg font-semibold mb-2">Local Contact for Dispatch</h3>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Contact information displayed on local quotations for dispatch inquiries
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <Label>Name/Department *</Label>
+                      <Input
+                        value={contactForDispatchLocal.name || ''}
+                        onChange={(e) => setContactForDispatchLocal({...contactForDispatchLocal, name: e.target.value})}
+                        className="mt-1"
+                        placeholder="e.g., Vidhesh"
+                      />
+                    </div>
+                    <div>
+                      <Label>Phone *</Label>
+                      <Input
+                        value={contactForDispatchLocal.phone || ''}
+                        onChange={(e) => setContactForDispatchLocal({...contactForDispatchLocal, phone: e.target.value})}
+                        className="mt-1"
+                        placeholder="e.g., +971 52 299 7006"
+                      />
+                    </div>
+                    <div>
+                      <Label>Email *</Label>
+                      <Input
+                        type="email"
+                        value={contactForDispatchLocal.email || ''}
+                        onChange={(e) => setContactForDispatchLocal({...contactForDispatchLocal, email: e.target.value})}
+                        className="mt-1"
+                        placeholder="e.g., apcdispatch@asia-petrochem.com"
+                      />
+                    </div>
                   </div>
                   <div>
-                    <Label>Phone *</Label>
-                    <Input
-                      value={contactForDispatch.phone || ''}
-                      onChange={(e) => setContactForDispatch({...contactForDispatch, phone: e.target.value})}
+                    <Label>Address</Label>
+                    <Textarea
+                      value={contactForDispatchLocal.address || ''}
+                      onChange={(e) => setContactForDispatchLocal({...contactForDispatchLocal, address: e.target.value})}
                       className="mt-1"
-                      placeholder="e.g., +971 4 2384533"
+                      placeholder="Full address"
+                      rows={3}
                     />
                   </div>
-                  <div>
-                    <Label>Email *</Label>
-                    <Input
-                      type="email"
-                      value={contactForDispatch.email || ''}
-                      onChange={(e) => setContactForDispatch({...contactForDispatch, email: e.target.value})}
-                      className="mt-1"
-                      placeholder="e.g., dispatch@asia-petrochem.com"
-                    />
-                  </div>
+                  <Button 
+                    onClick={async () => {
+                      try {
+                        await api.put('/settings/contact-for-dispatch/local', contactForDispatchLocal);
+                        toast.success('Local Contact for Dispatch updated successfully');
+                        loadData();
+                      } catch (error) {
+                        toast.error('Failed to update Local Contact for Dispatch');
+                      }
+                    }}
+                  >
+                    <Save className="w-4 h-4 mr-2" />
+                    Save Local Contact
+                  </Button>
                 </div>
-                <div>
-                  <Label>Address</Label>
-                  <Textarea
-                    value={contactForDispatch.address || ''}
-                    onChange={(e) => setContactForDispatch({...contactForDispatch, address: e.target.value})}
-                    className="mt-1"
-                    placeholder="Full address"
-                    rows={3}
-                  />
+
+                {/* Export Contact Section */}
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-lg font-semibold mb-2">Export Contact for Dispatch</h3>
+                    <p className="text-sm text-muted-foreground mb-4">
+                      Contact information displayed on export quotations for dispatch inquiries
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <Label>Name/Department *</Label>
+                      <Input
+                        value={contactForDispatchExport.name || ''}
+                        onChange={(e) => setContactForDispatchExport({...contactForDispatchExport, name: e.target.value})}
+                        className="mt-1"
+                        placeholder="e.g., Dispatch Department"
+                      />
+                    </div>
+                    <div>
+                      <Label>Phone *</Label>
+                      <Input
+                        value={contactForDispatchExport.phone || ''}
+                        onChange={(e) => setContactForDispatchExport({...contactForDispatchExport, phone: e.target.value})}
+                        className="mt-1"
+                        placeholder="e.g., +971 4 2384533"
+                      />
+                    </div>
+                    <div>
+                      <Label>Email *</Label>
+                      <Input
+                        type="email"
+                        value={contactForDispatchExport.email || ''}
+                        onChange={(e) => setContactForDispatchExport({...contactForDispatchExport, email: e.target.value})}
+                        className="mt-1"
+                        placeholder="e.g., dispatch@asia-petrochem.com"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <Label>Address</Label>
+                    <Textarea
+                      value={contactForDispatchExport.address || ''}
+                      onChange={(e) => setContactForDispatchExport({...contactForDispatchExport, address: e.target.value})}
+                      className="mt-1"
+                      placeholder="Full address"
+                      rows={3}
+                    />
+                  </div>
+                  <Button 
+                    onClick={async () => {
+                      try {
+                        await api.put('/settings/contact-for-dispatch/export', contactForDispatchExport);
+                        toast.success('Export Contact for Dispatch updated successfully');
+                        loadData();
+                      } catch (error) {
+                        toast.error('Failed to update Export Contact for Dispatch');
+                      }
+                    }}
+                  >
+                    <Save className="w-4 h-4 mr-2" />
+                    Save Export Contact
+                  </Button>
                 </div>
-                <Button 
-                  onClick={async () => {
-                    try {
-                      await api.put('/settings/contact-for-dispatch', contactForDispatch);
-                      toast.success('Contact for Dispatch updated successfully');
-                      loadData();
-                    } catch (error) {
-                      toast.error('Failed to update Contact for Dispatch');
-                    }
-                  }}
-                >
-                  <Save className="w-4 h-4 mr-2" />
-                  Save Contact for Dispatch
-                </Button>
               </div>
             )}
           </div>
@@ -614,6 +704,9 @@ const AddEditModal = ({ type, item, products = [], packagingTypes = [], onClose,
           { key: 'email', label: 'Email' },
           { key: 'phone', label: 'Phone' },
           { key: 'address', label: 'Address' },
+          { key: 'emirate', label: 'Emirate' },
+          { key: 'country', label: 'Country' },
+          { key: 'trn', label: 'TRN (Tax Registration Number)' },
         ];
       case 'companies':
         return [

@@ -11,7 +11,8 @@ import { Textarea } from '../components/ui/textarea';
 import { 
   Shield, ArrowDownToLine, ArrowUpFromLine, Scale, Check, X, 
   AlertTriangle, ClipboardCheck, FileCheck, Truck, Package,
-  RefreshCw, Eye, FileText, Download, Bell, CheckCircle, Plus, Trash2
+  RefreshCw, Eye, FileText, Download, Bell, CheckCircle, Plus, Trash2,
+  Loader2, Mail, Clock
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api, { pdfAPI } from '../lib/api';
@@ -34,7 +35,7 @@ const SecurityQCPage = () => {
   const [qcInspections, setQcInspections] = useState([]);
   const [allTransports, setAllTransports] = useState([]); // Store all transports including completed
   const [showQCModal, setShowQCModal] = useState(false);
-  const [selectedQCInspection, setSelectedQCInspection] = useState(null);
+  // const [selectedQCInspection, setSelectedQCInspection] = useState(null);
   const [showDischargeModal, setShowDischargeModal] = useState(false);
   const [dischargeData, setDischargeData] = useState(null);
   
@@ -52,6 +53,24 @@ const SecurityQCPage = () => {
   // Multi-select for bulk DO
   const [selectedOutwardTransports, setSelectedOutwardTransports] = useState([]);
   const [showBulkDOModal, setShowBulkDOModal] = useState(false);
+  
+  // Internal Delivery Loading modals
+  const [showWeightModal, setShowWeightModal] = useState(false);
+  const [selectedTransportForLoading, setSelectedTransportForLoading] = useState(null);
+  const [weightFormData, setWeightFormData] = useState({
+    empty_weight: '',
+    gross_weight: '',
+    qty_drums: '',
+    batch_number: '',
+    net_weight: 0
+  });
+  const [batchFound, setBatchFound] = useState(false);
+  const [waitingForBatchNumber, setWaitingForBatchNumber] = useState(false);
+  const [batchNumberSource, setBatchNumberSource] = useState(null); // 'qc', 'blend', 'job', 'production', null
+  const [pollingBatchNumber, setPollingBatchNumber] = useState(false);
+  const [selectedQCInspection, setSelectedQCInspection] = useState(null);
+  const [isSubmittingWeight, setIsSubmittingWeight] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -406,6 +425,23 @@ const SecurityQCPage = () => {
           if (hasIssuedDO(t)) {
             return false;
           }
+          
+          // Filter out items that have QC inspection with batch number and matching qty
+          const qcInspection = inspectionsRes.data?.find(ins => 
+            ins.ref_id === t.id || 
+            ins.ref_number === (t.job_numbers?.[0] || t.job_number)
+          );
+          
+          if (qcInspection?.batch_number) {
+            const expectedDrums = t.number_of_drums;
+            const actualDrums = t.qty_drums;
+            
+            // Filter out if batch number exists AND qty matches
+            if (expectedDrums && actualDrums && parseInt(actualDrums) === parseInt(expectedDrums)) {
+              return false; // Filter out - completed
+            }
+          }
+          
           return true;
         })
         .sort((a, b) => {
@@ -540,6 +576,385 @@ const SecurityQCPage = () => {
         }
       }
       toast.error(errorMessage);
+    }
+  };
+
+  const handleDownloadCOA = async (inspectionId, coaNumber) => {
+    try {
+      const token = localStorage.getItem('erp_token');
+      const url = `${api.defaults.baseURL}/pdf/coa/${inspectionId}${token ? `?token=${token}` : ''}`;
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      
+      if (response.ok) {
+        const blob = await response.blob();
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = `COA_${coaNumber || 'unknown'}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(downloadUrl);
+        toast.success('COA PDF downloaded');
+      } else {
+        toast.error('Failed to download COA PDF');
+      }
+    } catch (error) {
+      console.error('Failed to download COA:', error);
+      toast.error('Failed to download COA PDF');
+    }
+  };
+
+  // Internal Delivery Loading Handlers
+  const fetchBatchNumberFromQC = async (transport, qcInspection) => {
+    try {
+      // First priority: Get batch number from QC inspection (which may have it from blend report)
+      if (qcInspection?.batch_number) {
+        setWeightFormData(prev => ({ ...prev, batch_number: qcInspection.batch_number }));
+        setBatchFound(true);
+        setWaitingForBatchNumber(false);
+        setBatchNumberSource('qc');
+        return;
+      }
+      
+      // Second: Check if QC inspection is linked to blend report (for manufacturing)
+      if (qcInspection?.blend_report_id) {
+        try {
+          const blendResponse = await api.get(`/blend-reports/${qcInspection.blend_report_id}`);
+          if (blendResponse.data?.batch_number) {
+            setWeightFormData(prev => ({ ...prev, batch_number: blendResponse.data.batch_number }));
+            setBatchFound(true);
+            setWaitingForBatchNumber(false);
+            setBatchNumberSource('blend');
+            return;
+          } else {
+            // Blend report exists but no batch number yet - waiting for QC
+            setWaitingForBatchNumber(true);
+            setBatchNumberSource('blend');
+            setBatchFound(false);
+            return;
+          }
+        } catch (error) {
+          console.error('Failed to fetch blend report:', error);
+        }
+      }
+      
+      // Third: Try to get from job order
+      if (transport.job_order_id) {
+        try {
+          const jobResponse = await api.get(`/job-orders/${transport.job_order_id}`);
+          if (jobResponse.data.batch_number) {
+            setWeightFormData(prev => ({ ...prev, batch_number: jobResponse.data.batch_number }));
+            setBatchFound(true);
+            setWaitingForBatchNumber(false);
+            setBatchNumberSource('job');
+            return;
+          }
+        } catch (error) {
+          console.error('Failed to fetch job order:', error);
+        }
+      }
+      
+      // Fourth: Try to get from production logs
+      const jobNumber = transport.job_numbers?.[0] || transport.job_number;
+      if (jobNumber) {
+        try {
+          const response = await api.get(`/production/logs/batch/${jobNumber}`);
+          if (response.data.found) {
+            setWeightFormData(prev => ({ ...prev, batch_number: response.data.batch_number }));
+            setBatchFound(true);
+            setWaitingForBatchNumber(false);
+            setBatchNumberSource('production');
+            return;
+          }
+        } catch (error) {
+          console.error('Failed to fetch from production:', error);
+        }
+      }
+      
+      // If QC inspection exists but no batch number found anywhere
+      // This means we're waiting for QC to generate/retrieve the batch number
+      if (qcInspection) {
+        setWaitingForBatchNumber(true);
+        setBatchNumberSource('qc');
+        setBatchFound(false);
+      } else {
+        setWaitingForBatchNumber(false);
+        setBatchNumberSource(null);
+        setBatchFound(false);
+      }
+    } catch (error) {
+      console.error('Failed to fetch batch:', error);
+      setWaitingForBatchNumber(false);
+      setBatchFound(false);
+    }
+  };
+
+  const fetchBatchNumber = async (transport) => {
+    const jobNumber = transport.job_numbers?.[0] || transport.job_number;
+    if (!jobNumber) return;
+
+    try {
+      // First, try to get from job order
+      if (transport.job_order_id) {
+        try {
+          const jobResponse = await api.get(`/job-orders/${transport.job_order_id}`);
+          if (jobResponse.data.batch_number) {
+            setWeightFormData(prev => ({ ...prev, batch_number: jobResponse.data.batch_number }));
+            setBatchFound(true);
+            setWaitingForBatchNumber(false);
+            return;
+          }
+        } catch (error) {
+          console.error('Failed to fetch job order:', error);
+        }
+      }
+
+      // Second, try to get from production logs
+      try {
+        const response = await api.get(`/production/logs/batch/${jobNumber}`);
+        if (response.data.found) {
+          setWeightFormData(prev => ({ ...prev, batch_number: response.data.batch_number }));
+          setBatchFound(true);
+          setWaitingForBatchNumber(false);
+          return;
+        }
+      } catch (error) {
+        console.error('Failed to fetch from production:', error);
+      }
+
+      // Third, check if batch number is already in security checklist
+      if (transport?.security_checklist?.batch_number) {
+        setWeightFormData(prev => ({ ...prev, batch_number: transport.security_checklist.batch_number }));
+        setBatchFound(true);
+        setWaitingForBatchNumber(false);
+      } else {
+        setWaitingForBatchNumber(false);
+      }
+    } catch (error) {
+      console.error('Failed to fetch batch:', error);
+      setWaitingForBatchNumber(false);
+    }
+  };
+
+  const handlePendingClick = async (transport) => {
+    try {
+      await api.put(`/outward-dispatch/${transport.id}/status`, { status: 'LOADING' });
+      toast.success('Status updated to Loading');
+      loadData();
+    } catch (error) {
+      console.error('Failed to update status:', error);
+      toast.error('Failed to update status');
+    }
+  };
+
+  const handleReportToQC = async (transport, emptyWeightFromLocal = null) => {
+    // Use local state value if provided, otherwise fall back to transport value
+    const emptyWeight = emptyWeightFromLocal !== null ? emptyWeightFromLocal : (transport.empty_weight || '');
+    
+    // Save empty weight to backend if it's different from the stored value
+    if (emptyWeight && emptyWeight !== transport.empty_weight) {
+      try {
+        await api.put(`/outward-dispatch/${transport.id}/empty-weight`, { empty_weight: parseFloat(emptyWeight) });
+      } catch (error) {
+        console.error('Failed to save empty weight:', error);
+        // Continue anyway - we'll save it when submitting the modal
+      }
+    }
+    
+    setIsSubmittingWeight(true);
+    try {
+      // First, create QC inspection for OUTWARD
+      const qcData = {
+        ref_type: 'OUTWARD',
+        ref_id: transport.id,
+        ref_number: transport.job_numbers?.[0] || transport.job_number || transport.transport_number,
+        product_name: transport.product_name || transport.products_summary,
+        quantity: transport.quantity || 0,
+        vehicle_number: transport.vehicle_number,
+        job_order_id: transport.job_order_id,
+        status: 'PENDING'
+      };
+      
+      const qcResponse = await api.post('/qc/inspections', qcData);
+      const qcInspection = qcResponse.data;
+      
+      // Now fetch batch number from QC inspection (which may have it from blend report)
+      setSelectedTransportForLoading(transport);
+      setSelectedQCInspection(qcInspection);
+      
+      // Fetch batch number - check QC inspection first, then other sources
+      await fetchBatchNumberFromQC(transport, qcInspection);
+      
+      setWeightFormData({
+        empty_weight: emptyWeight,
+        gross_weight: transport.gross_weight || '',
+        qty_drums: transport.qty_drums || '',
+        batch_number: '', // Will be filled by fetchBatchNumberFromQC
+        net_weight: 0
+      });
+      
+      setShowWeightModal(true);
+    } catch (error) {
+      console.error('Failed to create QC inspection:', error);
+      toast.error('Failed to create QC inspection: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setIsSubmittingWeight(false);
+    }
+  };
+
+  const calculateNetWeight = () => {
+    const empty = parseFloat(weightFormData.empty_weight) || 0;
+    const gross = parseFloat(weightFormData.gross_weight) || 0;
+    return gross - empty;
+  };
+
+  useEffect(() => {
+    if (showWeightModal) {
+      const netWeight = calculateNetWeight();
+      setWeightFormData(prev => ({ ...prev, net_weight: netWeight }));
+    }
+  }, [weightFormData.empty_weight, weightFormData.gross_weight, showWeightModal]);
+
+  // Poll for batch number when waiting
+  useEffect(() => {
+    if (waitingForBatchNumber && selectedQCInspection && showWeightModal) {
+      setPollingBatchNumber(true);
+      
+      const pollInterval = setInterval(async () => {
+        try {
+          // Refresh QC inspection to check for batch number
+          const qcResponse = await api.get(`/qc/inspections/${selectedQCInspection.id}`);
+          const updatedQC = qcResponse.data;
+          
+          // Check if batch number is now available
+          if (updatedQC?.batch_number) {
+            setWeightFormData(prev => ({ ...prev, batch_number: updatedQC.batch_number }));
+            setBatchFound(true);
+            setWaitingForBatchNumber(false);
+            setPollingBatchNumber(false);
+            clearInterval(pollInterval);
+            toast.success('Batch number retrieved from QC inspection');
+          } else if (updatedQC?.blend_report_id) {
+            // Check blend report
+            try {
+              const blendResponse = await api.get(`/blend-reports/${updatedQC.blend_report_id}`);
+              if (blendResponse.data?.batch_number) {
+                setWeightFormData(prev => ({ ...prev, batch_number: blendResponse.data.batch_number }));
+                setBatchFound(true);
+                setWaitingForBatchNumber(false);
+                setPollingBatchNumber(false);
+                clearInterval(pollInterval);
+                toast.success('Batch number retrieved from blend report');
+              }
+            } catch (error) {
+              // Continue polling
+            }
+          }
+        } catch (error) {
+          console.error('Failed to poll for batch number:', error);
+        }
+      }, 5000); // Poll every 5 seconds
+      
+      // Cleanup after 5 minutes
+      const timeout = setTimeout(() => {
+        clearInterval(pollInterval);
+        setPollingBatchNumber(false);
+      }, 300000); // 5 minutes
+      
+      return () => {
+        clearInterval(pollInterval);
+        clearTimeout(timeout);
+      };
+    }
+  }, [waitingForBatchNumber, selectedQCInspection, showWeightModal]);
+
+  // Reset waiting state when modal closes
+  useEffect(() => {
+    if (!showWeightModal) {
+      setWaitingForBatchNumber(false);
+      setPollingBatchNumber(false);
+      setBatchNumberSource(null);
+      setSelectedQCInspection(null);
+    }
+  }, [showWeightModal]);
+
+  const handleWeightSubmit = async () => {
+    if (!weightFormData.gross_weight || !weightFormData.empty_weight) {
+      toast.error('Please enter both empty weight and gross weight');
+      return;
+    }
+  
+    const enteredDrums = parseInt(weightFormData.qty_drums) || 0;
+    const bookedDrums = selectedTransportForLoading?.number_of_drums;
+    if (bookedDrums && enteredDrums !== bookedDrums) {
+      toast.error(`Number of drums mismatch! Expected ${bookedDrums} drums, but entered ${enteredDrums}.`);
+      return;
+    }
+  
+    setIsSubmittingWeight(true);
+    try {
+      // Save weights to transport (no DO generation yet)
+      await api.put(`/outward-dispatch/${selectedTransportForLoading.id}/save-weights`, {
+        empty_weight: parseFloat(weightFormData.empty_weight),
+        gross_weight: parseFloat(weightFormData.gross_weight),
+        net_weight: calculateNetWeight(),
+        qty_drums: enteredDrums,
+      });
+  
+      // Update QC inspection with weights so QC team can see them
+      if (selectedQCInspection) {
+        await api.put(`/qc/inspections/${selectedQCInspection.id}`, {
+          net_weight: calculateNetWeight(),
+          gross_weight: parseFloat(weightFormData.gross_weight),
+          empty_weight: parseFloat(weightFormData.empty_weight),
+          qty_drums: enteredDrums,
+          status: 'PENDING', // Explicitly set PENDING so QC page shows it
+        });
+      }
+  
+      toast.success('Weights saved. QC team has been notified and will approve before DO is generated.');
+      setShowWeightModal(false);
+      setSelectedTransportForLoading(null);
+      setSelectedQCInspection(null);
+      loadData();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to save weights');
+    } finally {
+      setIsSubmittingWeight(false);
+    }
+  };
+
+  const handleSendEmail = async (transport) => {
+    if (!transport.do_number) {
+      toast.error('Delivery Order not found');
+      return;
+    }
+
+    setIsSendingEmail(true);
+    try {
+      await api.post(`/outward-dispatch/${transport.id}/send-email`);
+      toast.success('Email queued successfully');
+    } catch (error) {
+      console.error('Failed to send email:', error);
+      toast.error(error.response?.data?.detail || 'Failed to send email');
+    } finally {
+      setIsSendingEmail(false);
+    }
+  };
+
+  const handleUpdateEmptyWeight = async (transport, value) => {
+    if (!value) return;
+    try {
+      await api.put(`/outward-dispatch/${transport.id}/empty-weight`, { empty_weight: parseFloat(value) });
+      loadData();
+    } catch (error) {
+      console.error('Failed to update empty weight:', error);
+      toast.error('Failed to update empty weight');
     }
   };
 
@@ -931,8 +1346,14 @@ const SecurityQCPage = () => {
                 onPassQC={handlePassQC}
                 onFailQC={handleFailQC}
                 onGenerateCOA={handleGenerateCOA}
+                onDownloadCOA={handleDownloadCOA}
                 onRefresh={loadData}
                 getDeliveryDocumentUrl={getDeliveryDocumentUrl}
+                onPendingClick={handlePendingClick}
+                onReportToQC={handleReportToQC}
+                onSendEmail={handleSendEmail}
+                onUpdateEmptyWeight={handleUpdateEmptyWeight}
+                isSendingEmail={isSendingEmail}
               />
             </div>
           </div>
@@ -1091,6 +1512,166 @@ const SecurityQCPage = () => {
         />
       )}
 
+      {/* Internal Delivery Loading - Weight Entry Modal */}
+      {showWeightModal && selectedTransportForLoading && (
+        <Dialog open={true} onOpenChange={setShowWeightModal}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>
+                Report to QC and Logistics Team
+                {selectedTransportForLoading && (
+                  <span className="text-sm font-normal text-muted-foreground ml-2">
+                    - {selectedTransportForLoading.job_numbers?.join(', ') || selectedTransportForLoading.job_number}
+                  </span>
+                )}
+              </DialogTitle>
+            </DialogHeader>
+
+            <div className="space-y-4 mt-4">
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <Label>Empty Weight (kg)</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={weightFormData.empty_weight}
+                    onChange={(e) => setWeightFormData(prev => ({ ...prev, empty_weight: e.target.value }))}
+                    placeholder="Enter empty weight"
+                  />
+                </div>
+                <div>
+                  <Label>Gross Weight (kg)</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    value={weightFormData.gross_weight}
+                    onChange={(e) => setWeightFormData(prev => ({ ...prev, gross_weight: e.target.value }))}
+                    placeholder="Enter gross weight"
+                  />
+                </div>
+                <div>
+                  <Label>Net Weight (kg)</Label>
+                  <Input
+                    type="number"
+                    value={weightFormData.net_weight.toFixed(2)}
+                    disabled
+                    className="bg-muted"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Qty of Drums</Label>
+                  <Input
+                    type="number"
+                    value={weightFormData.qty_drums}
+                    onChange={(e) => setWeightFormData(prev => ({ ...prev, qty_drums: e.target.value }))}
+                    placeholder={selectedTransportForLoading?.number_of_drums ? `Expected: ${selectedTransportForLoading.number_of_drums}` : "Enter quantity"}
+                  />
+                  {selectedTransportForLoading?.number_of_drums && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Expected: {selectedTransportForLoading.number_of_drums} drums (as booked)
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <Label>Batch Number {!batchFound && !waitingForBatchNumber && '*'}</Label>
+                  <div className="flex gap-2 items-center">
+                    <Input
+                      value={waitingForBatchNumber ? '' : weightFormData.batch_number}
+                      onChange={(e) => {
+                        if (!waitingForBatchNumber && !batchFound) {
+                          setWeightFormData(prev => ({ ...prev, batch_number: e.target.value }));
+                        }
+                      }}
+                      placeholder={
+                        waitingForBatchNumber 
+                          ? "Waiting for QC inspection to retrieve batch number..." 
+                          : batchFound 
+                            ? "Auto-filled" 
+                            : "Enter batch number"
+                      }
+                      disabled={batchFound || waitingForBatchNumber}
+                      className={
+                        waitingForBatchNumber 
+                          ? 'bg-amber-500/10 border-amber-500/50 text-amber-400' 
+                          : batchFound 
+                            ? 'bg-muted' 
+                            : ''
+                      }
+                    />
+                    {waitingForBatchNumber && (
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                        <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/50">
+                          <Clock className="w-3 h-3 mr-1" />
+                          Waiting for QC
+                        </Badge>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={async () => {
+                            // Manual refresh button
+                            if (selectedQCInspection) {
+                              try {
+                                const qcResponse = await api.get(`/qc/inspections/${selectedQCInspection.id}`);
+                                await fetchBatchNumberFromQC(selectedTransportForLoading, qcResponse.data);
+                                setSelectedQCInspection(qcResponse.data);
+                              } catch (error) {
+                                toast.error('Failed to refresh batch number');
+                              }
+                            }
+                          }}
+                          className="h-6 px-2"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                        </Button>
+                      </div>
+                    )}
+                    {batchFound && !waitingForBatchNumber && (
+                      <Badge className="bg-green-500/20 text-green-400">
+                        <Check className="w-3 h-3 mr-1" />
+                        Auto-filled
+                      </Badge>
+                    )}
+                  </div>
+                  {waitingForBatchNumber && (
+                                        // In the weight modal, update the info note:
+                    <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded text-sm text-blue-400">
+                      After saving weights, the QC team will review and approve on the QC Inspection page. 
+                      The Delivery Order will be generated automatically once QC passes.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-6">
+              <Button variant="outline" onClick={() => setShowWeightModal(false)} disabled={isSubmittingWeight}>
+                              Cancel
+                            </Button>
+                            <Button 
+                onClick={handleWeightSubmit}
+                disabled={
+                  isSubmittingWeight || 
+                  !weightFormData.gross_weight || 
+                  !weightFormData.empty_weight
+                  // REMOVED: batch number check — QC team handles batch
+                }
+              >
+  {isSubmittingWeight ? (
+    <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving...</>
+  ) : (
+    <>
+    <Check className="w-4 h-4 mr-2" />Save Weights & Notify QC</>
+  )}
+</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+
       {/* QC Inspection Modal - View Only (Old Flow) */}
       {showQCModal && selectedQCInspection && !dischargeData && (
         <Dialog open={true} onOpenChange={() => setShowQCModal(false)}>
@@ -1148,9 +1729,20 @@ const SecurityQCPage = () => {
                   </div>
                 )}
                 {selectedQCInspection.coa_number && (
-                  <div>
+                  <div className="col-span-2">
                     <Label className="text-muted-foreground text-xs">COA Number</Label>
-                    <p className="font-mono text-purple-400">{selectedQCInspection.coa_number}</p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <p className="font-mono text-purple-400">{selectedQCInspection.coa_number}</p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleDownloadCOA(selectedQCInspection.id, selectedQCInspection.coa_number)}
+                        className="h-7"
+                      >
+                        <Download className="w-3 h-3 mr-1" />
+                        Download PDF
+                      </Button>
+                    </div>
                   </div>
                 )}
                 {selectedQCInspection.quantity && (
@@ -1197,6 +1789,24 @@ const SecurityQCPage = () => {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+              
+              {/* COA Generation Button for OUTWARD inspections */}
+              {selectedQCInspection.ref_type === 'OUTWARD' && 
+               selectedQCInspection.status === 'PASSED' && 
+               !selectedQCInspection.coa_generated && (
+                <div className="flex justify-end pt-4 border-t">
+                  <Button
+                    onClick={() => {
+                      handleGenerateCOA(selectedQCInspection.id);
+                      setShowQCModal(false);
+                    }}
+                    className="bg-purple-500 hover:bg-purple-600"
+                  >
+                    <FileCheck className="w-4 h-4 mr-2" />
+                    Generate COA
+                  </Button>
                 </div>
               )}
             </div>
@@ -1439,7 +2049,9 @@ const InwardTransportTab = ({ transports, qcInspections, onOpenChecklist, onView
 };
 
 // ==================== OUTWARD TRANSPORT TAB ====================
-const OutwardTransportTab = ({ transports, qcInspections, selectedTransports, setSelectedTransports, onOpenChecklist, onViewDetails, onBulkIssueDO, onViewQCInspection, onStartQC, onPassQC, onFailQC, onGenerateCOA, onRefresh, getDeliveryDocumentUrl }) => {
+const OutwardTransportTab = ({ transports, qcInspections, selectedTransports, setSelectedTransports, onOpenChecklist, onViewDetails, onBulkIssueDO, onViewQCInspection, onStartQC, onPassQC, onFailQC, onGenerateCOA, onDownloadCOA, onRefresh, getDeliveryDocumentUrl, onPendingClick, onReportToQC, onSendEmail, onUpdateEmptyWeight, isSendingEmail }) => {
+  const [emptyWeights, setEmptyWeights] = useState({});
+
   return (
     <div className="space-y-3">
       <div className="glass rounded-lg border border-border">
@@ -1478,7 +2090,7 @@ const OutwardTransportTab = ({ transports, qcInspections, selectedTransports, se
           </div>
         ) : (
           <div className="overflow-x-auto max-w-full">
-            <table className="w-full min-w-[1200px]">
+            <table className="w-full min-w-[800px]">
               <thead className="bg-muted/30">
                 <tr>
                   <th className="p-2 text-center w-10">
@@ -1497,12 +2109,63 @@ const OutwardTransportTab = ({ transports, qcInspections, selectedTransports, se
                     />
                   </th>
                   <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Date/Time</th>
-                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Job Order</th>
-                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Product</th>
-                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Plate/Container #</th>
-                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Delivery Note</th>
-                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Load</th>
-                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Delivery Order</th>
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">
+                    <div className="flex items-center gap-2">
+                      IDL
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          const csvData = transports.map(transport => ({
+                            'Date/Time': transport.delivery_date 
+                              ? `${new Date(transport.delivery_date).toLocaleDateString()} ${new Date(transport.delivery_date).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`
+                              : '-',
+                            'IDL': transport.job_numbers?.join(', ') || transport.job_number || '-',
+                            'Number of Drums': transport.number_of_drums || '-',
+                            'Status': transport.loading_status || transport.status || '-',
+                            'Transport Number': transport.transport_number || '-',
+                            'Vehicle Number': transport.vehicle_number || '-'
+                          }));
+
+                          // Convert to CSV
+                          const headers = Object.keys(csvData[0]);
+                          const csvRows = [
+                            headers.join(','),
+                            ...csvData.map(row => 
+                              headers.map(header => {
+                                const value = row[header] || '';
+                                // Escape commas and quotes in CSV
+                                if (typeof value === 'string' && (value.includes(',') || value.includes('"'))) {
+                                  return `"${value.replace(/"/g, '""')}"`;
+                                }
+                                return value;
+                              }).join(',')
+                            )
+                          ];
+
+                          const csvContent = csvRows.join('\n');
+                          const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                          const link = document.createElement('a');
+                          const url = URL.createObjectURL(blob);
+                          link.setAttribute('href', url);
+                          link.setAttribute('download', `IDL_Export_${new Date().toISOString().split('T')[0]}.csv`);
+                          link.style.visibility = 'hidden';
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                          
+                          toast.success('IDL data downloaded successfully');
+                        }}
+                        className="h-6 w-6 p-0"
+                        title="Download IDL data"
+                      >
+                        <Download className="w-3 h-3" />
+                      </Button>
+                    </div>
+                  </th>
+                  {/* <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Drums</th> */}
+                  {/* <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Plate/Container #</th> */}
+                  <th className="p-2 text-left text-xs font-medium text-muted-foreground whitespace-nowrap">Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -1523,6 +2186,7 @@ const OutwardTransportTab = ({ transports, qcInspections, selectedTransports, se
                   
                   const loadStatus = checklist?.load_status || 'ASSIGNED';
                   const doCreated = transport.do_created || transport.do_number;
+                  const loadingStatus = transport.loading_status || 'PENDING';
                   
                   return (
                     <tr key={transport.id} className="border-b border-border/50 hover:bg-muted/10">
@@ -1552,78 +2216,117 @@ const OutwardTransportTab = ({ transports, qcInspections, selectedTransports, se
                         )}
                       </td> 
                       
-                      {/* Job Order */}
+                      {/* IDL (Job Order) */}
                       <td className="p-2">
-                        <span className="font-mono text-amber-400 text-sm">
-                          {transport.job_numbers?.join(', ') || transport.job_number || '-'}
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <span className="font-mono text-amber-400 text-sm">
+                            {transport.job_numbers?.join(', ') || transport.job_number || '-'}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            JO: {transport.job_numbers?.join(', ') || transport.job_number || '-'}
+                          </span>
+                          {/* Display number of drums if available */}
+                          {transport.number_of_drums && (
+                            <span className="text-xs text-cyan-400 font-medium">
+                              Drums: {transport.number_of_drums}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       
-                      {/* Product Column */}
-                      <td className="p-2 text-sm max-w-[200px] truncate" title={transport.products_summary || transport.product_names?.join(', ') || transport.job_items?.map(i => i.display_name || i.item_name || i.product_name).join(', ') || transport.product_name || '-'}>
-                        {transport.products_summary || transport.product_names?.join(', ') || transport.job_items?.map(i => i.display_name || i.item_name || i.product_name).join(', ') || transport.product_name || '-'}
-                      </td>
+                      {/* Drums Column */}
+                      {/* <td className="p-2">
+                        <span className="text-sm font-medium">
+                          {transport.qty_drums || transport.quantity || transport.job_items?.[0]?.quantity || '-'}
+                        </span>
+                      </td> */}
                       
                       {/* Plate/Container # */}
-                      <td className="p-2">
+                      {/* <td className="p-2">
                         <span className="font-mono text-sm text-red-500">
                           {transport.vehicle_number || transport.container_number || '-'}
                         </span>
-                      </td>
+                      </td> */}
                       
-                      {/* Delivery Note Button */}
+                      {/* Internal Delivery Loading Status */}
                       <td className="p-2">
-                        <Button 
-                          size="sm" 
-                          variant={checklist ? "outline" : "default"}
-                          onClick={() => onOpenChecklist(transport)}
-                          className="text-xs"
-                        >
-                          <Truck className="w-3 h-3 mr-1" />
-                          {checklist ? 'View Arrival' : 'Process Arrival'}
-                        </Button>
-                      </td>
-                      
-                      {/* Load Status */}
-                      <td className="p-2">
-                        {loadStatus === 'APPROVED' ? (
-                          <Badge className="bg-green-500/20 text-green-400 text-xs">
-                            <Check className="w-3 h-3 mr-1" />
-                            Approved
-                          </Badge>
-                        ) : loadStatus === 'LOADED' ? (
-                          <Badge className="bg-blue-500/20 text-blue-400 text-xs">
-                            <Package className="w-3 h-3 mr-1" />
-                            Loaded
-                          </Badge>
-                        ) : (
-                          <Badge className="bg-gray-500/20 text-gray-400 text-xs">
-                            Assigned
-                          </Badge>
-                        )}
-                      </td>
-                      
-                      {/* Delivery Order */}
-                      <td className="p-2">
-                        {doCreated ? (
-                          <div className="flex items-center gap-2">
-                            <Badge className="bg-green-500/20 text-green-400 text-xs">
-                              <FileText className="w-3 h-3 mr-1" />
-                              {transport.do_number || 'Issued'}
-                            </Badge>
-                          </div>
-                        ) : loadStatus === 'APPROVED' ? (
-                          <Button 
-                            size="sm" 
-                            onClick={() => onViewDetails(transport)}
-                            className="bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 text-xs"
-                          >
-                            <FileText className="w-3 h-3 mr-1" />
-                            Issue DO
-                          </Button>
-                        ) : (
-                          <span className="text-muted-foreground text-xs">Pending Approval</span>
-                        )}
+                        <div className="flex flex-col gap-1">
+                          {loadingStatus === 'PENDING' && (
+                            <Button 
+                              size="sm" 
+                              variant="default"
+                              onClick={() => onPendingClick && onPendingClick(transport)}
+                              className="text-xs h-6 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400"
+                            >
+                              <Clock className="w-3 h-3 mr-1" />
+                              Pending
+                            </Button>
+                          )}
+                          {loadingStatus === 'LOADING' && (
+                            <div className="space-y-1">
+                              <Badge className="bg-blue-500/20 text-blue-400 text-xs">
+                                <Package className="w-3 h-3 mr-1" />
+                                Loading
+                              </Badge>
+                              <Input
+                                type="number"
+                                step="0.01"
+                                value={emptyWeights[transport.id] !== undefined ? emptyWeights[transport.id] : (transport.empty_weight || '')}
+                                onChange={(e) => {
+                                  setEmptyWeights(prev => ({ ...prev, [transport.id]: e.target.value }));
+                                }}
+                                placeholder="Empty weight"
+                                className="text-xs h-6"
+                              />
+                              <Button 
+                                size="sm" 
+                                variant="default"
+                                onClick={() => {
+                                  const emptyWeight = emptyWeights[transport.id] || transport.empty_weight;
+                                  if (emptyWeight && onReportToQC) {
+                                    onReportToQC(transport, emptyWeight);
+                                  } else if (onReportToQC) {
+                                    onReportToQC(transport);
+                                  }
+                                }}
+                                className="text-xs h-6 w-full"
+                                disabled={!emptyWeights[transport.id] && !transport.empty_weight}
+                              >
+                                <FileText className="w-3 h-3 mr-1" />
+                                Report to QC
+                              </Button>
+                            </div>
+                          )}
+                          {loadingStatus === 'COMPLETE' && (
+                            <div className="space-y-1">
+                              <Badge className="bg-green-500/20 text-green-400 text-xs">
+                                <Check className="w-3 h-3 mr-1" />
+                                Complete
+                              </Badge>
+                              {transport.do_number && (
+                                <Button 
+                                  size="sm" 
+                                  variant="default"
+                                  onClick={() => onSendEmail && onSendEmail(transport)}
+                                  className="text-xs h-6 w-full bg-green-600 hover:bg-green-700"
+                                  disabled={isSendingEmail}
+                                >
+                                  {isSendingEmail ? (
+                                    <>
+                                      <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                      Sending...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Mail className="w-3 h-3 mr-1" />
+                                      Send Email
+                                    </>
+                                  )}
+                                </Button>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -3090,13 +3793,14 @@ const LoadingQCModal = ({ arrivalData, onClose, onComplete }) => {
     try {
       setIsSaving(true);
 
-      // Update security checklist with loading data and batch
+      // Update security checklist with loading data, batch, and QC status
       await api.put(`/security/checklists/${arrivalData.checklistId}`, {
         gross_weight: parseFloat(grossWeight),
         net_weight: netWeight,
         load_status: 'APPROVED',
         batch_number: batchNumber,
         loading_time: new Date().toISOString(),
+        qc_status: 'APPROVED',
       });
 
       toast.success('Loading approved successfully');
@@ -3104,6 +3808,33 @@ const LoadingQCModal = ({ arrivalData, onClose, onComplete }) => {
     } catch (error) {
       console.error('Failed to approve loading:', error);
       toast.error('Failed to approve loading');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleNotApprove = async () => {
+    if (!batchNumber) {
+      toast.error('Batch number is required');
+      return;
+    }
+
+    try {
+      setIsSaving(true);
+
+      // Update security checklist with QC status as NOT_APPROVED
+      await api.put(`/security/checklists/${arrivalData.checklistId}`, {
+        gross_weight: parseFloat(grossWeight) || 0,
+        net_weight: netWeight || 0,
+        batch_number: batchNumber,
+        qc_status: 'NOT_APPROVED',
+      });
+
+      toast.success('QC status set to Not Approved');
+      onComplete();
+    } catch (error) {
+      console.error('Failed to set QC status:', error);
+      toast.error('Failed to set QC status');
     } finally {
       setIsSaving(false);
     }
@@ -3204,6 +3935,13 @@ const LoadingQCModal = ({ arrivalData, onClose, onComplete }) => {
 
         <div className="flex justify-end gap-2 mt-6">
           <Button variant="outline" onClick={onClose} disabled={isSaving}>Cancel</Button>
+          <Button
+            onClick={handleNotApprove}
+            disabled={!batchNumber || isSaving}
+            className="bg-red-500 hover:bg-red-600"
+          >
+            {isSaving ? 'Saving...' : 'Not Approved'}
+          </Button>
           <Button
             onClick={handleApprove}
             disabled={loadStatus !== 'LOADED' || !batchNumber || !grossWeight || isSaving}

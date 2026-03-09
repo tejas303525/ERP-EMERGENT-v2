@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { documentAPI, shippingAPI } from '../lib/api';
+import { documentAPI, shippingAPI, pdfAPI } from '../lib/api';
+import api from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -8,9 +9,10 @@ import { Badge } from '../components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { Textarea } from '../components/ui/textarea';
+import { Checkbox } from '../components/ui/checkbox';
 import { toast } from 'sonner';
 import { formatDate, getStatusColor, hasPagePermission } from '../lib/utils';
-import { Plus, FileCheck, Download, FileText, Package, Globe, Ship, FileCheck as COAIcon } from 'lucide-react';
+import { Plus, FileCheck, Download, FileText, Package, Globe, Ship, FileCheck as COAIcon, Mail, Loader2 } from 'lucide-react';
 
 const DOCUMENT_TYPES = [
   { value: 'invoice', label: 'Commercial Invoice' },
@@ -27,6 +29,15 @@ export default function DocumentationPage() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('job-orders');
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [selectedJob, setSelectedJob] = useState(null);
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [emailRecipients, setEmailRecipients] = useState({
+    customer: true,
+    logistics: true,
+    receivables: true
+  });
+  const [ccEmails, setCcEmails] = useState('');
 
   const [form, setForm] = useState({
     shipping_booking_id: '',
@@ -110,34 +121,30 @@ export default function DocumentationPage() {
     }
 
     try {
-      const token = localStorage.getItem('erp_token');
-      const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
       let url = '';
 
       // Map document types to their PDF endpoints
       switch (docType) {
         case 'invoice':
-          url = `${backendUrl}/api/pdf/invoice/${doc.id}?token=${token}`;
+          url = pdfAPI.getInvoiceUrl(doc.id);
           break;
         case 'delivery_order':
-          // TODO: Add DO PDF endpoint when available
-          toast.info('Delivery Order PDF download will be available soon');
-          return;
+          url = pdfAPI.getDeliveryNoteUrl(doc.id);
+          break;
+        case 'certificate_of_analysis':
+          url = pdfAPI.getCOAUrl(doc.id);
+          break;
         case 'packing_list':
-          // TODO: Add Packing List PDF endpoint when available
+          // Packing list PDF endpoint not yet implemented
           toast.info('Packing List PDF download will be available soon');
           return;
         case 'certificate_of_origin':
-          // TODO: Add COO PDF endpoint when available
+          // COO PDF endpoint not yet implemented
           toast.info('Certificate of Origin PDF download will be available soon');
           return;
         case 'bl_draft':
-          // TODO: Add BL Draft PDF endpoint when available
+          // BL Draft PDF endpoint not yet implemented
           toast.info('Bill of Lading Draft PDF download will be available soon');
-          return;
-        case 'certificate_of_analysis':
-          // TODO: Add COA PDF endpoint when available
-          toast.info('Certificate of Analysis PDF download will be available soon');
           return;
         default:
           toast.error('Download not available for this document type');
@@ -152,6 +159,38 @@ export default function DocumentationPage() {
     } catch (error) {
       toast.error('Failed to download document');
       console.error('Download error:', error);
+    }
+  };
+
+  const handleSendEmail = async (job) => {
+    setSelectedJob(job);
+    setEmailModalOpen(true);
+  };
+
+  const handleEmailSend = async () => {
+    if (!selectedJob) return;
+
+    if (!selectedJob.transport_id) {
+      toast.error('Transport record not found for this job order');
+      return;
+    }
+
+    setSendingEmail(true);
+    try {
+      // Call the send email endpoint with CC emails
+      await api.post(`/outward-dispatch/${selectedJob.transport_id}/send-email`, {
+        cc_emails: ccEmails.trim()
+      });
+      
+      toast.success('Email sent successfully to Customer, Logistics, and Receivables' + (ccEmails.trim() ? ' and CC recipients' : ''));
+      setEmailModalOpen(false);
+      setSelectedJob(null);
+      setCcEmails(''); // Reset CC field
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to send email');
+      console.error('Email send error:', error);
+    } finally {
+      setSendingEmail(false);
     }
   };
 
@@ -289,35 +328,46 @@ export default function DocumentationPage() {
                       DO: {job.do_number}
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
-                    {Object.entries(job.documents).map(([docType, doc]) => {
-                      if (!doc) return null;
-                      const Icon = getDocumentIcon(docType);
-                      return (
-                        <div
-                          key={docType}
-                          className="flex items-center gap-2 p-2 border rounded hover:bg-accent cursor-pointer"
-                          title={getDocumentLabel(docType)}
-                        >
-                          <Icon className="w-4 h-4" />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium truncate">{getDocumentLabel(docType)}</p>
-                            <p className="text-xs text-muted-foreground truncate">{doc.number}</p>
-                          </div>
-                          <Button 
-                            size="sm" 
-                            variant="ghost" 
-                            className="h-6 w-6 p-0"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDownloadDocument(docType, doc);
-                            }}
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 flex-1">
+                      {Object.entries(job.documents).map(([docType, doc]) => {
+                        if (!doc) return null;
+                        const Icon = getDocumentIcon(docType);
+                        return (
+                          <div
+                            key={docType}
+                            className="flex items-center gap-2 p-2 border rounded hover:bg-accent cursor-pointer"
+                            title={getDocumentLabel(docType)}
                           >
-                            <Download className="w-3 h-3" />
-                          </Button>
-                        </div>
-                      );
-                    })}
+                            <Icon className="w-4 h-4" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium truncate">{getDocumentLabel(docType)}</p>
+                              <p className="text-xs text-muted-foreground truncate">{doc.number}</p>
+                            </div>
+                            <Button 
+                              size="sm" 
+                              variant="ghost" 
+                              className="h-6 w-6 p-0"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDownloadDocument(docType, doc);
+                              }}
+                            >
+                              <Download className="w-3 h-3" />
+                            </Button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleSendEmail(job)}
+                      className="flex items-center gap-2"
+                    >
+                      <Mail className="w-4 h-4" />
+                      Send Email
+                    </Button>
                   </div>
                 </div>
               ))}
@@ -366,6 +416,127 @@ export default function DocumentationPage() {
           )}
         </div>
       )}
+
+      {/* Email Modal */}
+      <Dialog open={emailModalOpen} onOpenChange={setEmailModalOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Send Documents via Email</DialogTitle>
+          </DialogHeader>
+          {selectedJob && (
+            <div className="space-y-4 py-4">
+              <div className="p-3 bg-muted rounded-md">
+                <p className="text-sm font-medium">{selectedJob.job_number}</p>
+                <p className="text-xs text-muted-foreground">
+                  {selectedJob.customer_name} • {selectedJob.product_name}
+                </p>
+                {selectedJob.customer_email && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    <span className="font-medium">Customer Email:</span> {selectedJob.customer_email}
+                  </p>
+                )}
+              </div>
+              <div className="space-y-3">
+                <Label className="text-sm font-medium">Recipients</Label>
+                <div className="space-y-2">
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="customer"
+                      checked={emailRecipients.customer}
+                      onCheckedChange={(checked) =>
+                        setEmailRecipients({ ...emailRecipients, customer: checked })
+                      }
+                    />
+                    <Label htmlFor="customer" className="text-sm font-normal cursor-pointer">
+                      Customer
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="logistics"
+                      checked={emailRecipients.logistics}
+                      onCheckedChange={(checked) =>
+                        setEmailRecipients({ ...emailRecipients, logistics: checked })
+                      }
+                    />
+                    <Label htmlFor="logistics" className="text-sm font-normal cursor-pointer">
+                      Logistics
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="receivables"
+                      checked={emailRecipients.receivables}
+                      onCheckedChange={(checked) =>
+                        setEmailRecipients({ ...emailRecipients, receivables: checked })
+                      }
+                    />
+                    <Label htmlFor="receivables" className="text-sm font-normal cursor-pointer">
+                      Receivables
+                    </Label>
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="cc-emails" className="text-sm font-medium">
+                  CC (Additional Recipients)
+                </Label>
+                <Input
+                  id="cc-emails"
+                  type="text"
+                  placeholder="Enter email addresses separated by commas (e.g., user1@example.com, user2@example.com)"
+                  value={ccEmails}
+                  onChange={(e) => setCcEmails(e.target.value)}
+                  className="text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Add additional email addresses to CC. Separate multiple emails with commas.
+                </p>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                <p>Attachments will include:</p>
+                <ul className="list-disc list-inside mt-1 space-y-1">
+                  {selectedJob.documents.delivery_order && (
+                    <li>Delivery Order ({selectedJob.documents.delivery_order.number})</li>
+                  )}
+                  {selectedJob.documents.invoice && (
+                    <li>Invoice ({selectedJob.documents.invoice.number})</li>
+                  )}
+                  {selectedJob.documents.certificate_of_analysis && (
+                    <li>Certificate of Analysis ({selectedJob.documents.certificate_of_analysis.number})</li>
+                  )}
+                </ul>
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setEmailModalOpen(false);
+                    setSelectedJob(null);
+                    setCcEmails(''); // Reset CC field on cancel
+                  }}
+                  disabled={sendingEmail}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleEmailSend} disabled={sendingEmail}>
+                  {sendingEmail ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Sending...
+                    </>
+                  ) : (
+                    <>
+                      <Mail className="w-4 h-4 mr-2" />
+                      Send Email
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

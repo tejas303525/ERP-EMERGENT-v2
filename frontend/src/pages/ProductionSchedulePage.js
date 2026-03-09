@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { productionAPI, jobOrderAPI, productionLogAPI } from '../lib/api';
+import { productionAPI, jobOrderAPI, productionLogAPI, blendReportAPI } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -216,6 +216,32 @@ export default function ProductionSchedulePage() {
     // Check if this is a GPN job (Goods Produced Note - internal production)
     const isGpnJob = job.job_number && job.job_number.toUpperCase().startsWith('GPN-');
     
+    // For manufacturing products, check if blend report exists and is approved
+    let blendReport = null;
+    let blendApproved = false;
+    let batchNumberFromBlend = '';
+    
+    if (!isGpnJob && job.job_id) {
+      try {
+        // Check if job has a blend report
+        const blendReportsRes = await blendReportAPI.getAll();
+        const blendReports = blendReportsRes.data || [];
+        blendReport = blendReports.find(br => br.job_order_id === job.job_id);
+        
+        if (blendReport) {
+          blendApproved = blendReport.status === 'approved';
+          batchNumberFromBlend = blendReport.batch_number || '';
+          
+          if (!blendApproved) {
+            toast.error(`Blend report ${blendReport.report_number} must be approved before filling. Please complete QC inspection and approve the blend report first.`);
+            return;
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to fetch blend reports:', error);
+      }
+    }
+    
     // Always fetch existing production logs to calculate accurate pending quantity
     let existingTotalProduced = 0;
     if (!isGpnJob) {
@@ -264,10 +290,11 @@ export default function ProductionSchedulePage() {
       production_date: new Date().toISOString().split('T')[0],
       required_qty: requiredQty,
       quantity_produced: 0,
-      batch_number: '',
+      batch_number: batchNumberFromBlend, // Pre-fill from blend report if available
       pending_qty: initialPendingQty, // Will be updated dynamically as user types
       existing_total_produced: existingTotalProduced, // Store to recalculate pending
-      production_type: 'drummed' // Default to drummed
+      production_type: 'drummed', // Default to drummed
+      blend_report_id: blendReport?.id || null // Store blend report ID for validation
     });
     setLogModalOpen(true);
   };

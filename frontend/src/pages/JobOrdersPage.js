@@ -428,9 +428,58 @@ export default function JobOrdersPage() {
   // Load BOM from BOM Management and check availability
   const loadProductBOM = async (productId, quantity, packaging, netWeightKg = null) => {
     setLoadingBom(true);
-    setMaterialAvailability([]);
+    const allAvailability = []; // Track all availability checks
     
     try {
+      // FIRST: Check product-packaging stock (filled drums) if packaging is specified
+      if (productId && packaging && packaging !== 'Bulk') {
+        try {
+          const productPackagingRes = await api.get(
+            `/products/${productId}/packaging/${encodeURIComponent(packaging)}`
+          );
+          const productPackaging = productPackagingRes.data;
+          
+          if (productPackaging && productPackaging.quantity !== undefined) {
+            const filledDrumsAvailable = productPackaging.quantity || 0;
+            const requiredDrums = quantity; // Assuming quantity is in drums for packaged items
+            
+            if (filledDrumsAvailable >= requiredDrums) {
+              toast.success(`Product-Packaging Stock: ${filledDrumsAvailable} ${packaging} available (Required: ${requiredDrums})`);
+              allAvailability.push({
+                item_id: `product_packaging_${productId}_${packaging}`,
+                item_name: `Filled ${packaging}`,
+                item_sku: '-',
+                required_qty: requiredDrums,
+                available: filledDrumsAvailable,
+                shortage: 0,
+                status: 'AVAILABLE',
+                uom: 'EA',
+                item_type: 'PRODUCT_PACKAGING'
+              });
+            } else {
+              const shortage = requiredDrums - filledDrumsAvailable;
+              toast.warning(`Product-Packaging Stock: Only ${filledDrumsAvailable} ${packaging} available. Shortage: ${shortage} ${packaging}`);
+              
+              // Add to material availability for visibility
+              allAvailability.push({
+                item_id: `product_packaging_${productId}_${packaging}`,
+                item_name: `Filled ${packaging}`,
+                item_sku: '-',
+                required_qty: requiredDrums,
+                available: filledDrumsAvailable,
+                shortage: shortage,
+                status: 'SHORTAGE',
+                uom: 'EA',
+                item_type: 'PRODUCT_PACKAGING'
+              });
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to check product-packaging stock:', err);
+          // Don't block creation, just log the warning
+        }
+      }
+      
       // Get product BOM
       const bomRes = await api.get(`/product-boms/${productId}`);
       const boms = bomRes.data || [];
@@ -506,12 +555,14 @@ export default function JobOrdersPage() {
       }
       
       setForm(prev => ({ ...prev, bom: bomItems }));
-      setMaterialAvailability(availability);
+      // Combine product-packaging availability with BOM material availability
+      allAvailability.push(...availability);
+      setMaterialAvailability(allAvailability);
       
-      const shortageCount = availability.filter(a => a.status === 'SHORTAGE').length;
+      const shortageCount = allAvailability.filter(a => a.status === 'SHORTAGE').length;
       if (shortageCount > 0) {
         toast.warning(`${shortageCount} material(s) need procurement`);
-      } else {
+      } else if (allAvailability.length > 0) {
         toast.success('All materials available in stock');
       }
       
@@ -783,7 +834,11 @@ export default function JobOrdersPage() {
       job.customer_name?.toLowerCase().includes(searchLower) ||
       job.product_name?.toLowerCase().includes(searchLower) ||
       job.product_sku?.toLowerCase().includes(searchLower) ||
-      job.spa_number?.toLowerCase().includes(searchLower);
+      job.spa_number?.toLowerCase().includes(searchLower) ||
+      (job.items && job.items.some(item => 
+        item.product_name?.toLowerCase().includes(searchLower) ||
+        item.product_sku?.toLowerCase().includes(searchLower)
+      ));
     
     return matchesSearch;
   });
@@ -1691,19 +1746,51 @@ export default function JobOrdersPage() {
                       <div className="text-sm">{job.customer_name || '-'}</div>
                     </td>
                     <td>
-                      <div>{job.product_name}</div>
-                      <span className="text-xs text-muted-foreground">{job.product_sku}</span>
-                      {job.product_current_stock !== undefined && (
-                        <div className="text-xs mt-1">
-                          <span className="text-muted-foreground">Stock: </span>
-                          <span className={job.product_current_stock > 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
-                            {job.product_current_stock.toFixed(3)} MT
-                          </span>
+                      {job.items && job.items.length > 0 ? (
+                        // Multiple products - show all
+                        <div className="space-y-2">
+                          {job.items.map((item, idx) => (
+                            <div key={idx} className="border-b border-gray-200 dark:border-gray-700 pb-2 last:border-0 last:pb-0">
+                              <div className="font-medium">{item.product_name}</div>
+                              <span className="text-xs text-muted-foreground">{item.product_sku}</span>
+                              <div className="text-xs mt-1 text-muted-foreground">
+                                {item.quantity} {item.packaging || 'Bulk'}
+                              </div>
+                            </div>
+                          ))}
                         </div>
+                      ) : (
+                        // Single product (backward compatibility)
+                        <>
+                          <div>{job.product_name}</div>
+                          <span className="text-xs text-muted-foreground">{job.product_sku}</span>
+                          {job.product_current_stock !== undefined && (
+                            <div className="text-xs mt-1">
+                              <span className="text-muted-foreground">Stock: </span>
+                              <span className={job.product_current_stock > 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
+                                {job.product_current_stock.toFixed(3)} MT
+                              </span>
+                            </div>
+                          )}
+                        </>
                       )}
                     </td>
                     <td className="font-mono">
-                      {job.quantity} {getJobQuantityUnit(job)}
+                      {job.items && job.items.length > 0 ? (
+                        // Multiple products - show total or individual quantities
+                        <div className="space-y-1">
+                          {job.items.map((item, idx) => (
+                            <div key={idx} className="text-xs">
+                              {item.quantity} {item.packaging || 'Bulk'}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        // Single product (backward compatibility)
+                        <>
+                          {job.quantity} {getJobQuantityUnit(job)}
+                        </>
+                      )}
                     </td>
                     <td className="font-mono text-blue-600 dark:text-blue-400">
                       {job.dispatched_qty || 0} {getJobQuantityUnit(job)}

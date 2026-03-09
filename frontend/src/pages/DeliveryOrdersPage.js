@@ -30,6 +30,32 @@ export default function DeliveryOrdersPage() {
     notes: '',
   });
 
+  const downloadDeliveryOrderPDF = async (doId, doNumber) => {
+    try {
+      const token = localStorage.getItem('erp_token');
+      const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
+      const url = `${backendUrl}/api/pdf/delivery-note/${doId}?token=${token}`;
+      
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error('Failed to download PDF');
+      }
+      
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = `DeliveryOrder_${doNumber || doId}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(downloadUrl);
+    } catch (error) {
+      toast.error('Failed to download delivery order PDF');
+      console.error('Download error:', error);
+    }
+  };
+
   useEffect(() => {
     loadData();
   }, []);
@@ -347,11 +373,7 @@ export default function DeliveryOrdersPage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          onClick={() => {
-                            const token = localStorage.getItem('erp_token');
-                            const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
-                            window.open(`${backendUrl}/api/pdf/delivery-note/${dorder.id}?token=${token}`, '_blank');
-                          }}
+                          onClick={() => downloadDeliveryOrderPDF(dorder.id, dorder.do_number)}
                           title="Download PDF"
                         >
                           <Download className="w-4 h-4" />
@@ -500,11 +522,7 @@ export default function DeliveryOrdersPage() {
                 </Button>
                 <Button
                   variant="default"
-                  onClick={() => {
-                    const token = localStorage.getItem('erp_token');
-                    const backendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001';
-                    window.open(`${backendUrl}/api/pdf/delivery-note/${selectedDO.id}?token=${token}`, '_blank');
-                  }}
+                  onClick={() => downloadDeliveryOrderPDF(selectedDO.id, selectedDO.do_number)}
                 >
                   <Download className="w-4 h-4 mr-2" />
                   Download PDF

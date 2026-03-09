@@ -169,6 +169,8 @@ DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3001",
+    "http://192.168.1.58:3000",
+    "http://192.168.1.112:3000",
 ]
 # Around line 174-178, modify:
 cors_origins_env = os.environ.get('CORS_ORIGINS', '')
@@ -185,6 +187,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
     allow_origins=cors_origins,
+    allow_origin_regex=r"https?://(localhost|127\\.0\\.0\\.1|192\\.168\\.\\d+\\.\\d+)(:\\d+)?",
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=[
         "Content-Type",
@@ -6074,12 +6077,12 @@ async def create_grn(data: GRNCreate, current_user: dict = Depends(get_current_u
         product_id = item.get("product_id")
         
         # Determine if this is a packed (drummed) or bulk item
-        is_packed = (procurement_type == "Drummed" or unit == "EA") and item.get("packaging_item_id")
+        is_packed = (procurement_type == "Drummed" or unit == "EA")
         
         if is_packed:
             # PACKED ITEM: Could be finished product (drummed) or packaging material
             packaging_item_id = item.get("packaging_item_id")
-            packaging_qty = item.get("packaging_qty") or received_qty
+            packaging_qty = item.get("packaging_qty") or (received_qty if unit == "EA" else 0)
             drum_count = packaging_qty  # Number of drums/IBCs received
             net_weight_kg = item.get("net_weight_kg")  # Net weight per drum/IBC
             
@@ -6101,40 +6104,41 @@ async def create_grn(data: GRNCreate, current_user: dict = Depends(get_current_u
             # 1. Packaging item exists
             # 2. It's NOT a finished product (packaging was already deducted during production)
             #    OR it's empty packaging materials being received
-            if packaging_item_id and packaging_qty > 0 and packaging_item and not is_finished_product:
-                # Update packaging inventory balance (receiving empty packaging materials)
-                packaging_balance = await db.inventory_balances.find_one({"item_id": packaging_item_id}, {"_id": 0})
-                packaging_prev_stock = packaging_balance.get("on_hand", 0) if packaging_balance else 0
-                packaging_new_stock = packaging_prev_stock + packaging_qty
-                
-                await db.inventory_balances.update_one(
-                    {"item_id": packaging_item_id},
-                    {
-                        "$inc": {"on_hand": packaging_qty},
-                        "$set": {
-                            "financial_status": "BLOCKED",
-                            "grn_id": grn.id
-                        }
-                    },
-                    upsert=True
-                )
-                
-                # Create inventory movement record for packaging
-                packaging_movement = InventoryMovement(
-                    product_id=packaging_item_id,
-                    product_name=packaging_item.get("name", "Packaging"),
-                    sku=packaging_item.get("sku", "-"),
-                    movement_type="grn_received",
-                    quantity=packaging_qty,
-                    reference_type="grn",
-                    reference_id=grn.id,
-                    reference_number=grn.grn_number,
-                    previous_stock=packaging_prev_stock,
-                    new_stock=packaging_new_stock,
-                    created_by=current_user["id"]
-                )
-                await db.inventory_movements.insert_one(packaging_movement.model_dump())
-                
+            if packaging_item_id and packaging_qty > 0 and packaging_item:
+                if not is_finished_product:
+                    # Update packaging inventory balance (receiving empty packaging materials)
+                    packaging_balance = await db.inventory_balances.find_one({"item_id": packaging_item_id}, {"_id": 0})
+                    packaging_prev_stock = packaging_balance.get("on_hand", 0) if packaging_balance else 0
+                    packaging_new_stock = packaging_prev_stock + packaging_qty
+                    
+                    await db.inventory_balances.update_one(
+                        {"item_id": packaging_item_id},
+                        {
+                            "$inc": {"on_hand": packaging_qty},
+                            "$set": {
+                                "financial_status": "BLOCKED",
+                                "grn_id": grn.id
+                            }
+                        },
+                        upsert=True
+                    )
+                    
+                    # Create inventory movement record for packaging
+                    packaging_movement = InventoryMovement(
+                        product_id=packaging_item_id,
+                        product_name=packaging_item.get("name", "Packaging"),
+                        sku=packaging_item.get("sku", "-"),
+                        movement_type="grn_received",
+                        quantity=packaging_qty,
+                        reference_type="grn",
+                        reference_id=grn.id,
+                        reference_number=grn.grn_number,
+                        previous_stock=packaging_prev_stock,
+                        new_stock=packaging_new_stock,
+                        created_by=current_user["id"]
+                    )
+                    await db.inventory_movements.insert_one(packaging_movement.model_dump())
+                    
                 # If this is a finished product (drummed), also update product stock and product_packaging
                 if is_finished_product and net_weight_kg and net_weight_kg > 0 and packaging_name:
                     # Check if this is Goods Produced note (GPN)
@@ -9868,8 +9872,8 @@ async def get_all_stock(current_user: dict = Depends(get_current_user)):
         available = current_stock - reserved
         
         # For packaging from packaging collection, show capacity info
-        capacity = pkg.get("capacity_liters", 0)
-        net_weight = pkg.get("net_weight_kg_default", 0)
+        capacity = pkg.get("capacity_liters") or 0
+        net_weight = pkg.get("net_weight_kg_default") or 0
         packaging_info = f"{capacity}L" if capacity > 0 else f"{net_weight}kg" if net_weight > 0 else ""
         
         stock_items.append({
@@ -9944,23 +9948,44 @@ async def get_product_packaging_report(current_user: dict = Depends(get_current_
     Shows products grouped by packaging type with standard quantities and drum counts
     Includes both finished products and raw materials
     """
-    products = await db.products.find(
-        {"category": {"$in": ["finished_product", "raw_material"]}},
-        {"_id": 0}
-    ).to_list(1000)
-    
+    async def _safe_to_list(cursor, limit, label):
+        try:
+            return await cursor.max_time_ms(8000).to_list(limit)
+        except Exception as e:
+            logging.warning(f"Product-packaging report: failed to load {label}: {e}")
+            return []
+
+    products = await _safe_to_list(
+        db.products.find(
+            {
+                "$or": [
+                    {"category": {"$in": ["finished_product", "raw_material", "FINISHED_PRODUCT", "RAW_MATERIAL"]}},
+                    {"category": {"$exists": False}},
+                    {"category": None}
+                ]
+            },
+            {"_id": 0}
+        ),
+        2000,
+        "products"
+    )
+
     # Batch fetch all data upfront (performance optimization - prevents N+1 queries)
-    all_balances = await db.inventory_balances.find({}, {"_id": 0}).to_list(10000)
-    all_reservations = await db.inventory_reservations.find({}, {"_id": 0}).to_list(10000)
-    all_packaging_configs = await db.product_packaging_configs.find({"is_active": True}, {"_id": 0}).to_list(10000)
-    all_product_packaging = await db.product_packaging.find({}, {"_id": 0}).to_list(10000)
+    all_balances = await _safe_to_list(db.inventory_balances.find({}, {"_id": 0}), 10000, "inventory balances")
+    all_reservations = await _safe_to_list(db.inventory_reservations.find({}, {"_id": 0}), 10000, "inventory reservations")
+    all_packaging_configs = await _safe_to_list(db.product_packaging_configs.find({"is_active": True}, {"_id": 0}), 10000, "product packaging configs")
+    all_product_packaging = await _safe_to_list(db.product_packaging.find({}, {"_id": 0}), 10000, "product packaging")
     
     # Get all product IDs to batch fetch job orders
     product_ids = [p.get("id") for p in products]
-    all_active_jobs = await db.job_orders.find({
-        "product_id": {"$in": product_ids},
-        "status": {"$in": ["pending", "approved", "procurement", "in_production"]}
-    }, {"_id": 0, "product_id": 1, "packaging": 1, "items": 1}).to_list(10000)
+    all_active_jobs = await _safe_to_list(
+        db.job_orders.find({
+            "product_id": {"$in": product_ids},
+            "status": {"$in": ["pending", "approved", "procurement", "in_production", "ready_to_dispatch"]}
+        }, {"_id": 0, "product_id": 1, "packaging": 1, "items": 1}),
+        5000,
+        "active jobs"
+    )
     
     # Create lookup dictionaries for O(1) access
     balances_by_item = {b["item_id"]: b for b in all_balances}
@@ -10000,7 +10025,7 @@ async def get_product_packaging_report(current_user: dict = Depends(get_current_
     for product in products:
         product_id = product.get("id")
         product_name = product.get("name")
-        packaging = product.get("packaging", "Bulk")
+        packaging = product.get("packaging") or "Bulk"
         unit = product.get("unit", "KG").upper()
         
         # Get current stock from inventory_balances (from lookup dict)
@@ -10129,19 +10154,21 @@ async def get_product_packaging_report(current_user: dict = Depends(get_current_
         
         if product_packaging_records:
             # If we have product_packaging records, use those for accurate packaging info
+            has_rows_for_product = False
             for pp_record in product_packaging_records:
                 packaging_name = pp_record.get("packaging_name", actual_packaging)
                 packaging_qty = pp_record.get("quantity", 0)
                 net_weight_kg_from_record = pp_record.get("net_weight_kg", qty_standard)
-                
+
                 if packaging_qty > 0 and net_weight_kg_from_record > 0:
+                    has_rows_for_product = True
                     # Calculate total weight from packaging records
                     total_weight_kg = packaging_qty * net_weight_kg_from_record
                     if unit == "MT":
                         total_weight = total_weight_kg / 1000
                     else:
                         total_weight = total_weight_kg
-                    
+
                     report_items.append({
                         "product_id": product_id,
                         "product_name": product_name,
@@ -10159,7 +10186,27 @@ async def get_product_packaging_report(current_user: dict = Depends(get_current_
                         "status": "In Stock" if packaging_qty > 0 else "Out of Stock",
                         "unit": unit
                     })
-        elif actual_packaging.upper() != "BULK" and qty_standard > 0:
+
+            # Fallback: if packaging records exist but none had positive qty, still show row via inferred logic.
+            if not has_rows_for_product and (actual_packaging or "Bulk").upper() != "BULK" and qty_standard > 0:
+                report_items.append({
+                    "product_id": product_id,
+                    "product_name": product_name,
+                    "sku": product.get("sku", ""),
+                    "packing": actual_packaging,
+                    "qty_standard": qty_standard,
+                    "qty_standard_display": f"{qty_standard} KG" if qty_standard > 0 else "Bulk",
+                    "current_stock": current_stock,
+                    "current_stock_display": f"{current_stock:.2f} {unit}",
+                    "reserved": reserved,
+                    "reserved_display": f"{reserved:.2f} {unit}" if reserved > 0 else "0.00",
+                    "available": available,
+                    "available_display": f"{available:.2f} {unit}",
+                    "drums_count": drums_count if drums_count > 0 else "-",
+                    "status": status,
+                    "unit": unit
+                })
+        elif (actual_packaging or "Bulk").upper() != "BULK" and qty_standard > 0:
             # Fallback to original logic if no product_packaging records
             report_items.append({
                 "product_id": product_id,
@@ -23147,6 +23194,10 @@ class QCInspectionUpdate(BaseModel):
     coa_number: Optional[str] = None
     inspector_notes: Optional[str] = None
     status: Optional[str] = None
+    gross_weight: Optional[float] = None
+    empty_weight: Optional[float] = None
+    net_weight: Optional[float] = None
+    qty_drums: Optional[int] = None
     supplier: Optional[str] = None
     items: Optional[List[Dict[str, Any]]] = None
     quantity: Optional[float] = None
@@ -23711,6 +23762,188 @@ async def complete_security_checklist(checklist_id: str, current_user: dict = De
         "qc_number": qc_number
     }
 
+# ==================== OUTWARD DISPATCH COMPATIBILITY ENDPOINTS ====================
+
+@api_router.put("/outward-dispatch/{transport_id}/status")
+async def update_outward_dispatch_status(
+    transport_id: str,
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Compatibility route for Security QC page: update outward loading status."""
+    status = (data or {}).get("status")
+    if not status:
+        raise HTTPException(status_code=400, detail="Status is required")
+
+    transport = await db.transport_outward.find_one({"id": transport_id}, {"_id": 0})
+    if not transport:
+        raise HTTPException(status_code=404, detail="Transport not found")
+
+    update_data = {
+        "loading_status": status,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    if status in ["PENDING", "LOADING", "LOADED", "COMPLETE"]:
+        update_data["status"] = status
+
+    await db.transport_outward.update_one(
+        {"id": transport_id},
+        {"$set": update_data}
+    )
+
+    return {"success": True, "message": f"Outward dispatch status updated to {status}"}
+
+
+@api_router.put("/outward-dispatch/{transport_id}/empty-weight")
+async def update_outward_dispatch_empty_weight(
+    transport_id: str,
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Save empty vehicle weight before gross weighment."""
+    transport = await db.transport_outward.find_one({"id": transport_id}, {"_id": 0})
+    if not transport:
+        raise HTTPException(status_code=404, detail="Transport not found")
+
+    try:
+        empty_weight = float((data or {}).get("empty_weight"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Valid empty_weight is required")
+
+    await db.transport_outward.update_one(
+        {"id": transport_id},
+        {"$set": {
+            "empty_weight": empty_weight,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+
+    # Keep security checklist weight fields in sync.
+    await db.security_checklists.update_one(
+        {"ref_id": transport_id, "ref_type": "OUTWARD"},
+        {"$set": {"tare_weight": empty_weight}}
+    )
+
+    return {"success": True, "message": "Empty weight saved"}
+
+
+@api_router.put("/outward-dispatch/{transport_id}/save-weights")
+async def save_outward_dispatch_weights(
+    transport_id: str,
+    data: dict = Body(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Save weighment data - DO is generated only after QC passes."""
+    transport = await db.transport_outward.find_one({"id": transport_id}, {"_id": 0})
+    if not transport:
+        raise HTTPException(status_code=404, detail="Transport not found")
+
+    try:
+        empty_weight = float((data or {}).get("empty_weight"))
+        gross_weight = float((data or {}).get("gross_weight"))
+        qty_drums = int((data or {}).get("qty_drums", 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid weight values")
+
+    net_weight = gross_weight - empty_weight
+
+    await db.transport_outward.update_one(
+        {"id": transport_id},
+        {"$set": {
+            "empty_weight": empty_weight,
+            "gross_weight": gross_weight,
+            "net_weight": net_weight,
+            "qty_drums": qty_drums,
+            "loading_status": "LOADING",
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+
+    await db.security_checklists.update_one(
+        {"ref_id": transport_id, "ref_type": "OUTWARD"},
+        {"$set": {
+            "tare_weight": empty_weight,
+            "gross_weight": gross_weight,
+            "net_weight": net_weight,
+            "qty_drums": qty_drums
+        }}
+    )
+
+    return {"success": True, "message": "Weights saved. Awaiting QC approval."}
+
+
+@api_router.post("/outward-dispatch/{transport_id}/complete-loading")
+async def complete_outward_dispatch_loading(
+    transport_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Complete outward loading and generate DO only if QC has PASSED."""
+    transport = await db.transport_outward.find_one({"id": transport_id}, {"_id": 0})
+    if not transport:
+        raise HTTPException(status_code=404, detail="Transport not found")
+
+    qc_inspection = await db.qc_inspections.find_one(
+        {"ref_id": transport_id, "ref_type": "OUTWARD"},
+        {"_id": 0}
+    )
+    if not qc_inspection:
+        raise HTTPException(status_code=400, detail="QC inspection not found. Please wait for QC team to complete inspection.")
+
+    if qc_inspection.get("status") != "PASSED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"QC inspection is {qc_inspection.get('status', 'PENDING')}. DO can only be generated after QC passes."
+        )
+
+    do_result = await finalize_outward_after_qc_pass(qc_inspection, current_user)
+
+    return {
+        "success": True,
+        "message": f"Delivery Order {do_result['do_number']} created. Receivables notified.",
+        "do_number": do_result["do_number"]
+    }
+
+
+@api_router.post("/outward-dispatch/{transport_id}/send-email")
+async def send_outward_dispatch_email(
+    transport_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Queue DO email for outward dispatch."""
+    transport = await db.transport_outward.find_one({"id": transport_id}, {"_id": 0})
+    if not transport:
+        raise HTTPException(status_code=404, detail="Transport not found")
+
+    do_number = transport.get("do_number")
+    if not do_number:
+        raise HTTPException(status_code=400, detail="Delivery Order not generated yet")
+
+    delivery_order = await db.delivery_orders.find_one({"do_number": do_number}, {"_id": 0})
+    if not delivery_order:
+        raise HTTPException(status_code=404, detail="Delivery Order not found")
+
+    customer = await db.customers.find_one({"name": delivery_order.get("customer_name")}, {"_id": 0})
+    to_email = customer.get("email") if customer else None
+    if not to_email:
+        raise HTTPException(status_code=400, detail="Customer email not found")
+
+    body_html = f"""
+    <p>Dear {delivery_order.get('customer_name', 'Customer')},</p>
+    <p>Your Delivery Order <b>{do_number}</b> has been generated and dispatched.</p>
+    <p>Regards,<br/>ERP Team</p>
+    """
+
+    email_item = EmailQueueItem(
+        to_email=to_email,
+        subject=f"Delivery Order {do_number}",
+        body_html=body_html,
+        ref_type="DO",
+        ref_id=delivery_order.get("id")
+    )
+    await db.email_outbox.insert_one(email_item.model_dump())
+
+    return {"success": True, "message": "Email queued successfully", "email_id": email_item.id}
 # ==================== QC ENDPOINTS ====================
 
 async def enrich_qc_inspection_with_product(inspection: dict):
@@ -23989,7 +24222,10 @@ async def get_qc_inspections(status: Optional[str] = None, ref_type: Optional[st
     """Get QC inspections"""
     query = {}
     if status:
-        query["status"] = status
+        if "," in status:
+            query["status"] = {"$in": [s.strip() for s in status.split(",") if s.strip()]}
+        else:
+            query["status"] = status
     if ref_type:
         query["ref_type"] = ref_type
     
@@ -23999,6 +24235,20 @@ async def get_qc_inspections(status: Optional[str] = None, ref_type: Optional[st
     inspections = [await enrich_qc_inspection_with_product(insp) for insp in inspections]
     
     return inspections
+
+@api_router.get("/qc/inspections/{inspection_id}")
+async def get_qc_inspection(inspection_id: str, current_user: dict = Depends(get_current_user)):
+    """Get a single QC inspection by ID."""
+    # Avoid route collision with the static "/qc/inspections/completed" endpoint.
+    if inspection_id == "completed":
+        return await get_completed_qc_inspections(current_user)
+
+    inspection = await db.qc_inspections.find_one({"id": inspection_id}, {"_id": 0})
+    if not inspection:
+        raise HTTPException(status_code=404, detail="Inspection not found")
+
+    inspection = await enrich_qc_inspection_with_product(inspection)
+    return inspection
 
 @api_router.get("/qc/inspections/completed")
 async def get_completed_qc_inspections(current_user: dict = Depends(get_current_user)):
@@ -24014,8 +24264,8 @@ async def get_completed_qc_inspections(current_user: dict = Depends(get_current_
 @api_router.put("/qc/inspections/{inspection_id}")
 async def update_qc_inspection(inspection_id: str, data: QCInspectionUpdate, current_user: dict = Depends(get_current_user)):
     """Update QC inspection with test results"""
-    if not has_permission(current_user, required_roles=["admin", "qc"], required_page="/qc-inspection"):
-        raise HTTPException(status_code=403, detail="Only QC can update inspections")
+    if current_user.get("role") not in ["admin", "qc", "security"]:
+        raise HTTPException(status_code=403, detail="Only QC/Security/Admin can update inspections")
     
     update_data = {k: v for k, v in data.model_dump().items() if v is not None}
     
@@ -24053,7 +24303,7 @@ async def create_qc_inspection_new(data: QCInspectionCreate, current_user: dict 
         all_passed = all(param.get("result") == "PASS" for param in data.qc_parameters if param.get("required", True))
         status = "PASSED" if all_passed else "FAILED"
     else:
-        status = "IN_PROGRESS"
+        status = "PENDING"
     
     inspection = {
         "id": str(uuid.uuid4()),
@@ -24098,6 +24348,51 @@ async def create_qc_inspection_new(data: QCInspectionCreate, current_user: dict 
     inspection = await enrich_qc_inspection_with_product(inspection)
     
     return inspection
+
+async def finalize_outward_after_qc_pass(inspection: dict, current_user: dict):
+    """Validate outward QC context and generate DO exactly once."""
+    transport = await db.transport_outward.find_one(
+        {"id": inspection["ref_id"]}, {"_id": 0}
+    )
+    if not transport:
+        raise HTTPException(status_code=404, detail="Transport not found for this inspection")
+
+    batch_number = transport.get("batch_number") or inspection.get("batch_number")
+    if not batch_number:
+        raise HTTPException(
+            status_code=400,
+            detail="Batch number missing on transport. Security must save weights first."
+        )
+
+    if not transport.get("batch_number") and batch_number:
+        await db.transport_outward.update_one(
+            {"id": inspection["ref_id"]},
+            {"$set": {"batch_number": batch_number}}
+        )
+
+    # Avoid duplicate DO generation on retries.
+    existing_do = await db.delivery_orders.find_one(
+        {"qc_inspection_id": inspection.get("id")}, {"_id": 0}
+    )
+    if existing_do:
+        await db.transport_outward.update_one(
+            {"id": inspection["ref_id"]},
+            {"$set": {
+                "loading_status": "COMPLETE",
+                "status": "LOADED",
+                "do_number": existing_do.get("do_number")
+            }}
+        )
+        return {"do_number": existing_do.get("do_number"), "do_id": existing_do.get("id")}
+
+    do_result = await create_do_from_qc(inspection, current_user)
+
+    await db.transport_outward.update_one(
+        {"id": inspection["ref_id"]},
+        {"$set": {"loading_status": "COMPLETE", "status": "LOADED"}}
+    )
+
+    return do_result
 
 @api_router.put("/qc/inspections/{inspection_id}/pass")
 async def pass_qc_inspection(inspection_id: str, current_user: dict = Depends(get_current_user)):
@@ -24234,8 +24529,8 @@ async def pass_qc_inspection(inspection_id: str, current_user: dict = Depends(ge
             result_message = "QC Passed. Please create GRN to update stock."
         
     elif inspection["ref_type"] == "OUTWARD":
-        # Generate Delivery Order and documents
-        do_result = await create_do_from_qc(inspection, current_user)
+        # Generate Delivery Order and documents only after outward QC final checks.
+        do_result = await finalize_outward_after_qc_pass(inspection, current_user)
         result_message = f"Delivery Order {do_result['do_number']} created. Receivables notified."
     
     return {
@@ -24795,7 +25090,32 @@ async def generate_bl_draft(do_number: str, job: dict, so: dict, quotation: dict
 # Helper function to create DO from QC pass (Outward flow)
 async def create_do_from_qc(inspection: dict, current_user: dict):
     """Create Delivery Order after QC pass for outward dispatch"""
-    
+
+    if not inspection:
+        raise HTTPException(status_code=400, detail="QC inspection is required")
+
+    # Always validate latest QC status from DB before DO generation.
+    inspection_id = inspection.get("id") if isinstance(inspection, dict) else None
+    if inspection_id:
+        latest_inspection = await db.qc_inspections.find_one({"id": inspection_id}, {"_id": 0})
+        if not latest_inspection:
+            raise HTTPException(status_code=404, detail="Inspection not found")
+        inspection = latest_inspection
+
+    if inspection.get("status") != "PASSED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"QC inspection is {inspection.get('status', 'PENDING')}. DO can only be generated after QC passes."
+        )
+
+    # Idempotency: return existing DO if already generated for this QC.
+    existing_do = await db.delivery_orders.find_one(
+        {"qc_inspection_id": inspection.get("id")},
+        {"_id": 0}
+    )
+    if existing_do:
+        return {"do_number": existing_do.get("do_number"), "do_id": existing_do.get("id")}
+
     job = None
     transport = None
     
@@ -24822,7 +25142,7 @@ async def create_do_from_qc(inspection: dict, current_user: dict):
     
     # If still no job found, return error
     if not job:
-        return {"do_number": "N/A", "error": "Job order not found. Cannot create DO without job information."}
+        raise HTTPException(status_code=404, detail="Job order not found. Cannot create DO without job information.")
     
     do_number = await generate_sequence("DO", "delivery_orders")
     
@@ -26240,3 +26560,16 @@ async def delete_shipping_line(shipping_line_id: str, current_user: dict = Depen
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -140,6 +140,24 @@ export default function LocalPurchaseSaleCosting({ costing, quotation, onUpdate 
       newCosts.shipment_charges_per_mt = 0;
     }
     
+    // Calculate total product cost (weighted sum of all products)
+    let totalProductCost = 0;
+    if (quotation?.items && quotation.items.length > 0) {
+      // Multiple products: calculate weighted sum
+      quotation.items.forEach((_, idx) => {
+        const productCostPerMT = newCosts[`product_cost_per_mt_${idx}`] !== undefined 
+          ? newCosts[`product_cost_per_mt_${idx}`] 
+          : (idx === 0 ? (newCosts.product_cost_per_mt || newCosts.product_cost || 0) : 0);
+        const weightMT = newCosts[`loaded_weight_mt_${idx}`] || (idx === 0 ? (newCosts.loaded_weight_mt || 0) : 0);
+        totalProductCost += productCostPerMT * weightMT;
+      });
+    } else {
+      // Single product: use legacy field
+      const productCostPerMT = newCosts.product_cost_per_mt || newCosts.product_cost || 0;
+      totalProductCost = productCostPerMT * (newCosts.loaded_weight_mt || 0);
+    }
+    newCosts.product_cost = totalProductCost;
+    
     // Calculate total cost (Product Cost + Cost/MT from Table 3)
     newCosts.total_cost = (newCosts.product_cost || 0) + (newCosts.cost_per_mt || 0);
     
@@ -311,6 +329,25 @@ export default function LocalPurchaseSaleCosting({ costing, quotation, onUpdate 
                       />
                     </div>
                   </div>
+                  <div className="flex justify-between items-center">
+                    <Label>Product Cost (Cost/MT)</Label>
+                    <Input
+                      type="number"
+                      value={costs[`product_cost_per_mt_${itemIdx}`] !== undefined ? costs[`product_cost_per_mt_${itemIdx}`] : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0)}
+                      onChange={(e) => handleChange(`product_cost_per_mt_${itemIdx}`, parseFloat(e.target.value) || 0)}
+                      className="w-32 text-right"
+                      step="0.01"
+                    />
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <Label>Product Cost Total</Label>
+                    <Input
+                      type="number"
+                      value={((costs[`product_cost_per_mt_${itemIdx}`] !== undefined ? costs[`product_cost_per_mt_${itemIdx}`] : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0)) * (costs[`loaded_weight_mt_${itemIdx}`] || 0))?.toFixed(2) || '0.00'}
+                      readOnly
+                      className="w-32 text-right bg-muted font-mono"
+                    />
+                  </div>
                 </div>
               ))}
               {/* Overall totals */}
@@ -388,16 +425,47 @@ export default function LocalPurchaseSaleCosting({ costing, quotation, onUpdate 
           <CardTitle className="text-sm">Table 4: Cost and Profit Summary</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex justify-between items-center">
-            <Label>Product Cost</Label>
-            <Input
-              type="number"
-              value={costs.product_cost || 0}
-              onChange={(e) => handleChange('product_cost', parseFloat(e.target.value) || 0)}
-              className="w-32 text-right"
-              step="0.01"
-            />
-          </div>
+          {quotation?.items && quotation.items.length > 1 ? (
+            <>
+              {/* Per-product breakdown for multiple products */}
+              {quotation.items.map((item, itemIdx) => {
+                const productCostPerMT = costs[`product_cost_per_mt_${itemIdx}`] !== undefined 
+                  ? costs[`product_cost_per_mt_${itemIdx}`] 
+                  : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0);
+                const weightMT = costs[`loaded_weight_mt_${itemIdx}`] || (itemIdx === 0 ? (costs.loaded_weight_mt || 0) : 0);
+                const productCostTotal = productCostPerMT * weightMT;
+                return (
+                  <div key={itemIdx} className="border border-border rounded p-2 bg-muted/5">
+                    <div className="text-xs font-semibold mb-1 text-blue-400">{item.product_name}</div>
+                    <div className="flex justify-between items-center text-xs">
+                      <span>Cost/MT: ${productCostPerMT.toFixed(2)} × {weightMT.toFixed(3)} MT</span>
+                      <span className="font-mono">= ${productCostTotal.toFixed(2)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="flex justify-between items-center pt-2 border-t">
+                <Label className="font-semibold">Total Product Cost</Label>
+                <Input
+                  type="number"
+                  value={costs.product_cost?.toFixed(2) || '0.00'}
+                  readOnly
+                  className="w-32 text-right bg-muted font-mono font-semibold"
+                />
+              </div>
+            </>
+          ) : (
+            <div className="flex justify-between items-center">
+              <Label>Product Cost</Label>
+              <Input
+                type="number"
+                value={costs.product_cost_per_mt || costs.product_cost || 0}
+                onChange={(e) => handleChange('product_cost_per_mt', parseFloat(e.target.value) || 0)}
+                className="w-32 text-right"
+                step="0.01"
+              />
+            </div>
+          )}
           <div className="flex justify-between items-center">
             <Label>Cost/MT</Label>
             <Input

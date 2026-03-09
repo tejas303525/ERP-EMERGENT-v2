@@ -276,9 +276,11 @@ export const emailAPI = {
 
 // Blend Reports
 export const blendReportAPI = {
+  getAll: () => api.get('/blend-reports'),
   getOne: (id) => api.get(`/blend-reports/${id}`),
   create: (data) => api.post('/blend-reports', data),
   approve: (id) => api.put(`/blend-reports/${id}/approve`),
+  getQCInspection: (reportId) => api.get(`/blend-reports/${reportId}/qc-inspection`),
   downloadPDF: (id) => `${API_BASE}/pdf/blend-report/${id}`,
 };
 
@@ -298,6 +300,14 @@ export const pdfAPI = {
   getDeliveryNoteUrl: (deliveryOrderId) => {
     const token = localStorage.getItem('erp_token');
     return `${API_BASE}/pdf/delivery-note/${deliveryOrderId}${token ? `?token=${token}` : ''}`;
+  },
+  getInternalDispatchLoadingInstructionUrl: (transportId) => {
+    const token = localStorage.getItem('erp_token');
+    return `${API_BASE}/pdf/internal-dispatch-loading-instruction/${transportId}${token ? `?token=${token}` : ''}`;
+  },
+  getCOAUrl: (coaId) => {
+    const token = localStorage.getItem('erp_token');
+    return `${API_BASE}/pdf/coa/${coaId}${token ? `?token=${token}` : ''}`;
   },
 };
 

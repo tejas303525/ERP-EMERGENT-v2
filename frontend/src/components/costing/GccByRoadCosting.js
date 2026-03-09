@@ -235,7 +235,26 @@ export default function GccByRoadCosting({ costing, quotation, onUpdate }) {
     // Export shipment charges per MT always follows Product & Weight cost per MT
     newCosts.export_shipment_charges_per_mt = newCosts.cost_per_mt || 0;
 
-    // Total cost (per MT) = product cost per MT + export shipment charges per MT
+    // Calculate total product cost (weighted sum of all products)
+    const items = quotation?.items || [];
+    let totalProductCost = 0;
+    if (items.length > 0) {
+      // Multiple products: calculate weighted sum
+      items.forEach((_, idx) => {
+        const productCostPerMT = newCosts[`product_cost_per_mt_${idx}`] !== undefined 
+          ? newCosts[`product_cost_per_mt_${idx}`] 
+          : (idx === 0 ? (newCosts.product_cost_per_mt || newCosts.product_cost || 0) : 0);
+        const weightMT = newCosts[`loaded_weight_mt_${idx}`] || (idx === 0 ? (newCosts.loaded_weight_mt || 0) : 0);
+        totalProductCost += productCostPerMT * weightMT;
+      });
+    } else {
+      // Single product: use legacy field
+      const productCostPerMT = newCosts.product_cost_per_mt || newCosts.product_cost || 0;
+      totalProductCost = productCostPerMT * (newCosts.loaded_weight_mt || 0);
+    }
+    newCosts.product_cost = totalProductCost;
+
+    // Total cost = product cost + export shipment charges per MT
     newCosts.total_cost =
       (newCosts.product_cost || 0) + (newCosts.export_shipment_charges_per_mt || 0);
 
@@ -348,9 +367,10 @@ export default function GccByRoadCosting({ costing, quotation, onUpdate }) {
                         className="text-right"
                         step="0.01"
                         value={costs[`${charge.field}_rate`] ?? charge.defaultRate}
-                        onChange={(e) =>
-                          handleChange(`${charge.field}_rate`, parseFloat(e.target.value) || 0)
-                        }
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                          handleChange(`${charge.field}_rate`, isNaN(val) ? charge.defaultRate : val);
+                        }}
                       />
                     </td>
                     <td className="p-2">
@@ -472,6 +492,26 @@ export default function GccByRoadCosting({ costing, quotation, onUpdate }) {
                       }
                     />
                   </div>
+                  <div className="flex items-center justify-between">
+                    <Label>Product Cost (Cost/MT)</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={costs[`product_cost_per_mt_${itemIdx}`] !== undefined ? costs[`product_cost_per_mt_${itemIdx}`] : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0)}
+                      onChange={(e) => handleChange(`product_cost_per_mt_${itemIdx}`, parseFloat(e.target.value) || 0)}
+                      className="w-32 text-right"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Label>Product Cost Total</Label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={((costs[`product_cost_per_mt_${itemIdx}`] !== undefined ? costs[`product_cost_per_mt_${itemIdx}`] : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0)) * (costs[`loaded_weight_mt_${itemIdx}`] || (costs[`drum_ctn_${itemIdx}`] !== undefined ? ((costs[`drum_ctn_${itemIdx}`] || 0) * (costs[`kg_per_drum_ctn_${itemIdx}`] || 0)) / 1000 : (itemIdx === 0 ? (costs.loaded_weight_mt || 0) : 0))))?.toFixed(2) || '0.00'}
+                      readOnly
+                      className="w-32 text-right bg-muted font-mono"
+                    />
+                  </div>
                 </div>
               ))}
               {/* Overall totals */}
@@ -567,19 +607,51 @@ export default function GccByRoadCosting({ costing, quotation, onUpdate }) {
           <CardTitle className="text-sm">Cost & Margin Summary</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="col-span-1">
-              <Label>Product (Cost/MT)</Label>
-              <Input
-                type="number"
-                step="0.01"
-                value={costs.product_cost || 0}
-                onChange={(e) =>
-                  handleChange('product_cost', parseFloat(e.target.value) || 0)
-                }
-              />
+          {quotation?.items && quotation.items.length > 1 ? (
+            <>
+              {/* Per-product breakdown for multiple products */}
+              {quotation.items.map((item, itemIdx) => {
+                const productCostPerMT = costs[`product_cost_per_mt_${itemIdx}`] !== undefined 
+                  ? costs[`product_cost_per_mt_${itemIdx}`] 
+                  : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0);
+                const weightMT = costs[`loaded_weight_mt_${itemIdx}`] || (itemIdx === 0 ? (costs.loaded_weight_mt || 0) : 0);
+                const productCostTotal = productCostPerMT * weightMT;
+                return (
+                  <div key={itemIdx} className="border border-border rounded p-2 bg-muted/5">
+                    <div className="text-xs font-semibold mb-1 text-blue-400">{item.product_name || item.name}</div>
+                    <div className="flex justify-between items-center text-xs">
+                      <span>Cost/MT: ${productCostPerMT.toFixed(2)} × {weightMT.toFixed(3)} MT</span>
+                      <span className="font-mono">= ${productCostTotal.toFixed(2)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="flex items-center justify-between pt-2 border-t">
+                <Label className="font-semibold">Total Product Cost</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={costs.product_cost?.toFixed(2) || '0.00'}
+                  readOnly
+                  className="w-32 text-right bg-muted font-mono font-semibold"
+                />
+              </div>
+            </>
+          ) : (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-1">
+                <Label>Product (Cost/MT)</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  value={costs.product_cost_per_mt || costs.product_cost || 0}
+                  onChange={(e) =>
+                    handleChange('product_cost_per_mt', parseFloat(e.target.value) || 0)
+                  }
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="grid grid-cols-2 gap-4">
             <div>

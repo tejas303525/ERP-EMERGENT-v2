@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { blendReportAPI, jobOrderAPI, productAPI, pdfAPI } from '../lib/api';
+import { blendReportAPI, jobOrderAPI, productAPI, pdfAPI, qcAPI } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -25,6 +25,7 @@ export default function BlendReportsPage() {
 
   const [form, setForm] = useState({
     job_order_id: '',
+    product_name: '',
     batch_number: '',
     blend_date: new Date().toISOString().split('T')[0],
     operator_name: '',
@@ -55,10 +56,27 @@ export default function BlendReportsPage() {
     try {
       const [reportsRes, jobsRes, productsRes] = await Promise.all([
         blendReportAPI.getAll(),
-        jobOrderAPI.getAll('in_production'),
+        jobOrderAPI.getAll(null, 1, 1000), // Get all job orders (no status filter, large page size)
         productAPI.getAll('raw_material'),
       ]);
-      setReports(reportsRes.data);
+      let reports = reportsRes.data || [];
+      
+      // Enrich reports with QC inspection data
+      const reportsWithQC = await Promise.all(
+        reports.map(async (report) => {
+          try {
+            const qcRes = await blendReportAPI.getQCInspection(report.id).catch(() => null);
+            return {
+              ...report,
+              qc_inspection: qcRes?.data || null
+            };
+          } catch (error) {
+            return { ...report, qc_inspection: null };
+          }
+        })
+      );
+      
+      setReports(reportsWithQC);
       // Handle paginated response structure - jobsRes.data is {data: [...], pagination: {...}}
       const jobsResponse = jobsRes?.data || {};
       setJobs(Array.isArray(jobsResponse.data) ? jobsResponse.data : (Array.isArray(jobsResponse) ? jobsResponse : []));
@@ -141,7 +159,7 @@ export default function BlendReportsPage() {
       toast.success('Blend report approved');
       loadData();
     } catch (error) {
-      toast.error('Failed to approve');
+      toast.error(error.response?.data?.detail || 'Failed to approve');
     }
   };
 
@@ -176,9 +194,27 @@ export default function BlendReportsPage() {
     }
   };
 
+  const handleJobOrderSelect = (jobOrderId) => {
+    const selectedJob = jobs.find(j => j.id === jobOrderId);
+    if (selectedJob) {
+      setForm({
+        ...form,
+        job_order_id: jobOrderId,
+        product_name: selectedJob.product_name || '',
+      });
+    } else {
+      setForm({
+        ...form,
+        job_order_id: jobOrderId,
+        product_name: '',
+      });
+    }
+  };
+
   const resetForm = () => {
     setForm({
       job_order_id: '',
+      product_name: '',
       batch_number: '',
       blend_date: new Date().toISOString().split('T')[0],
       operator_name: '',
@@ -218,9 +254,9 @@ export default function BlendReportsPage() {
                   <div className="form-grid">
                     <div className="form-field">
                       <Label>Job Order *</Label>
-                      <Select value={form.job_order_id} onValueChange={(v) => setForm({...form, job_order_id: v})}>
+                      <Select value={form.job_order_id} onValueChange={handleJobOrderSelect}>
                         <SelectTrigger data-testid="job-select">
-                          <SelectValue placeholder="Select job in production" />
+                          <SelectValue placeholder="Select job order" />
                         </SelectTrigger>
                         <SelectContent>
                           {jobs.map(j => (
@@ -230,6 +266,15 @@ export default function BlendReportsPage() {
                           ))}
                         </SelectContent>
                       </Select>
+                    </div>
+                    <div className="form-field">
+                      <Label>Product</Label>
+                      <Input
+                        value={form.product_name}
+                        readOnly
+                        placeholder="Product will be auto-filled from job order"
+                        className="bg-muted"
+                      />
                     </div>
                     <div className="form-field">
                       <Label>Batch Number *</Label>
@@ -441,53 +486,97 @@ export default function BlendReportsPage() {
                 <th>Blend Date</th>
                 <th>Output</th>
                 <th>Yield</th>
+                <th>QC Status</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {reports.map((report) => (
-                <tr key={report.id} data-testid={`report-row-${report.report_number}`}>
-                  <td className="font-medium">{report.report_number}</td>
-                  <td className="font-mono">{report.job_number}</td>
-                  <td>{report.product_name}</td>
-                  <td>{report.batch_number}</td>
-                  <td>{formatDate(report.blend_date)}</td>
-                  <td className="font-mono">{report.output_quantity}</td>
-                  <td className="font-mono">{report.yield_percentage}%</td>
-                  <td><Badge className={getStatusColor(report.status)}>{report.status}</Badge></td>
-                  <td>
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => { setSelectedReport(report); setViewOpen(true); }}
-                      >
-                        <Eye className="w-4 h-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => handleDownloadPDF(report.id, report.report_number)}
-                        title="Download PDF"
-                      >
-                        <Download className="w-4 h-4" />
-                      </Button>
-                      {canApprove && report.status !== 'approved' && (
+              {reports.map((report) => {
+                const qcStatus = report.qc_inspection?.status || 'PENDING';
+                const qcPassed = report.qc_inspection?.status === 'PASSED';
+                const canApproveThis = canApprove && report.status !== 'approved' && qcPassed;
+                
+                const getQCStatusColor = (status) => {
+                  if (status === 'PASSED') return 'bg-green-500/20 text-green-400';
+                  if (status === 'FAILED') return 'bg-red-500/20 text-red-400';
+                  if (status === 'IN_PROGRESS') return 'bg-blue-500/20 text-blue-400';
+                  return 'bg-amber-500/20 text-amber-400';
+                };
+                
+                return (
+                  <tr key={report.id} data-testid={`report-row-${report.report_number}`}>
+                    <td className="font-medium">{report.report_number}</td>
+                    <td className="font-mono">{report.job_number}</td>
+                    <td>{report.product_name}</td>
+                    <td>{report.batch_number}</td>
+                    <td>{formatDate(report.blend_date)}</td>
+                    <td className="font-mono">{report.output_quantity}</td>
+                    <td className="font-mono">{report.yield_percentage}%</td>
+                    <td>
+                      {report.qc_inspection ? (
+                        <Badge className={getQCStatusColor(qcStatus)}>
+                          {qcStatus}
+                        </Badge>
+                      ) : (
+                        <span className="text-muted-foreground text-sm">-</span>
+                      )}
+                    </td>
+                    <td><Badge className={getStatusColor(report.status)}>{report.status}</Badge></td>
+                    <td>
+                      <div className="flex items-center gap-1">
                         <Button
                           variant="ghost"
                           size="icon"
-                          onClick={() => handleApprove(report.id)}
-                          className="text-emerald-500"
-                          title="Approve"
+                          onClick={() => { setSelectedReport(report); setViewOpen(true); }}
                         >
-                          <Check className="w-4 h-4" />
+                          <Eye className="w-4 h-4" />
                         </Button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleDownloadPDF(report.id, report.report_number)}
+                          title="Download PDF"
+                        >
+                          <Download className="w-4 h-4" />
+                        </Button>
+                        {report.qc_inspection && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => window.location.href = `/qc-inspection?inspection=${report.qc_inspection.id}`}
+                            title="View QC Inspection"
+                            className="text-blue-500"
+                          >
+                            <FileText className="w-4 h-4" />
+                          </Button>
+                        )}
+                        {canApproveThis ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleApprove(report.id)}
+                            className="text-emerald-500"
+                            title="Approve"
+                          >
+                            <Check className="w-4 h-4" />
+                          </Button>
+                        ) : canApprove && report.status !== 'approved' && !qcPassed ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            disabled
+                            title="QC must be PASSED before approval"
+                            className="text-muted-foreground opacity-50"
+                          >
+                            <Check className="w-4 h-4" />
+                          </Button>
+                        ) : null}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

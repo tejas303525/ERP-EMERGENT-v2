@@ -136,6 +136,10 @@ export default function GRNPage() {
         product_name: product.name,
         sku: product.sku,
         unit: product.unit,
+        procurement_type: matchingPOLine?.procurement_type || 'Bulk',
+        packaging_item_id: matchingPOLine?.packaging_item_id || '',
+        packaging_qty: matchingPOLine?.packaging_qty || 0,
+        net_weight_kg: matchingPOLine?.net_weight_kg || 0,
         ordered_qty: matchingPOLine ? matchingPOLine.qty : 0,
         received_qty_till_date: matchingPOLine ? (matchingPOLine.received_qty || 0) : 0,
         po_line_id: matchingPOLine ? matchingPOLine.id : '',
@@ -150,6 +154,20 @@ export default function GRNPage() {
     if (!newItem.product_id || receivedQty <= 0) {
       toast.error('Please select product and enter received quantity');
       return;
+    }
+
+    const selectedProduct = products.find(p => p.id === newItem.product_id);
+    const isPackagingMaterial = selectedProduct?.item_type === 'PACK';
+
+    if (newItem.procurement_type === 'Drummed') {
+      if (!newItem.packaging_item_id || (newItem.packaging_qty || 0) <= 0) {
+        toast.error('For drummed receipts, packaging type and package qty are required');
+        return;
+      }
+      if (!isPackagingMaterial && (newItem.net_weight_kg || 0) <= 0) {
+        toast.error('For drummed product receipts, net weight per package is required');
+        return;
+      }
     }
     setForm({
       ...form,

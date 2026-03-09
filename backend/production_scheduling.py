@@ -138,6 +138,11 @@ class SupplierCreate(BaseModel):
     name: str
     email: Optional[str] = None
     phone: Optional[str] = None
+    address: Optional[str] = None
+    emirate: Optional[str] = None
+    country: Optional[str] = None
+    trn: Optional[str] = None  # Tax Registration Number
+    tax_id: Optional[str] = None  # Alternative field name for TRN
     is_active: bool = True
 
 class Supplier(SupplierCreate):

@@ -51,6 +51,7 @@ const menuItems = [
   
   // Additional Pages
   { icon: FileStack, label: 'BOM Management', path: '/bom-management', roles: ['admin', 'production', 'inventory'] },
+  { icon: FlaskConical, label: 'Blend Reports', path: '/blend-reports', roles: ['admin', 'production', 'qc'] },
   { icon: Boxes, label: 'Inventory', path: '/inventory', roles: ['admin', 'inventory', 'production', 'procurement'] },
   { icon: Package, label: 'Stock Management', path: '/stock-management', roles: ['admin', 'inventory'] },
   { icon: Receipt, label: 'GRN', path: '/grn', roles: ['admin', 'security', 'inventory', 'finance'] },

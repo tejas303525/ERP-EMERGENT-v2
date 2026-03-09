@@ -1277,7 +1277,8 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
   }, [imports]);
   const getStatusDisplay = (importRecord) => {
     // If no transport_number, show NOT_BOOKED status
-    if (!importRecord.transport_number && !importRecord.transport_booked) {
+    // Only check transport_number (set when transport is actually booked), not transport_booked flag
+    if (!importRecord.transport_number) {
       return 'NOT_BOOKED';
     }
     return importRecord.status || 'PENDING';
@@ -1285,7 +1286,8 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
 
   // Helper function to check if delivery date is overdue (more than 3 days without booking)
   const isDeliveryDateOverdue = (importRecord) => {
-    const hasTransport = importRecord.transport_number || importRecord.transport_booked;
+    // Only check transport_number (set when transport is actually booked), not transport_booked flag
+    const hasTransport = !!importRecord.transport_number;
     if (hasTransport) return false; // Already booked
     const deliveryDate = importRecord.delivery_date || importRecord.expected_delivery || importRecord.eta;
     if (!deliveryDate) return false;
@@ -1344,7 +1346,8 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
                 const docs = imp.document_checklist || {};
                 const docsComplete = Object.values(docs).filter(Boolean).length;
                 const docsTotal = Object.keys(docs).length || 5;
-                const hasTransport = imp.transport_number || imp.transport_booked;
+                // Only check transport_number (set when transport is actually booked), not transport_booked flag
+                const hasTransport = !!imp.transport_number;
                 const isOverdue = isDeliveryDateOverdue(imp);
                 const deliveryDate = imp.delivery_date || imp.expected_delivery || imp.eta;
                 
@@ -1425,7 +1428,7 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
                           <Eye className="w-4 h-4 mr-1" />
                           View
                         </Button>
-                        {!hasTransport && imp.status !== 'COMPLETED' && (
+                        {(!hasTransport || getStatusDisplay(imp) === 'NOT_BOOKED' || getStatusDisplay(imp) === 'PENDING') && (
                           <Button 
                             size="sm" 
                             onClick={() => onBookTransport(imp)}
@@ -1434,7 +1437,7 @@ const InwardImportTab = ({ imports, onRefresh, onViewDetails, onBookTransport })
                             Book Transport
                           </Button>
                         )}
-                        {hasTransport && (
+                        {hasTransport && getStatusDisplay(imp) !== 'NOT_BOOKED' && getStatusDisplay(imp) !== 'PENDING' && (
                           <Badge className="bg-green-500/20 text-green-400">
                             Transport Booked
                           </Badge>
@@ -1466,8 +1469,7 @@ const TransportBookingModal = ({ bookingType, item, onClose, onBooked }) => {
     notes: '',
     delivery_note_number: '',
     delivery_note_document: null,
-    delivery_order_number: '',
-    delivery_order_document: null
+    number_of_drums: ''
   });
   const [saving, setSaving] = useState(false);
 
@@ -1478,6 +1480,12 @@ const TransportBookingModal = ({ bookingType, item, onClose, onBooked }) => {
     }
     if (!form.vehicle_type) {
       toast.error('Please select vehicle type');
+      return;
+    }
+    
+    // Validate number_of_drums for LOCAL_DISPATCH and EXPORT_CONTAINER
+    if ((bookingType === 'LOCAL_DISPATCH' || bookingType === 'EXPORT_CONTAINER') && !form.number_of_drums) {
+      toast.error('Please enter number of drums');
       return;
     }
     
@@ -1517,43 +1525,6 @@ const TransportBookingModal = ({ bookingType, item, onClose, onBooked }) => {
         } else {
           // Already a string path
           deliveryNoteDocPath = form.delivery_note_document;
-        }
-      }
-
-      // Handle file upload if delivery_order_document exists (for outward transports)
-      let deliveryOrderDocPath = null;
-      if (form.delivery_order_document) {
-        if (form.delivery_order_document instanceof File) {
-          // Upload file using FormData
-          const fileFormData = new FormData();
-          fileFormData.append('file', form.delivery_order_document);
-          try {
-            const uploadResponse = await fetch(`${process.env.REACT_APP_BACKEND_URL || 'http://localhost:8001'}/api/files/upload`, {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${localStorage.getItem('erp_token')}`
-              },
-              body: fileFormData
-            });
-            if (uploadResponse.ok) {
-              const uploadData = await uploadResponse.json();
-              deliveryOrderDocPath = uploadData.path || uploadData.file_id || uploadData.id;
-              if (!deliveryOrderDocPath) {
-                throw new Error('Upload response did not contain file path');
-              }
-            } else {
-              const errorText = await uploadResponse.text();
-              throw new Error(`Upload failed: ${uploadResponse.status} - ${errorText}`);
-            }
-          } catch (error) {
-            console.error('File upload error:', error);
-            toast.error(`Failed to upload delivery order document: ${error.message}`);
-            setLoading(false);
-            return; // Stop the booking process
-          }
-        } else {
-          // Already a string path
-          deliveryOrderDocPath = form.delivery_order_document;
         }
       }
 
@@ -1600,8 +1571,7 @@ const TransportBookingModal = ({ bookingType, item, onClose, onBooked }) => {
           scheduled_date: form.scheduled_date || form.pickup_date,
           notes: form.notes,
           transport_type: bookingType === 'EXPORT_CONTAINER' ? 'CONTAINER' : 'LOCAL',
-          delivery_order_number: form.delivery_order_number,
-          delivery_order_document: deliveryOrderDocPath
+          number_of_drums: form.number_of_drums ? parseInt(form.number_of_drums) : null
         });
       }
       
@@ -1776,6 +1746,23 @@ const TransportBookingModal = ({ bookingType, item, onClose, onBooked }) => {
             </div>
           </div>
 
+          {/* Number of Drums field for LOCAL_DISPATCH and EXPORT_CONTAINER */}
+          {(bookingType === 'LOCAL_DISPATCH' || bookingType === 'EXPORT_CONTAINER') && (
+            <div>
+              <Label>Number of Drums *</Label>
+              <Input
+                type="number"
+                min="1"
+                value={form.number_of_drums}
+                onChange={(e) => setForm({...form, number_of_drums: e.target.value})}
+                placeholder="Enter number of drums"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Number of drums that will be filled or coming in
+              </p>
+            </div>
+          )}
+
           <div>
             <Label>Notes</Label>
             <Textarea
@@ -1813,32 +1800,6 @@ const TransportBookingModal = ({ bookingType, item, onClose, onBooked }) => {
             </div>
           )}
 
-          {/* Delivery Order Section - Only for Outward Transports */}
-          {(bookingType === 'LOCAL_DISPATCH' || bookingType === 'EXPORT_CONTAINER') && (
-            <div className="space-y-4 pt-4 border-t border-border">
-              <h3 className="text-sm font-semibold text-amber-400">Delivery Order Information</h3>
-              <div>
-                <Label>Delivery Order Number</Label>
-                <Input
-                  value={form.delivery_order_number || ''}
-                  onChange={(e) => setForm({...form, delivery_order_number: e.target.value})}
-                  placeholder="Enter delivery order number"
-                />
-              </div>
-              <div>
-                <Label>Delivery Order Document</Label>
-                <Input
-                  type="file"
-                  accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
-                  onChange={(e) => setForm({...form, delivery_order_document: e.target.files[0]})}
-                  className="file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-amber-50 file:text-amber-700 hover:file:bg-amber-100"
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  Upload delivery order document (PDF, images, or documents)
-                </p>
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="flex justify-end gap-2 pt-4 border-t">

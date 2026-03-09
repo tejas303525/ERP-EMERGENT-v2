@@ -192,6 +192,11 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
       newCosts.loaded_weight_mt = newCosts.total_kg / 1000;
     }
     
+    // Handle single product cost per MT change
+    if (field === 'product_cost_per_mt') {
+      // Will be recalculated below
+    }
+    
     // Handle product-specific fields (indexed by item index)
     if (field.startsWith('drum_ctn_') || field.startsWith('kg_per_drum_ctn_')) {
       const itemIdx = field.split('_').pop();
@@ -215,15 +220,37 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
       newCosts.loaded_weight_mt = totalMT;
     }
     
-    // Calculate cost per MT
+    // Export Shipment Charges = Total Cost (A+B) from Section A+B
+    // Auto-calculate from total_cost_usd if not manually set
+    if (field !== 'export_shipment_charges') {
+      newCosts.export_shipment_charges = newCosts.total_cost_usd || 0;
+    }
+    
+    // Calculate cost per MT (export shipment charges per MT)
     if (newCosts.loaded_weight_mt > 0) {
-      newCosts.cost_per_mt = newCosts.total_cost_usd / newCosts.loaded_weight_mt;
+      newCosts.cost_per_mt = (newCosts.export_shipment_charges || 0) / newCosts.loaded_weight_mt;
     } else {
       newCosts.cost_per_mt = 0;
     }
     
-    // Export Shipment Charges = Cost Per MT from Section D
-    newCosts.export_shipment_charges = newCosts.cost_per_mt || 0;
+    // Calculate total product cost (weighted sum of all products)
+    const items = quotation?.items || [];
+    let totalProductCost = 0;
+    if (items.length > 0) {
+      // Multiple products: calculate weighted sum
+      items.forEach((_, idx) => {
+        const productCostPerMT = newCosts[`product_cost_per_mt_${idx}`] !== undefined 
+          ? newCosts[`product_cost_per_mt_${idx}`] 
+          : (idx === 0 ? (newCosts.product_cost_per_mt || newCosts.product_cost || 0) : 0);
+        const weightMT = newCosts[`loaded_weight_mt_${idx}`] || (idx === 0 ? (newCosts.loaded_weight_mt || 0) : 0);
+        totalProductCost += productCostPerMT * weightMT;
+      });
+    } else {
+      // Single product: use legacy field
+      const productCostPerMT = newCosts.product_cost_per_mt || newCosts.product_cost || 0;
+      totalProductCost = productCostPerMT * (newCosts.loaded_weight_mt || 0);
+    }
+    newCosts.product_cost = totalProductCost;
     
     // Calculate total cost (Product Cost + Import Shipment + Export Shipment)
     newCosts.total_cost = (newCosts.product_cost || 0) + (newCosts.import_shipment_charges || 0) + (newCosts.export_shipment_charges || 0);
@@ -314,7 +341,10 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
                       <Input
                         type="number"
                         value={costs[`${charge.field}_rate`] !== undefined ? costs[`${charge.field}_rate`] : charge.defaultRate}
-                        onChange={(e) => handleChange(`${charge.field}_rate`, parseFloat(e.target.value) || charge.defaultRate)}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                          handleChange(`${charge.field}_rate`, isNaN(val) ? charge.defaultRate : val);
+                        }}
                         className="text-right"
                         step="0.01"
                       />
@@ -323,7 +353,10 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
                       <Input
                         type="number"
                         value={costs[`${charge.field}_units`] !== undefined ? costs[`${charge.field}_units`] : charge.defaultUnits}
-                        onChange={(e) => handleChange(`${charge.field}_units`, parseFloat(e.target.value) || charge.defaultUnits)}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                          handleChange(`${charge.field}_units`, isNaN(val) ? charge.defaultUnits : val);
+                        }}
                         className="text-right"
                         step="0.01"
                       />
@@ -342,7 +375,10 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
                       <Input
                         type="number"
                         value={costs[`${charge.field}_rate`] !== undefined ? costs[`${charge.field}_rate`] : charge.defaultRate}
-                        onChange={(e) => handleChange(`${charge.field}_rate`, parseFloat(e.target.value) || charge.defaultRate)}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                          handleChange(`${charge.field}_rate`, isNaN(val) ? charge.defaultRate : val);
+                        }}
                         className="text-right"
                         step="0.01"
                       />
@@ -351,7 +387,10 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
                       <Input
                         type="number"
                         value={costs[`${charge.field}_units`] !== undefined ? costs[`${charge.field}_units`] : 0}
-                        onChange={(e) => handleChange(`${charge.field}_units`, parseFloat(e.target.value) || 0)}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                          handleChange(`${charge.field}_units`, isNaN(val) ? 0 : val);
+                        }}
                         className="text-right"
                         step="0.01"
                       />
@@ -519,6 +558,25 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
                       />
                     </div>
                   </div>
+                  <div className="flex justify-between items-center">
+                    <Label>Product Cost (Cost/MT)</Label>
+                    <Input
+                      type="number"
+                      value={costs[`product_cost_per_mt_${itemIdx}`] !== undefined ? costs[`product_cost_per_mt_${itemIdx}`] : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0)}
+                      onChange={(e) => handleChange(`product_cost_per_mt_${itemIdx}`, parseFloat(e.target.value) || 0)}
+                      className="w-32 text-right"
+                      step="0.01"
+                    />
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <Label>Product Cost Total</Label>
+                    <Input
+                      type="number"
+                      value={((costs[`product_cost_per_mt_${itemIdx}`] !== undefined ? costs[`product_cost_per_mt_${itemIdx}`] : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0)) * (costs[`loaded_weight_mt_${itemIdx}`] || (costs[`total_kg_${itemIdx}`] || (costs[`drum_ctn_${itemIdx}`] !== undefined ? (costs[`drum_ctn_${itemIdx}`] || 0) * (costs[`kg_per_drum_ctn_${itemIdx}`] || 0) : (itemIdx === 0 ? (costs.total_kg || 0) : 0))) / 1000))?.toFixed(2) || '0.00'}
+                      readOnly
+                      className="w-32 text-right bg-muted font-mono"
+                    />
+                  </div>
                 </div>
               ))}
               {/* Overall totals */}
@@ -625,16 +683,47 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
           <CardTitle className="text-sm">Final Costing & Margin Summary</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex justify-between items-center">
-            <Label>Product Cost (Cost/MT)</Label>
-            <Input
-              type="number"
-              value={costs.product_cost || 0}
-              onChange={(e) => handleChange('product_cost', parseFloat(e.target.value) || 0)}
-              className="w-32 text-right"
-              step="0.01"
-            />
-          </div>
+          {quotation?.items && quotation.items.length > 1 ? (
+            <>
+              {/* Per-product breakdown for multiple products */}
+              {quotation.items.map((item, itemIdx) => {
+                const productCostPerMT = costs[`product_cost_per_mt_${itemIdx}`] !== undefined 
+                  ? costs[`product_cost_per_mt_${itemIdx}`] 
+                  : (itemIdx === 0 ? (costs.product_cost_per_mt || costs.product_cost || 0) : 0);
+                const weightMT = costs[`loaded_weight_mt_${itemIdx}`] || (itemIdx === 0 ? (costs.loaded_weight_mt || 0) : 0);
+                const productCostTotal = productCostPerMT * weightMT;
+                return (
+                  <div key={itemIdx} className="border border-border rounded p-2 bg-muted/5">
+                    <div className="text-xs font-semibold mb-1 text-blue-400">{item.product_name}</div>
+                    <div className="flex justify-between items-center text-xs">
+                      <span>Cost/MT: ${productCostPerMT.toFixed(2)} × {weightMT.toFixed(2)} MT</span>
+                      <span className="font-mono">= ${productCostTotal.toFixed(2)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="flex justify-between items-center pt-2 border-t">
+                <Label className="font-semibold">Total Product Cost</Label>
+                <Input
+                  type="number"
+                  value={costs.product_cost?.toFixed(2) || '0.00'}
+                  readOnly
+                  className="w-32 text-right bg-muted font-mono font-semibold"
+                />
+              </div>
+            </>
+          ) : (
+            <div className="flex justify-between items-center">
+              <Label>Product Cost (Cost/MT)</Label>
+              <Input
+                type="number"
+                value={costs.product_cost_per_mt || costs.product_cost || 0}
+                onChange={(e) => handleChange('product_cost_per_mt', parseFloat(e.target.value) || 0)}
+                className="w-32 text-right"
+                step="0.01"
+              />
+            </div>
+          )}
           <div className="flex justify-between items-center">
             <Label>Import Shipment Charges</Label>
             <Input
@@ -649,9 +738,13 @@ export default function Export40ftNonDGCosting({ costing, quotation, onUpdate })
             <Label>Export Shipment Charges</Label>
             <Input
               type="number"
-              value={costs.cost_per_mt?.toFixed(2) || '0.00'}
-              readOnly
-              className="w-32 text-right bg-muted font-mono"
+              value={costs.export_shipment_charges || 0}
+              onChange={(e) => {
+                const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                handleChange('export_shipment_charges', isNaN(val) ? 0 : val);
+              }}
+              className="w-32 text-right"
+              step="0.01"
             />
           </div>
           <div className="flex justify-between items-center pt-2 border-t">

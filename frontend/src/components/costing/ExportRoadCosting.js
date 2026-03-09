@@ -265,7 +265,10 @@ export default function ExportRoadCosting({ costing, quotation, onUpdate }) {
                       <Input
                         type="number"
                         value={costs[`${charge.field}_rate`] || 0}
-                        onChange={(e) => handleChange(`${charge.field}_rate`, parseFloat(e.target.value) || 0)}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                          handleChange(`${charge.field}_rate`, isNaN(val) ? 0 : val);
+                        }}
                         className="text-right"
                         step="0.01"
                       />
@@ -274,7 +277,10 @@ export default function ExportRoadCosting({ costing, quotation, onUpdate }) {
                       <Input
                         type="number"
                         value={costs[`${charge.field}_units`] !== undefined ? costs[`${charge.field}_units`] : charge.defaultUnits}
-                        onChange={(e) => handleChange(`${charge.field}_units`, parseFloat(e.target.value) || charge.defaultUnits)}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                          handleChange(`${charge.field}_units`, isNaN(val) ? charge.defaultUnits : val);
+                        }}
                         className="text-right"
                         step="0.01"
                       />
@@ -293,7 +299,10 @@ export default function ExportRoadCosting({ costing, quotation, onUpdate }) {
                       <Input
                         type="number"
                         value={costs[`${charge.field}_rate`] !== undefined ? costs[`${charge.field}_rate`] : charge.defaultRate}
-                        onChange={(e) => handleChange(`${charge.field}_rate`, parseFloat(e.target.value) || charge.defaultRate)}
+                        onChange={(e) => {
+                          const val = e.target.value === '' ? '' : parseFloat(e.target.value);
+                          handleChange(`${charge.field}_rate`, isNaN(val) ? charge.defaultRate : val);
+                        }}
                         className="text-right"
                         step="0.01"
                       />

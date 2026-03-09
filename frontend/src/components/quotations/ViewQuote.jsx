@@ -64,17 +64,23 @@ const ViewQuote = () => {
   const navigate = useNavigate();
   const [quotation, setQuotation] = useState(null);
   const [contactForDispatch, setContactForDispatch] = useState({
-    name: "Vidhesh",
-    phone: "+971 52 299 7006",
-    email: "vidhesh@asia-petrochem.com"
+    name: "",
+    phone: "",
+    email: "",
+    address: ""
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     fetchQuotation();
-    fetchContactForDispatch();
   }, [id]);
+
+  useEffect(() => {
+    if (quotation) {
+      fetchContactForDispatch();
+    }
+  }, [quotation]);
 
   const fetchQuotation = async () => {
     try {
@@ -91,7 +97,19 @@ const ViewQuote = () => {
     try {
       const response = await api.get('/settings/all');
       if (response.data?.contact_for_dispatch) {
-        setContactForDispatch(response.data.contact_for_dispatch);
+        // Check if it's the new format with local/export
+        if (response.data.contact_for_dispatch.local && response.data.contact_for_dispatch.export) {
+          // Use the appropriate contact based on quotation order type
+          const orderType = quotation?.order_type?.toLowerCase();
+          if (orderType === 'export') {
+            setContactForDispatch(response.data.contact_for_dispatch.export);
+          } else {
+            setContactForDispatch(response.data.contact_for_dispatch.local);
+          }
+        } else {
+          // Legacy format - single contact
+          setContactForDispatch(response.data.contact_for_dispatch);
+        }
       }
     } catch (err) {
       console.error('Failed to load contact for dispatch:', err);

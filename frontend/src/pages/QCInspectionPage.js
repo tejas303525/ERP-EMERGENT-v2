@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { 
   ClipboardCheck, CheckCircle, XCircle, FileText, Package, 
   RefreshCw, Scale, ArrowDownToLine, ArrowUpFromLine, Eye,
-  FileCheck, AlertTriangle, Truck, Download
+  FileCheck, AlertTriangle, Truck, Download, Factory
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../lib/api';
@@ -65,13 +65,16 @@ const QCInspectionPage = () => {
     setLoading(true);
     try {
       const [pendingRes, completedRes, inwardRes, outwardRes, jobsRes, posRes] = await Promise.all([
-        api.get('/qc/inspections', { params: { status: 'PENDING' } }),
-        api.get('/qc/inspections'),
+        api.get('/qc/inspections', { params: { status: 'PENDING,IN_PROGRESS' } }),
+        api.get('/qc/inspections/completed'),
         api.get('/security/inward'),
         api.get('/security/outward'),
         api.get('/job-orders').catch(() => ({ data: [] })), // Fetch job orders for product info
         api.get('/purchase-orders').catch(() => ({ data: [] })) // Fetch POs for product info
       ]);
+      
+      // Also fetch manufacturing inspections separately to ensure they're included
+      const manufacturingRes = await api.get('/qc/inspections', { params: { ref_type: 'MANUFACTURING' } }).catch(() => ({ data: [] }));
       
       const inwardTransportsData = inwardRes.data || [];
       const outwardTransportsData = outwardRes.data || [];
@@ -131,6 +134,20 @@ const QCInspectionPage = () => {
       
       // Enrich inspections with transport data
       const enrichInspection = (inspection) => {
+        // For MANUFACTURING type, enrich with blend report data instead of transport
+        if (inspection.ref_type === 'MANUFACTURING') {
+          // Get blend report reference
+          const blendReportNumber = inspection.ref_number || '-';
+          return {
+            ...inspection,
+            blend_report_number: blendReportNumber,
+            blend_report_id: inspection.blend_report_id,
+            // Manufacturing inspections don't have transport data
+            product_name: inspection.product_name || '-',
+            batch_number: inspection.batch_number || '-'
+          };
+        }
+        
         // Try multiple methods to find the related transport
         let transport = null;
         
@@ -272,6 +289,7 @@ const QCInspectionPage = () => {
         return inspection;
       };
       
+
       const enrichedPending = (pendingRes.data || []).map(enrichInspection);
       const enrichedCompleted = (completedRes.data || []).map(enrichInspection);
       
@@ -457,8 +475,10 @@ const PendingInspectionsTab = ({ inspections, onOpenInspection, onRefresh, getDe
             <thead className="bg-muted/30">
               <tr>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Type</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Reference</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Expected Delivery Date</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Product</th>
+                <th className="p-3 text-left text-xs font-medium text-muted-foreground">Batch Number</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Seal Number</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Container Number</th>
                 <th className="p-3 text-left text-xs font-medium text-muted-foreground">Vehicle Type</th>
@@ -472,14 +492,31 @@ const PendingInspectionsTab = ({ inspections, onOpenInspection, onRefresh, getDe
               {inspections.map((inspection) => (
                 <tr key={inspection.id} className="border-b border-border/50 hover:bg-muted/10">
                   <td className="p-3">
-                    <Badge className={inspection.ref_type === 'INWARD' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'}>
+                    <Badge className={
+                      inspection.ref_type === 'INWARD' ? 'bg-blue-500/20 text-blue-400' : 
+                      inspection.ref_type === 'MANUFACTURING' ? 'bg-purple-500/20 text-purple-400' :
+                      'bg-amber-500/20 text-amber-400'
+                    }>
                       {inspection.ref_type === 'INWARD' ? (
                         <ArrowDownToLine className="w-3 h-3 mr-1" />
+                      ) : inspection.ref_type === 'MANUFACTURING' ? (
+                        <Factory className="w-3 h-3 mr-1" />
                       ) : (
                         <ArrowUpFromLine className="w-3 h-3 mr-1" />
                       )}
                       {inspection.ref_type}
                     </Badge>
+                  </td>
+                  <td className="p-3">
+                    {inspection.ref_type === 'MANUFACTURING' ? (
+                      <span className="font-mono text-sm text-purple-400">
+                        {inspection.blend_report_number || inspection.ref_number || '-'}
+                      </span>
+                    ) : (
+                      <span className="font-mono text-sm">
+                        {inspection.ref_number || inspection.po_number || inspection.job_number || '-'}
+                      </span>
+                    )}
                   </td>
                   <td className="p-3">
                     {inspection.expected_delivery_date ? (
@@ -495,6 +532,9 @@ const PendingInspectionsTab = ({ inspections, onOpenInspection, onRefresh, getDe
                       <Package className="w-3 h-3 text-muted-foreground" />
                       <span className="text-sm">{inspection.product_name || '-'}</span>
                     </div>
+                  </td>
+                  <td className="p-3 font-mono text-sm">
+                    {inspection.batch_number || '-'}
                   </td>
                   <td className="p-3">
                     {inspection.seal_number || inspection.security_checklist?.seal_number || '-'}
@@ -1171,3 +1211,4 @@ const DeliveryDocsTab = ({ inwardTransports, outwardTransports, onRefresh, getDe
 };
 
 export default QCInspectionPage;
+
